@@ -1,6 +1,8 @@
 """
 Croc Transfer — Python backend API.
 Exposed to the Svelte frontend via window.pywebview.api.
+
+Requires Python 3.14+.
 """
 
 import glob as _glob
@@ -23,8 +25,7 @@ from backend.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
-# Avoid console windows popping up on Windows
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _file_size_str(size_bytes: int) -> str:
@@ -61,17 +62,15 @@ class CrocAPI:
     """pywebview js_api — each public method becomes window.pywebview.api.<name>()
 
     IMPORTANT: All non-API attributes MUST start with _ to prevent pywebview
-    from recursively enumerating them (which causes infinite recursion on
-    WinForms .NET AccessibilityObject properties).
+    from recursively enumerating them (WinForms AccessibilityObject issue).
     """
 
     def __init__(self) -> None:
         self._window: webview.Window | None = None
-        self._lock = threading.Lock()  # Protects _process and _transfer_active
+        self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._transfer_active = False
         self._croc_path = self._find_croc()
-        # LAN direct transfer
         self._lan_peer: LANPeer | None = None
         self._lan_peer_lock = threading.Lock()
 
@@ -82,18 +81,13 @@ class CrocAPI:
 
     @staticmethod
     def _find_croc() -> str | None:
-
-        found = shutil.which("croc")
-        if found:
+        if found := shutil.which("croc"):
             return found
 
-        # Build candidate paths from multiple env vars (some may be missing
-        # in PyInstaller-packaged context)
         local_app = os.environ.get("LOCALAPPDATA", "")
         user_profile = os.environ.get("USERPROFILE", "")
         candidates: list[str] = []
 
-        # WinGet actual package install (direct binary — most reliable)
         if local_app:
             candidates.append(
                 os.path.join(
@@ -119,7 +113,6 @@ class CrocAPI:
                 )
             )
 
-        # WinGet Links symlink (app execution alias — may not resolve via isfile)
         if local_app:
             candidates.append(
                 os.path.join(local_app, "Microsoft", "WinGet", "Links", "croc.exe")
@@ -137,27 +130,24 @@ class CrocAPI:
                 )
             )
 
-        # Scoop
         if user_profile:
             candidates.append(os.path.join(user_profile, "scoop", "shims", "croc.exe"))
 
-        # Chocolatey
-        candidates.append(r"C:\ProgramData\chocolatey\bin\croc.exe")
-
-        # Manual install in Program Files
-        candidates.append(r"C:\Program Files\croc\croc.exe")
-        candidates.append(r"C:\Program Files (x86)\croc\croc.exe")
-
-        # Linux/macOS
-        candidates.append(os.path.expanduser("~/.local/bin/croc"))
-        candidates.append("/usr/local/bin/croc")
+        candidates.extend(
+            [
+                r"C:\ProgramData\chocolatey\bin\croc.exe",
+                r"C:\Program Files\croc\croc.exe",
+                r"C:\Program Files (x86)\croc\croc.exe",
+                os.path.expanduser("~/.local/bin/croc"),
+                "/usr/local/bin/croc",
+            ]
+        )
 
         for p in candidates:
             if p and os.path.isfile(p):
                 logger.info("Found croc at: %s", p)
                 return p
 
-        # Glob fallback: search WinGet Packages for any croc package variant
         for base in [
             local_app,
             os.path.join(user_profile, "AppData", "Local") if user_profile else "",
@@ -167,13 +157,12 @@ class CrocAPI:
             pattern = os.path.join(
                 base, "Microsoft", "WinGet", "Packages", "schollz.croc*", "croc.exe"
             )
-            matches = _glob.glob(pattern)
-            if matches:
+            if matches := _glob.glob(pattern):
                 logger.info("Found croc via glob: %s", matches[0])
                 return matches[0]
 
         logger.warning(
-            "croc not found. Searched PATH and %d candidate locations. "
+            "croc not found. Searched PATH and %d candidates. "
             "LOCALAPPDATA=%r, USERPROFILE=%r",
             len(candidates),
             local_app,
@@ -187,7 +176,6 @@ class CrocAPI:
     def _get_local_ip() -> str:
         """Get the LAN IP address of this machine."""
         try:
-            # Connect to a public address to determine which interface is used
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(("8.8.8.8", 80))
                 return s.getsockname()[0]
@@ -230,7 +218,7 @@ class CrocAPI:
         return check_for_updates()
 
     def download_update(self, url: str) -> None:
-        """Download update .exe in background, report progress to frontend."""
+        """Download update .exe in background."""
 
         def _run():
             def on_progress(pct):
@@ -241,7 +229,10 @@ class CrocAPI:
                 if path:
                     self._js_event(
                         "update_ready",
-                        {"path": path, "file_name": os.path.basename(path)},
+                        {
+                            "path": path,
+                            "file_name": os.path.basename(path),
+                        },
                     )
                 else:
                     self._js_log(
@@ -253,19 +244,10 @@ class CrocAPI:
                 self._js_log("error", f"Download failed: {e}")
                 self._js_event("update_failed", {})
 
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(target=_run, name="update-download", daemon=True).start()
 
     def launch_update(self, path: str) -> None:
-        """Replace the current exe with the downloaded update and restart.
-
-        Uses a PowerShell script that:
-        1. Waits until the exe file is unlocked (not just PID — PyInstaller
-           bootloader parent holds the lock longer than the child)
-        2. Copies the new exe over the original
-        3. Verifies file size
-        4. Launches the updated exe
-        5. Writes a debug log for troubleshooting
-        """
+        """Replace the current exe with the downloaded update and restart."""
         if not os.path.isfile(path):
             return
 
@@ -273,10 +255,8 @@ class CrocAPI:
         current_exe = sys.executable
         log_path = os.path.join(tempfile.gettempdir(), "crude_update_log.txt")
 
-        # Only do in-place replacement for PyInstaller-bundled exe
         if getattr(sys, "frozen", False) and current_exe.endswith(".exe"):
             ps1 = os.path.join(tempfile.gettempdir(), "crude_update.ps1")
-            # PowerShell script — waits for file to be unlocked, not PID
             script = f"""
 $src = '{path.replace("'", "''")}'
 $dst = '{current_exe.replace("'", "''")}'
@@ -291,8 +271,6 @@ Log "Update script started"
 Log "Source: $src ($((Get-Item $src).Length) bytes)"
 Log "Target: $dst"
 
-# Wait until the exe is unlocked (up to 30 seconds)
-# PyInstaller onefile: parent bootloader holds the lock after child exits
 for ($w = 0; $w -lt 30; $w++) {{
     try {{
         $fs = [System.IO.File]::Open($dst, 'Open', 'ReadWrite', 'None')
@@ -305,7 +283,6 @@ for ($w = 0; $w -lt 30; $w++) {{
     }}
 }}
 
-# Retry copy up to 10 times
 $copied = $false
 for ($i = 0; $i -lt 10; $i++) {{
     try {{
@@ -331,7 +308,6 @@ if ($copied) {{
     Start-Process -FilePath $src
 }}
 
-# Cleanup
 Start-Sleep -Seconds 3
 Remove-Item -Path $src -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
@@ -352,10 +328,8 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                 creationflags=_NO_WINDOW,
             )
         else:
-            # Dev mode fallback — just launch the new exe
             os.startfile(path)
 
-        # Clean up LAN peer before exiting
         self._stop_lan_internal()
 
         if self._window:
@@ -363,7 +337,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         sys.exit(0)
 
     def install_croc(self) -> None:
-        """Install croc via winget in background, report progress to frontend."""
+        """Install croc via winget in background."""
 
         def _run():
             proc = None
@@ -387,8 +361,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                     creationflags=_NO_WINDOW,
                 )
                 for line in proc.stdout:
-                    line = line.rstrip()
-                    if line:
+                    if line := line.rstrip():
                         self._js_log("info", line)
                 proc.wait(timeout=300)
                 if proc.returncode == 0:
@@ -411,7 +384,8 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             except FileNotFoundError:
                 self._js_log(
                     "error",
-                    "winget not found. Install croc manually: https://github.com/schollz/croc#install",
+                    "winget not found. Install croc manually: "
+                    "https://github.com/schollz/croc#install",
                 )
                 self._js_event(
                     "install_croc_done", {"success": False, "no_winget": True}
@@ -422,7 +396,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             finally:
                 _safe_close_process(proc)
 
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(target=_run, name="croc-install", daemon=True).start()
 
     def open_url(self, url: str) -> None:
         """Open a URL in the default browser."""
@@ -432,16 +406,16 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         """Open a folder in the system file explorer."""
         path = os.path.normpath(path)
         if os.path.isfile(path):
-            # If it's a file, open its parent folder
             path = os.path.dirname(path)
         if not os.path.isdir(path):
             return False
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
+        match sys.platform:
+            case "win32":
+                os.startfile(path)
+            case "darwin":
+                subprocess.Popen(["open", path])
+            case _:
+                subprocess.Popen(["xdg-open", path])
         return True
 
     def copy_to_clipboard(self, text: str) -> None:
@@ -478,16 +452,14 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
 
     def get_file_info(self, path: str) -> dict | None:
         """Return file/folder name, size, type for display."""
-        # Normalize and validate path — reject path traversal
         path = os.path.normpath(path)
         if not os.path.exists(path):
             return None
         name = os.path.basename(path) or path
-        is_dir = os.path.isdir(path)
-        if is_dir:
+        if os.path.isdir(path):
             total = 0
             count = 0
-            for root, dirs, files in os.walk(path):
+            for root, _dirs, files in os.walk(path):
                 for f in files:
                     try:
                         total += os.path.getsize(os.path.join(root, f))
@@ -500,10 +472,9 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                 "type": "folder",
                 "count": count,
             }
-        else:
-            size = os.path.getsize(path)
-            ext = os.path.splitext(name)[1].lower()
-            return {"name": name, "size": _file_size_str(size), "type": ext or "file"}
+        size = os.path.getsize(path)
+        ext = os.path.splitext(name)[1].lower()
+        return {"name": name, "size": _file_size_str(size), "type": ext or "file"}
 
     def send_files(self, paths: list, options: dict | None = None) -> None:
         """Send one or more files/folders with optional croc flags."""
@@ -520,7 +491,10 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         names = [os.path.basename(p) for p in valid]
         self._js_event("transfer_start", {"mode": "send", "files": names})
         threading.Thread(
-            target=self._run_send, args=(valid, options or {}), daemon=True
+            target=self._run_send,
+            args=(valid, options or {}),
+            name="croc-send",
+            daemon=True,
         ).start()
 
     def send_text(self, text: str, options: dict | None = None) -> None:
@@ -536,7 +510,10 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             self._transfer_active = True
         self._js_event("transfer_start", {"mode": "send", "files": ["(text)"]})
         threading.Thread(
-            target=self._run_send_text, args=(text, options or {}), daemon=True
+            target=self._run_send_text,
+            args=(text, options or {}),
+            name="croc-send-text",
+            daemon=True,
         ).start()
 
     def receive_file(self, code: str, options: dict | None = None) -> None:
@@ -552,7 +529,10 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             self._transfer_active = True
         self._js_event("transfer_start", {"mode": "receive", "code": code})
         threading.Thread(
-            target=self._run_receive, args=(code, options or {}), daemon=True
+            target=self._run_receive,
+            args=(code, options or {}),
+            name="croc-receive",
+            daemon=True,
         ).start()
 
     def stop_transfer(self) -> bool:
@@ -572,20 +552,17 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
     # ── LAN Direct Transfer ──
 
     def start_lan(self, code: str, out_folder: str = "") -> None:
-        """Start LAN direct transfer for a contact code.
-        Automatically discovers peers on the same network with the same code."""
+        """Start LAN direct transfer for a contact code."""
         code = (code or "").strip()
         if not code:
             return
         self._stop_lan_internal()
 
-        def on_event(event: str, data: dict) -> None:
-            self._js_event(event, data)
-
-        def on_log(level: str, msg: str) -> None:
-            self._js_log(level, msg)
-
-        peer = LANPeer(code, on_event, on_log)
+        peer = LANPeer(
+            code,
+            on_event=lambda ev, d: self._js_event(ev, d),
+            on_log=lambda lv, m: self._js_log(lv, m),
+        )
         with self._lan_peer_lock:
             self._lan_peer = peer
         peer.start(out_folder=out_folder)
@@ -602,7 +579,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             peer.stop()
 
     def lan_send_text(self, text: str) -> bool:
-        """Send text instantly over LAN. Returns True if sent, False to fall back to croc."""
+        """Send text instantly over LAN."""
         with self._lan_peer_lock:
             peer = self._lan_peer
         if peer and peer.connected:
@@ -610,18 +587,23 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         return False
 
     def lan_send_files(self, paths: list, out_folder: str = "") -> bool:
-        """Send files instantly over LAN. Returns True if sent, False to fall back to croc."""
+        """Send files instantly over LAN."""
         with self._lan_peer_lock:
             peer = self._lan_peer
         if peer and peer.connected:
-            logger.info("LAN send_files: %d paths: %s", len(paths), paths)
+            display_names = [os.path.basename(p) for p in paths]
+            logger.info("LAN send_files: %s", display_names)
+            self._js_log("info", f"LAN direct: sending {', '.join(display_names)}")
             success = peer.send_files(paths)
             if success:
-                names = [os.path.basename(p) for p in paths]
-                self._js_log("success", f"LAN direct: sent {', '.join(names)}")
+                self._js_log("success", f"LAN direct: sent {', '.join(display_names)}")
                 self._js_event(
                     "transfer_done",
-                    {"success": True, "files": names, "mode": "send"},
+                    {
+                        "success": True,
+                        "files": display_names,
+                        "mode": "send",
+                    },
                 )
             else:
                 self._js_log("error", "LAN direct: file send failed")
@@ -640,12 +622,9 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             }
         return {"active": False, "connected": False, "peer_ip": None}
 
-    # ── Internal: build CLI args from options ──
+    # ── Internal: build CLI args ──
 
     def _build_global_args(self, opts: dict) -> list[str]:
-        """Build global croc flags from options dict.
-        Note: 'sourceFolder' is a UI-only key, ignored here.
-        """
         args = [self._croc_path, "--yes", "--ignore-stdin"]
 
         if opts.get("noCompress"):
@@ -666,7 +645,6 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         return args
 
     def _build_send_args(self, opts: dict) -> list[str]:
-        """Build send subcommand flags from options dict."""
         args = ["send"]
 
         if opts.get("code"):
@@ -720,6 +698,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             )
             with self._lock:
                 self._process = proc
+            last_sending_line = ""
             for line in proc.stdout:
                 line = line.rstrip()
                 if not line:
@@ -727,7 +706,16 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                 if "Code is:" in line:
                     code = line.split("Code is:")[-1].strip()
                     self._js_event("code_ready", {"code": code})
+                # Suppress noisy incremental "Sending N files" lines from croc
+                if line.startswith("Sending ") and "files" in line:
+                    last_sending_line = line
+                    continue
+                if last_sending_line:
+                    self._js_log("info", last_sending_line)
+                    last_sending_line = ""
                 self._js_log("info", line)
+            if last_sending_line:
+                self._js_log("info", last_sending_line)
             proc.wait(timeout=3600)
             success = proc.returncode == 0
             self._js_event(
@@ -807,10 +795,8 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         received_files: list[str] = []
         try:
             cmd = self._build_global_args(opts)
-
             if opts.get("outFolder"):
                 cmd += ["--out", opts["outFolder"]]
-
             cmd.append(code)
             self._log_cmd(cmd)
             proc = subprocess.Popen(
@@ -828,9 +814,6 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                 line = line.rstrip()
                 if not line:
                     continue
-                # Parse file names from croc output like:
-                # "Receiving 'filename.txt' (1.2 MB)"
-                # or progress lines: "filename.txt 100% |████| (1.2/1.2 MB)"
                 if line.startswith("Receiving '") and "'" in line[11:]:
                     fname = line[11 : line.index("'", 11)]
                     if fname and fname not in received_files:

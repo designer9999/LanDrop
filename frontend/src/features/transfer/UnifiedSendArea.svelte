@@ -158,7 +158,7 @@
                     <div class="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all select-text">
                       {msg.text}
                     </div>
-                    <div class="flex items-center gap-1 mt-0.5 justify-end">
+                    <div class="flex items-center gap-1 mt-0.5 justify-end msg-footer">
                       {#if copiedMsgId === msg.id}
                         <span class="text-primary msg-check"><Icon name="check" size={10} /></span>
                         <span class="text-[10px] text-primary font-medium">Copied</span>
@@ -278,6 +278,10 @@
   @keyframes msg-in {
     from { opacity: 0; transform: translateY(4px); }
     to   { opacity: 1; transform: translateY(0); }
+  }
+  .msg-footer {
+    height: 1rem;
+    min-height: 1rem;
   }
   .msg-scroll {
     scrollbar-width: thin;
