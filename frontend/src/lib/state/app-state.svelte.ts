@@ -166,6 +166,10 @@ class AppState {
   // Network info
   localIp = $state<string>("...");
 
+  // LAN direct transfer
+  lanConnected = $state(false);
+  lanPeerIp = $state<string | null>(null);
+
   // Logs, activity & messages
   logs = $state<LogEntry[]>([]);
   activity = $state<ActivityEntry[]>([]);

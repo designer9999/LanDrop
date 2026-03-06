@@ -141,3 +141,31 @@ export async function startAutoReceive(code: string, options?: ReceiveOptions): 
 export async function stopAutoReceive(): Promise<void> {
   await api()?.stop_auto_receive();
 }
+
+// ── LAN Direct Transfer ──
+
+export interface LANStatus {
+  active: boolean;
+  connected: boolean;
+  peer_ip: string | null;
+}
+
+export async function startLAN(code: string, outFolder?: string): Promise<void> {
+  await api()?.start_lan(code, outFolder ?? "");
+}
+
+export async function stopLAN(): Promise<void> {
+  await api()?.stop_lan();
+}
+
+export async function lanSendText(text: string): Promise<boolean> {
+  return (await api()?.lan_send_text(text)) ?? false;
+}
+
+export async function lanSendFiles(paths: string[]): Promise<boolean> {
+  return (await api()?.lan_send_files(paths)) ?? false;
+}
+
+export async function getLANStatus(): Promise<LANStatus> {
+  return (await api()?.lan_status()) ?? { active: false, connected: false, peer_ip: null };
+}

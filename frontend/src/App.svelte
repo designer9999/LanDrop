@@ -8,7 +8,7 @@
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { getStatus, stopTransfer, checkUpdate, downloadUpdate, launchUpdate, installCroc, startAutoReceive, stopAutoReceive, sendFiles, sendText } from "$lib/api/bridge";
+  import { getStatus, stopTransfer, checkUpdate, downloadUpdate, launchUpdate, installCroc, startAutoReceive, stopAutoReceive, sendFiles, sendText, startLAN, stopLAN, lanSendText, lanSendFiles } from "$lib/api/bridge";
   import Icon from "$lib/ui/Icon.svelte";
   import IconButton from "$lib/ui/IconButton.svelte";
   import Button from "$lib/ui/Button.svelte";
@@ -54,6 +54,19 @@
 
   $effect(() => {
     applyThemeToDOM(theme.tokens);
+  });
+
+  // LAN direct: start/stop based on active contact
+  $effect(() => {
+    const contact = app.activeContact;
+    if (contact && app.crocOk) {
+      const outFolder = app.effectiveReceiveOptions.outFolder ?? "";
+      startLAN(contact.code, outFolder);
+    } else {
+      stopLAN();
+      app.lanConnected = false;
+      app.lanPeerIp = null;
+    }
   });
 
   // Auto-receive: start/stop based on active contact's autoReceive setting
@@ -221,6 +234,56 @@
           app.autoReceiveContactId = null;
           break;
 
+        case "lan_connected":
+          app.lanConnected = true;
+          app.lanPeerIp = data.peer_ip;
+          break;
+
+        case "lan_disconnected":
+          app.lanConnected = false;
+          app.lanPeerIp = null;
+          break;
+
+        case "lan_text_received": {
+          const lanContact = app.activeContact;
+          if (lanContact) {
+            app.addMessage({
+              contactId: lanContact.id,
+              direction: "received",
+              text: data.text,
+            });
+            app.addActivity({
+              contactId: lanContact.id,
+              direction: "received",
+              type: "text",
+              items: [],
+              success: true,
+            });
+          }
+          showSnackbar("Message received!");
+          break;
+        }
+
+        case "lan_files_received": {
+          const lanFileContact = app.activeContact;
+          const lanFiles: string[] = data.files ?? [];
+          if (lanFileContact) {
+            app.addActivity({
+              contactId: lanFileContact.id,
+              direction: "received",
+              type: "files",
+              items: lanFiles,
+              success: true,
+              outFolder: app.effectiveReceiveOptions.outFolder,
+            });
+          }
+          const lanSummary = lanFiles.length > 0
+            ? `Received ${lanFiles.join(", ")}`
+            : "Files received!";
+          showSnackbar(lanSummary);
+          break;
+        }
+
         case "install_croc_start":
           app.crocInstalling = true;
           break;
@@ -273,20 +336,60 @@
 
   async function handleSendFiles() {
     if (!app.hasFiles || app.transferActive) return;
-    const opts = app.effectiveSendOptions;
     const contact = app.activeContact;
     if (contact) app.touchContact(contact.id);
+
+    // Try LAN direct first — instant transfer
+    if (app.lanConnected) {
+      const sent = await lanSendFiles(app.filePaths);
+      if (sent) {
+        if (contact) {
+          app.addActivity({
+            contactId: contact.id,
+            direction: "sent",
+            type: "files",
+            items: app.files.map(f => f.info?.name ?? f.path.split(/[\\/]/).pop() ?? "file"),
+            success: true,
+          });
+        }
+        app.clearFiles();
+        app.sendTextContent = "";
+        return;
+      }
+    }
+
+    // Fall back to croc
+    const opts = app.effectiveSendOptions;
     await sendFiles(app.filePaths, opts);
   }
 
   async function handleSendText() {
     if (!app.sendTextContent.trim() || app.transferActive) return;
-    const opts = app.effectiveSendOptions;
     const contact = app.activeContact;
     if (contact) app.touchContact(contact.id);
     const textToSend = app.sendTextContent.trim();
     if (contact) app.addMessage({ contactId: contact.id, direction: "sent", text: textToSend });
     app.sendTextContent = "";
+
+    // Try LAN direct first — instant delivery
+    if (app.lanConnected) {
+      const sent = await lanSendText(textToSend);
+      if (sent) {
+        if (contact) {
+          app.addActivity({
+            contactId: contact.id,
+            direction: "sent",
+            type: "text",
+            items: [],
+            success: true,
+          });
+        }
+        return;
+      }
+    }
+
+    // Fall back to croc
+    const opts = app.effectiveSendOptions;
     await sendText(textToSend, opts);
   }
 
@@ -451,6 +554,12 @@
         ? app.transferMode === "send" ? "Sending..." : "Receiving..."
         : app.crocOk ? "Ready" : "croc not found"}
     </span>
+    {#if app.lanConnected}
+      <span class="text-primary flex items-center gap-1">
+        <Icon name="bolt" size={12} />
+        LAN direct
+      </span>
+    {/if}
     {#if app.autoReceiveActive}
       <span class="text-tertiary flex items-center gap-1">
         <Icon name="hearing" size={12} />

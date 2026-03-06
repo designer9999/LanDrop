@@ -18,6 +18,7 @@ import webbrowser
 
 import webview
 
+from backend.lan_server import LANPeer
 from backend.updater import check_for_updates, download_update
 from backend.version import APP_VERSION
 
@@ -81,6 +82,9 @@ class CrocAPI:
         # Local relay server
         self._relay_process: subprocess.Popen | None = None
         self._relay_port = 9009
+        # LAN direct transfer
+        self._lan_peer: LANPeer | None = None
+        self._lan_peer_lock = threading.Lock()
 
     def set_window(self, window: webview.Window) -> None:
         self._window = window
@@ -848,6 +852,73 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             # Back off: short wait normally, longer after many silent failures
             wait = min(5 + consecutive_quiet * 2, 30)
             time.sleep(wait)
+
+    # ── LAN Direct Transfer ──
+
+    def start_lan(self, code: str, out_folder: str = "") -> None:
+        """Start LAN direct transfer for a contact code.
+        Automatically discovers peers on the same network with the same code."""
+        code = (code or "").strip()
+        if not code:
+            return
+        self._stop_lan_internal()
+
+        def on_event(event: str, data: dict) -> None:
+            self._js_event(event, data)
+
+        def on_log(level: str, msg: str) -> None:
+            self._js_log(level, msg)
+
+        peer = LANPeer(code, on_event, on_log)
+        with self._lan_peer_lock:
+            self._lan_peer = peer
+        peer.start(out_folder=out_folder)
+
+    def stop_lan(self) -> None:
+        """Stop LAN direct transfer."""
+        self._stop_lan_internal()
+
+    def _stop_lan_internal(self) -> None:
+        with self._lan_peer_lock:
+            peer = self._lan_peer
+            self._lan_peer = None
+        if peer:
+            peer.stop()
+
+    def lan_send_text(self, text: str) -> bool:
+        """Send text instantly over LAN. Returns True if sent, False to fall back to croc."""
+        with self._lan_peer_lock:
+            peer = self._lan_peer
+        if peer and peer.connected:
+            return peer.send_text(text)
+        return False
+
+    def lan_send_files(self, paths: list, out_folder: str = "") -> bool:
+        """Send files instantly over LAN. Returns True if sent, False to fall back to croc."""
+        with self._lan_peer_lock:
+            peer = self._lan_peer
+        if peer and peer.connected:
+            success = peer.send_files(paths)
+            if success:
+                names = [os.path.basename(p) for p in paths]
+                self._js_event(
+                    "transfer_done",
+                    {"success": True, "files": names, "mode": "send"},
+                )
+            return success
+        return False
+
+    def lan_status(self) -> dict:
+        """Get LAN direct transfer status."""
+        with self._lan_peer_lock:
+            peer = self._lan_peer
+        if peer:
+            return {
+                "active": True,
+                "connected": peer.connected,
+                "peer_ip": peer.peer_ip,
+            }
+        return {"active": False, "connected": False, "peer_ip": None}
 
     # ── Internal: build CLI args from options ──
 
