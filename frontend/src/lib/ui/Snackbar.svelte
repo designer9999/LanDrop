@@ -46,17 +46,29 @@
 
 <style>
   .snackbar-enter {
-    animation: snackbar-in var(--md-dur-short4) var(--md-easing-emphasized-decel) both;
+    animation:
+      snackbar-slide-in var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both,
+      snackbar-fade-in var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects) both;
   }
   .snackbar-exit {
-    animation: snackbar-out var(--md-dur-short3) var(--md-easing-emphasized-accel) forwards;
+    animation:
+      snackbar-slide-out var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) forwards,
+      snackbar-fade-out var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects) forwards;
   }
-  @keyframes snackbar-in {
-    from { transform: translateX(-50%) translateY(100%) scaleY(0.8); opacity: 0; }
-    to   { transform: translateX(-50%) translateY(0) scaleY(1); opacity: 1; }
+  @keyframes snackbar-slide-in {
+    from { transform: translateX(-50%) translateY(100%); }
+    to   { transform: translateX(-50%) translateY(0); }
   }
-  @keyframes snackbar-out {
-    from { transform: translateX(-50%) translateY(0); opacity: 1; }
-    to   { transform: translateX(-50%) translateY(100%); opacity: 0; }
+  @keyframes snackbar-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes snackbar-slide-out {
+    from { transform: translateX(-50%) translateY(0); }
+    to   { transform: translateX(-50%) translateY(100%); }
+  }
+  @keyframes snackbar-fade-out {
+    from { opacity: 1; }
+    to   { opacity: 0; }
   }
 </style>

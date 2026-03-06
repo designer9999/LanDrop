@@ -242,29 +242,34 @@
     margin-right: 1.5rem;
   }
   .msg-bubble {
-    transition:
-      background-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
-      transform var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    position: relative;
+    overflow: hidden;
+    transition: background-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .msg-bubble:hover {
-    filter: brightness(1.1);
+  /* M3 state layer: 8% hover, 10% press */
+  .msg-bubble::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--md-sys-color-on-surface);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .msg-bubble:active {
-    transform: scale(0.97);
-  }
+  .msg-bubble:hover::after { opacity: 0.08; }
+  .msg-bubble:active::after { opacity: 0.1; }
   .msg-copied {
-    animation: msg-flash 400ms ease-out;
+    animation: msg-flash var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   @keyframes msg-flash {
-    0% { transform: scale(0.97); }
-    40% { transform: scale(1.02); filter: brightness(1.3); }
-    100% { transform: scale(1); filter: brightness(1); }
+    from { opacity: 0.7; }
+    to   { opacity: 1; }
   }
   .msg-check {
-    animation: check-pop 300ms var(--md-spring-fast-spatial) both;
+    animation: check-pop var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
   }
   @keyframes check-pop {
-    from { transform: scale(0); opacity: 0; }
+    from { transform: scale(0.8); opacity: 0; }
     to   { transform: scale(1); opacity: 1; }
   }
   .msg-row {

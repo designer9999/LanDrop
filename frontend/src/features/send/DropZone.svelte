@@ -90,7 +90,7 @@
   }
   .drop-idle:hover {
     border-color: var(--md-sys-color-primary);
-    background: color-mix(in srgb, var(--md-sys-color-primary) 5%, transparent);
+    background: color-mix(in srgb, var(--md-sys-color-primary) 8%, transparent);
   }
   .drop-active {
     border-color: var(--md-sys-color-primary);
@@ -103,8 +103,7 @@
     border-style: solid;
     background: color-mix(in srgb, var(--md-sys-color-primary) 8%, transparent);
   }
-  .drop-active .icon-wrap,
-  .drop-selected .icon-wrap {
-    transform: scale(1.1);
+  .drop-active .icon-wrap {
+    transform: scale(1.05);
   }
 </style>

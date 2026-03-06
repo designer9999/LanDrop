@@ -202,7 +202,9 @@ class LANPeer:
         self._peer_ip: str | None = None
         self._conn: socket.socket | None = None
         self._conn_lock = threading.Lock()
+        self._send_lock = threading.Lock()  # Held during file/text sends
         self._connected = False
+        self._connect_time = 0.0  # monotonic time of last connection
 
         # Threads
         self._beacon_thread: threading.Thread | None = None
@@ -271,11 +273,13 @@ class LANPeer:
 
     def send_text(self, text: str) -> bool:
         """Send a text message instantly over the LAN connection."""
-        with self._conn_lock:
-            if not self._conn or not self._connected:
-                return False
+        with self._send_lock:
+            with self._conn_lock:
+                if not self._conn or not self._connected:
+                    return False
+                conn = self._conn
             try:
-                _send_msg(self._conn, {"type": "text", "text": text})
+                _send_msg(conn, {"type": "text", "text": text})
                 return True
             except Exception as e:
                 logger.error("LAN send_text failed: %s", e)
@@ -283,73 +287,78 @@ class LANPeer:
                 return False
 
     def send_files(self, paths: list[str]) -> bool:
-        """Send files/folders over the LAN connection."""
-        with self._conn_lock:
-            if not self._conn or not self._connected:
-                return False
-            conn = self._conn
+        """Send files/folders over the LAN connection.
+        Uses _send_lock to prevent the connection from being replaced mid-transfer.
+        """
+        # Collect files BEFORE acquiring locks
+        file_list: list[tuple[str, str]] = []  # (full_path, relative_name)
+        dir_list: list[str] = []  # relative dir paths to create
 
-        try:
-            # Collect all files (expand directories)
-            file_list: list[tuple[str, str]] = []  # (full_path, relative_name)
-            dir_list: list[str] = []  # relative dir paths to create
+        for path in paths:
+            path = os.path.normpath(path)
+            if os.path.isdir(path):
+                base = os.path.basename(path)
+                dir_list.append(base)
+                for root, dirs, files in os.walk(path):
+                    rel_root = os.path.relpath(root, os.path.dirname(path))
+                    for d in dirs:
+                        dir_list.append(os.path.join(rel_root, d))
+                    for f in files:
+                        full = os.path.join(root, f)
+                        rel = os.path.join(rel_root, f)
+                        file_list.append((full, rel))
+            elif os.path.isfile(path):
+                file_list.append((path, os.path.basename(path)))
+            else:
+                logger.warning("LAN send: path not found: %s", path)
 
-            for path in paths:
-                path = os.path.normpath(path)
-                if os.path.isdir(path):
-                    base = os.path.basename(path)
-                    dir_list.append(base)
-                    for root, dirs, files in os.walk(path):
-                        rel_root = os.path.relpath(root, os.path.dirname(path))
-                        for d in dirs:
-                            dir_list.append(os.path.join(rel_root, d))
-                        for f in files:
-                            full = os.path.join(root, f)
-                            rel = os.path.join(rel_root, f)
-                            file_list.append((full, rel))
-                elif os.path.isfile(path):
-                    file_list.append((path, os.path.basename(path)))
-                else:
-                    logger.warning("LAN send: path not found: %s", path)
-
-            if not file_list:
-                logger.warning("LAN send: no files to send from paths: %s", paths)
-                return False
-
-            total_count = len(file_list) + len(dir_list)
-            logger.info("LAN send: %d files, %d dirs", len(file_list), len(dir_list))
-            _send_msg(conn, {"type": "batch", "count": total_count})
-
-            # Send directory entries first
-            for d in dir_list:
-                _send_msg(conn, {"type": "dir", "name": d})
-
-            # Send files
-            names_sent = []
-            for full_path, rel_name in file_list:
-                size = os.path.getsize(full_path)
-                _send_msg(conn, {"type": "file", "name": rel_name, "size": size})
-
-                with open(full_path, "rb") as f:
-                    try:
-                        conn.sendfile(f)
-                    except (AttributeError, OSError):
-                        while True:
-                            chunk = f.read(CHUNK_SIZE)
-                            if not chunk:
-                                break
-                            conn.sendall(chunk)
-
-                names_sent.append(os.path.basename(rel_name))
-
-            _send_msg(conn, {"type": "done"})
-            return True
-
-        except Exception as e:
-            logger.error("LAN send_files failed: %s (type: %s)", e, type(e).__name__)
-            self._on_log("error", f"LAN direct: file transfer error: {e}")
-            self._handle_disconnect()
+        if not file_list:
+            logger.warning("LAN send: no files to send from paths: %s", paths)
             return False
+
+        # Hold send_lock for the entire transfer to prevent reconnection mid-send
+        with self._send_lock:
+            with self._conn_lock:
+                if not self._conn or not self._connected:
+                    return False
+                conn = self._conn
+
+            try:
+                total_count = len(file_list) + len(dir_list)
+                logger.info(
+                    "LAN send: %d files, %d dirs", len(file_list), len(dir_list)
+                )
+                _send_msg(conn, {"type": "batch", "count": total_count})
+
+                # Send directory entries first
+                for d in dir_list:
+                    _send_msg(conn, {"type": "dir", "name": d})
+
+                # Send files
+                for full_path, rel_name in file_list:
+                    size = os.path.getsize(full_path)
+                    _send_msg(conn, {"type": "file", "name": rel_name, "size": size})
+
+                    with open(full_path, "rb") as f:
+                        try:
+                            conn.sendfile(f)
+                        except (AttributeError, OSError):
+                            while True:
+                                chunk = f.read(CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                conn.sendall(chunk)
+
+                _send_msg(conn, {"type": "done"})
+                return True
+
+            except Exception as e:
+                logger.error(
+                    "LAN send_files failed: %s (type: %s)", e, type(e).__name__
+                )
+                self._on_log("error", f"LAN direct: file transfer error: {e}")
+                self._handle_disconnect()
+                return False
 
     # ── UDP Beacon ──
 
@@ -497,6 +506,9 @@ class LANPeer:
         """Initiate TCP connection to a discovered peer."""
         if self._connected:
             return
+        # Avoid rapid reconnection
+        if time.monotonic() - self._connect_time < 3.0:
+            return
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(CONNECT_TIMEOUT)
@@ -515,26 +527,26 @@ class LANPeer:
 
     def _establish_connection(self, conn: socket.socket, peer_ip: str) -> None:
         """Set up a connected peer — start receive thread."""
-        if self._connected:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return
-
-        # Optimize socket for throughput
-        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        try:
-            # 1MB send/recv buffer for high throughput
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-        except OSError:
-            pass
-
         with self._conn_lock:
+            if self._connected:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return
+
+            # Optimize socket for throughput
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            except OSError:
+                pass
+
             self._conn = conn
             self._peer_ip = peer_ip
             self._connected = True
+            self._connect_time = time.monotonic()
 
         self._on_event("lan_connected", {"peer_ip": peer_ip})
         self._on_log("success", f"LAN direct: connected to {peer_ip}")
@@ -549,7 +561,12 @@ class LANPeer:
         threading.Thread(target=self._ping_loop, daemon=True).start()
 
     def _handle_disconnect(self) -> None:
-        """Handle peer disconnection."""
+        """Handle peer disconnection. Waits for any active send to finish."""
+        # Don't disconnect if a send is in progress — the recv loop might see
+        # a transient error but the connection is actually fine
+        if self._send_lock.locked():
+            return
+
         was_connected = self._connected
         with self._conn_lock:
             self._connected = False
