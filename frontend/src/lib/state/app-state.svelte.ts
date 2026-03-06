@@ -147,8 +147,8 @@ class AppState {
   // Files
   files = $state<SelectedFile[]>([]);
 
-  // Inline text
-  sendTextEnabled = $state(false);
+  // Inline text (always enabled — section is collapsible, not toggled)
+  sendTextEnabled = $state(true);
   sendTextContent = $state("");
 
   // Transfer state
@@ -216,7 +216,7 @@ class AppState {
 
   get canSend(): boolean {
     return !this.transferActive && (
-      this.hasFiles || (this.sendTextEnabled && !!this.sendTextContent.trim())
+      this.hasFiles || !!this.sendTextContent.trim()
     );
   }
 

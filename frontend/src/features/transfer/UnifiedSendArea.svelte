@@ -1,12 +1,11 @@
 <!--
-  Unified send area — files + inline text toggle + single Send button
+  Unified send area — files + message input + chat history
   Reuses DropZone, FileList from send/ components
 -->
 <script lang="ts">
   import Card from "$lib/ui/Card.svelte";
   import Button from "$lib/ui/Button.svelte";
   import Icon from "$lib/ui/Icon.svelte";
-  import Switch from "$lib/ui/Switch.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
   import { pickFiles, pickFolder, getFileInfo, copyToClipboard } from "$lib/api/bridge";
@@ -23,13 +22,13 @@
   const app = getAppState();
 
   let messagesEl: HTMLDivElement | undefined = $state();
+  let msgOpen = $state(true);
 
   // Auto-scroll messages to bottom when new messages arrive
   $effect(() => {
     if (app.activeContact) {
       const msgs = app.getContactMessages(app.activeContact.id);
       if (msgs.length && messagesEl) {
-        // Use tick to wait for DOM update
         requestAnimationFrame(() => {
           if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
         });
@@ -58,8 +57,6 @@
     const result = await pickFolder();
     if (result && result.length > 0) await addPaths(result);
   }
-
-  // Send logic moved to App.svelte FAB button
 </script>
 
 <div class="transfer-wrap" class:transfer-active={app.transferActive}>
@@ -107,76 +104,83 @@
     </div>
   {/if}
 
-  <!-- Messages for this contact — always visible -->
-  {#if app.activeContact}
-    {@const msgs = app.getContactMessages(app.activeContact.id)}
-    {#if msgs.length > 0}
-      <div class="mt-3 pt-3 border-t border-outline-variant">
-        <div class="flex items-center gap-2 mb-2">
-          <Icon name="chat" size={16} />
-          <span class="text-xs font-medium text-on-surface-variant">Messages</span>
-          <span class="flex-1"></span>
-          <button
-            class="text-xs text-on-surface-variant cursor-pointer bg-transparent border-none px-1 py-0.5
-                   hover:text-error"
-            style="transition: color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
-            onclick={() => app.activeContact && app.clearMessages(app.activeContact.id)}
-          >
-            Clear
-          </button>
-        </div>
-
-        <div
-          bind:this={messagesEl}
-          class="flex flex-col gap-1 max-h-52 overflow-y-auto msg-scroll"
-        >
-          {#each msgs as msg (msg.id)}
-            <div
-              class="group/msg flex items-start gap-0 rounded-lg msg-row
-                     {msg.direction === 'sent' ? 'msg-sent' : 'msg-received'}"
-            >
-              <div class="flex-1 min-w-0 px-3 py-2">
-                <div class="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all select-text">
-                  {msg.text}
-                </div>
-                <div class="text-[10px] opacity-40 mt-0.5 text-right">
-                  {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </div>
-              </div>
-              <button
-                class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-full
-                       opacity-0 group-hover/msg:opacity-100 mt-1.5 mr-1
-                       cursor-pointer bg-transparent border-none text-inherit hover:bg-white/10"
-                style="transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
-                onclick={() => handleCopy(msg.text)}
-                title="Copy message"
-              >
-                <Icon name="content_copy" size={14} />
-              </button>
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
-  {/if}
-
-  <!-- Inline text toggle -->
+  <!-- Message section — collapsible, open by default -->
   <div class="mt-3 pt-3 border-t border-outline-variant">
-    <div class="flex items-center gap-3">
-      <Switch bind:checked={app.sendTextEnabled} />
-      <span class="text-sm text-on-surface-variant">Include message</span>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="flex items-center gap-2 cursor-pointer"
+      onclick={() => msgOpen = !msgOpen}
+    >
+      <Icon name="chat" size={18} />
+      <span class="text-sm font-medium text-on-surface-variant flex-1">Message</span>
+      <span class="text-on-surface-variant section-arrow" class:section-arrow-open={msgOpen}>
+        <Icon name="expand_more" size={20} />
+      </span>
     </div>
 
-    {#if app.sendTextEnabled}
-      <div class="mt-3" style="--tf-bg: var(--md-sys-color-surface-container-highest);">
-        <TextField
-          label="Message"
-          placeholder="Type text, URLs, commands..."
-          multiline
-          rows={3}
-          mono
-          bind:value={app.sendTextContent}
-        />
+    {#if msgOpen}
+      <div class="section-enter">
+        <!-- Chat history -->
+        {#if app.activeContact}
+          {@const msgs = app.getContactMessages(app.activeContact.id)}
+          {#if msgs.length > 0}
+            <div class="flex items-center gap-2 mt-3 mb-1">
+              <span class="text-xs text-on-surface-variant flex-1">Chat</span>
+              <button
+                class="text-xs text-on-surface-variant cursor-pointer bg-transparent border-none px-1 py-0.5
+                       hover:text-error"
+                style="transition: color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+                onclick={() => app.activeContact && app.clearMessages(app.activeContact.id)}
+              >
+                Clear
+              </button>
+            </div>
+
+            <div
+              bind:this={messagesEl}
+              class="flex flex-col gap-1 max-h-52 overflow-y-auto msg-scroll"
+            >
+              {#each msgs as msg (msg.id)}
+                <div
+                  class="group/msg flex items-start gap-0 rounded-lg msg-row
+                         {msg.direction === 'sent' ? 'msg-sent' : 'msg-received'}"
+                >
+                  <div class="flex-1 min-w-0 px-3 py-2">
+                    <div class="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all select-text">
+                      {msg.text}
+                    </div>
+                    <div class="text-[10px] opacity-40 mt-0.5 text-right">
+                      {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                  </div>
+                  <button
+                    class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-full
+                           opacity-0 group-hover/msg:opacity-100 mt-1.5 mr-1
+                           cursor-pointer bg-transparent border-none text-inherit hover:bg-white/10"
+                    style="transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+                    onclick={() => handleCopy(msg.text)}
+                    title="Copy message"
+                  >
+                    <Icon name="content_copy" size={14} />
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+
+        <!-- Text input — always visible when section is open -->
+        <div class="mt-3">
+          <TextField
+            label="Message"
+            placeholder="Type text, URLs, commands..."
+            multiline
+            rows={3}
+            mono
+            bind:value={app.sendTextContent}
+          />
+        </div>
       </div>
     {/if}
   </div>
@@ -194,10 +198,10 @@
   .transfer-active {
     background: conic-gradient(
       from var(--transfer-angle, 0deg),
-      var(--md-sys-color-primary) 0%,
+      var(--md-sys-color-tertiary) 0%,
       transparent 30%,
       transparent 70%,
-      var(--md-sys-color-primary) 100%
+      var(--md-sys-color-tertiary) 100%
     );
     animation: transfer-spin 1.5s linear infinite;
   }
@@ -208,6 +212,19 @@
     syntax: "<angle>";
     initial-value: 0deg;
     inherits: false;
+  }
+  .section-arrow {
+    transition: transform var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial);
+  }
+  .section-arrow-open {
+    transform: rotate(180deg);
+  }
+  .section-enter {
+    animation: section-slide var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
+  }
+  @keyframes section-slide {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
   .msg-sent {
     background-color: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);

@@ -12,7 +12,6 @@
   import Icon from "$lib/ui/Icon.svelte";
   import IconButton from "$lib/ui/IconButton.svelte";
   import Button from "$lib/ui/Button.svelte";
-  // ProgressBar removed — transfer indicator is now a border animation on the send card
   import Snackbar from "$lib/ui/Snackbar.svelte";
   import Divider from "$lib/ui/Divider.svelte";
   import ContactBar from "./features/contacts/ContactBar.svelte";
@@ -135,7 +134,6 @@
             if (direction === "sent" && !isText) {
               app.clearFiles();
               app.sendTextContent = "";
-              app.sendTextEnabled = false;
             }
           } else if (!data.stopped) {
             showSnackbar("Transfer failed");
@@ -270,7 +268,7 @@
 
   // Split send — files and text are separate actions
   const fabHasFiles = $derived(app.hasFiles);
-  const fabHasText = $derived(app.sendTextEnabled && !!app.sendTextContent.trim());
+  const fabHasText = $derived(!!app.sendTextContent.trim());
   const fabShowSplit = $derived(fabHasFiles && fabHasText);
 
   async function handleSendFiles() {
@@ -282,7 +280,7 @@
   }
 
   async function handleSendText() {
-    if (!app.sendTextEnabled || !app.sendTextContent.trim() || app.transferActive) return;
+    if (!app.sendTextContent.trim() || app.transferActive) return;
     const opts = app.effectiveSendOptions;
     const contact = app.activeContact;
     if (contact) app.touchContact(contact.id);
