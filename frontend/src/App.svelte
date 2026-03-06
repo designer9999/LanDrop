@@ -266,7 +266,7 @@
     const contact = app.activeContact;
     if (contact) app.touchContact(contact.id);
 
-    // Try LAN direct first — instant transfer
+    // LAN direct — instant transfer (no croc fallback when connected)
     if (app.lanConnected) {
       const sent = await lanSendFiles(app.filePaths);
       if (sent) {
@@ -281,11 +281,11 @@
         }
         app.clearFiles();
         app.sendTextContent = "";
-        return;
       }
+      return;
     }
 
-    // Fall back to croc
+    // No LAN connection — use croc
     const opts = app.effectiveSendOptions;
     await sendFiles(app.filePaths, opts);
   }
@@ -298,24 +298,22 @@
     if (contact) app.addMessage({ contactId: contact.id, direction: "sent", text: textToSend });
     app.sendTextContent = "";
 
-    // Try LAN direct first — instant delivery
+    // LAN direct — instant delivery (no croc fallback when connected)
     if (app.lanConnected) {
       const sent = await lanSendText(textToSend);
-      if (sent) {
-        if (contact) {
-          app.addActivity({
-            contactId: contact.id,
-            direction: "sent",
-            type: "text",
-            items: [],
-            success: true,
-          });
-        }
-        return;
+      if (sent && contact) {
+        app.addActivity({
+          contactId: contact.id,
+          direction: "sent",
+          type: "text",
+          items: [],
+          success: true,
+        });
       }
+      return;
     }
 
-    // Fall back to croc
+    // No LAN connection — use croc
     const opts = app.effectiveSendOptions;
     await sendText(textToSend, opts);
   }
