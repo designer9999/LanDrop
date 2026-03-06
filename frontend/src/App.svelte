@@ -60,7 +60,7 @@
   $effect(() => {
     const contact = app.activeContact;
     if (contact && app.crocOk) {
-      const outFolder = app.effectiveReceiveOptions.outFolder ?? "";
+      const outFolder = contact.options?.outFolder ?? app.receiveOptions.outFolder ?? "";
       startLAN(contact.code, outFolder);
     } else {
       stopLAN();

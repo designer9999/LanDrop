@@ -556,6 +556,12 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         code = (code or "").strip()
         if not code:
             return
+
+        # Skip if already running with the same code
+        with self._lan_peer_lock:
+            if self._lan_peer and self._lan_peer._code == code:
+                return
+
         self._stop_lan_internal()
 
         peer = LANPeer(
