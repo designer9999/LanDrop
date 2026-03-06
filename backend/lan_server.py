@@ -230,7 +230,8 @@ class LANPeer:
         # Ensure Windows Firewall allows our ports
         _ensure_firewall_rules()
 
-        my_ip = self._get_my_ip()
+        all_ips = self._get_all_ips()
+        display_ip = self._get_my_ip()
 
         # Start TCP server
         self._listen_thread = threading.Thread(target=self._tcp_listen, daemon=True)
@@ -240,10 +241,16 @@ class LANPeer:
         self._beacon_thread = threading.Thread(target=self._beacon_loop, daemon=True)
         self._beacon_thread.start()
 
-        self._on_log(
-            "info",
-            f"LAN direct: searching for peer (my IP: {my_ip})",
-        )
+        if len(all_ips) > 1:
+            self._on_log(
+                "info",
+                f"LAN direct: searching for peer (IPs: {', '.join(all_ips)})",
+            )
+        else:
+            self._on_log(
+                "info",
+                f"LAN direct: searching for peer (IP: {display_ip})",
+            )
 
     def stop(self) -> None:
         """Stop everything."""
@@ -360,20 +367,27 @@ class LANPeer:
                 return
 
         beacon_data = BEACON_MAGIC + self._code_hash.encode("ascii")
-        my_ip = self._get_my_ip()
+
+        # Get ALL local IPs (LAN + VPN + Wi-Fi) for own-broadcast filtering
+        my_ips = set(self._get_all_ips())
         last_broadcast = 0.0
 
-        # Build list of broadcast addresses (generic + subnet-specific)
-        broadcast_addrs = ["255.255.255.255"]
-        if my_ip and my_ip != "127.0.0.1":
-            # Add subnet broadcast (e.g., 192.168.1.255)
-            parts = my_ip.split(".")
+        # Build broadcast addresses for EVERY interface subnet
+        broadcast_addrs: set[str] = {"255.255.255.255"}
+        for ip in my_ips:
+            parts = ip.split(".")
             if len(parts) == 4:
-                broadcast_addrs.append(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+                broadcast_addrs.add(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+
+        logger.info(
+            "Beacon: my IPs=%s, broadcasting to %s",
+            my_ips,
+            broadcast_addrs,
+        )
 
         while self._running:
             try:
-                # Broadcast our beacon to all addresses
+                # Broadcast our beacon to ALL subnets
                 now = time.monotonic()
                 if now - last_broadcast >= BEACON_INTERVAL:
                     for bcast in broadcast_addrs:
@@ -401,8 +415,8 @@ class LANPeer:
                 peer_hash = data[len(BEACON_MAGIC) :].decode("ascii", errors="ignore")
                 peer_ip = addr[0]
 
-                # Skip our own broadcasts
-                if peer_ip == my_ip:
+                # Skip our own broadcasts (check ALL our IPs, not just one)
+                if peer_ip in my_ips:
                     continue
 
                 # Check if this peer has the same code
@@ -651,25 +665,69 @@ class LANPeer:
                     break
 
     @staticmethod
-    def _get_my_ip() -> str:
-        # Try multiple methods to get the LAN IP
-        # Method 1: Connect to external address (requires internet)
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
-                if ip and ip != "0.0.0.0":
-                    return ip
-        except Exception:
-            pass
-        # Method 2: Get all IPs and pick a private one
+    def _get_all_ips() -> list[str]:
+        """Get ALL local IPv4 addresses (all adapters: LAN, Wi-Fi, VPN, etc).
+        This is essential when VPN is active — we need to broadcast and filter
+        on every interface, not just the default route.
+        """
+        ips: set[str] = set()
+
+        # Method 1: hostname resolution (gets most adapter IPs)
         try:
             hostname = socket.gethostname()
             addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
             for addr in addrs:
                 ip = addr[4][0]
-                if ip.startswith(("192.168.", "10.", "172.")):
-                    return ip
+                if ip and ip != "127.0.0.1" and ip != "0.0.0.0":
+                    ips.add(ip)
         except Exception:
             pass
-        return "127.0.0.1"
+
+        # Method 2: default route (may add VPN IP)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                if ip and ip != "0.0.0.0":
+                    ips.add(ip)
+        except Exception:
+            pass
+
+        # Method 3: Windows ipconfig parsing (catches everything)
+        if sys.platform == "win32":
+            try:
+                result = subprocess.run(
+                    ["ipconfig"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=_NO_WINDOW,
+                    timeout=5,
+                )
+                import re
+
+                for match in re.finditer(
+                    r"IPv4[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", result.stdout
+                ):
+                    ip = match.group(1)
+                    if ip != "127.0.0.1":
+                        ips.add(ip)
+            except Exception:
+                pass
+
+        return list(ips) if ips else ["127.0.0.1"]
+
+    @staticmethod
+    def _get_my_ip() -> str:
+        """Get the primary LAN IP (for display only)."""
+        ips = LANPeer._get_all_ips()
+        # Prefer 192.168.x.x (typical home/office LAN) over VPN ranges
+        for ip in ips:
+            if ip.startswith("192.168."):
+                return ip
+        for ip in ips:
+            if ip.startswith("10.") and not ip.startswith("10.15"):
+                return ip
+        for ip in ips:
+            if ip.startswith("172."):
+                return ip
+        return ips[0] if ips else "127.0.0.1"
