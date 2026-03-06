@@ -74,8 +74,18 @@ class CrocAPI:
         self._lan_peer: LANPeer | None = None
         self._lan_peer_lock = threading.Lock()
 
+        import atexit
+
+        atexit.register(self._cleanup)
+
     def set_window(self, window: webview.Window) -> None:
         self._window = window
+
+    def _cleanup(self) -> None:
+        """Kill croc processes and stop LAN peer on exit."""
+        _safe_close_process(self._process)
+        self._process = None
+        self._stop_lan_internal()
 
     # ── Croc discovery ──
 
@@ -486,6 +496,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             self._js_log("error", "No valid files selected")
             return
 
+        self._kill_existing_process()
         with self._lock:
             self._transfer_active = True
         names = [os.path.basename(p) for p in valid]
@@ -506,6 +517,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         if not text:
             self._js_log("error", "No text provided")
             return
+        self._kill_existing_process()
         with self._lock:
             self._transfer_active = True
         self._js_event("transfer_start", {"mode": "send", "files": ["(text)"]})
@@ -525,6 +537,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
             self._js_log("error", "No code provided")
             return
 
+        self._kill_existing_process()
         with self._lock:
             self._transfer_active = True
         self._js_event("transfer_start", {"mode": "receive", "code": code})
@@ -539,15 +552,22 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         with self._lock:
             proc = self._process
             if proc:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                _safe_close_process(proc)
+                self._process = None
                 self._transfer_active = False
                 self._js_log("warn", "Transfer stopped")
                 self._js_event("transfer_done", {"success": False, "stopped": True})
                 return True
         return False
+
+    def _kill_existing_process(self) -> None:
+        """Kill any running croc process before starting a new one."""
+        with self._lock:
+            proc = self._process
+            if proc:
+                _safe_close_process(proc)
+                self._process = None
+                self._transfer_active = False
 
     # ── LAN Direct Transfer ──
 
