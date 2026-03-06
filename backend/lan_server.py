@@ -362,6 +362,11 @@ class LANPeer:
         with self._send_lock:
             with self._conn_lock:
                 if not self._conn or not self._connected:
+                    logger.error(
+                        "LAN send: not connected (conn=%s, connected=%s)",
+                        self._conn is not None,
+                        self._connected,
+                    )
                     return False
                 conn = self._conn
 
@@ -510,7 +515,7 @@ class LANPeer:
                 ):
                     _send_msg(conn, {"type": "auth_ok"})
                     conn.settimeout(None)
-                    self._establish_connection(conn, addr[0])
+                    self._establish_connection(conn, addr[0], inbound=True)
                 else:
                     conn.close()
             except Exception:
@@ -540,15 +545,47 @@ class LANPeer:
         except Exception as e:
             self._on_log("warn", f"LAN direct: connection to {peer_ip} failed: {e}")
 
-    def _establish_connection(self, conn: socket.socket, peer_ip: str) -> None:
-        """Set up a connected peer — start receive thread."""
+    def _establish_connection(
+        self, conn: socket.socket, peer_ip: str, *, inbound: bool = False
+    ) -> None:
+        """Set up a connected peer — start receive thread.
+
+        Deterministic tie-breaking (à la libp2p): when both peers connect
+        simultaneously, the peer with the **lower IP** keeps its outbound
+        connection and the peer with the **higher IP** keeps its inbound
+        connection.  Both sides agree, so exactly one TCP socket survives.
+        """
         with self._conn_lock:
             if self._connected:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                return
+                # Already have a connection — apply tie-breaking
+                my_ip = _get_display_ip()
+                i_am_lower = my_ip < peer_ip
+                # Lower IP keeps outbound, higher IP keeps inbound
+                should_keep_new = (i_am_lower and not inbound) or (
+                    not i_am_lower and inbound
+                )
+                if should_keep_new:
+                    # Replace the existing connection with this better one
+                    old_conn = self._conn
+                    if old_conn:
+                        try:
+                            old_conn.close()
+                        except Exception:
+                            pass
+                    logger.info(
+                        "LAN: replacing connection (tie-break: my_ip=%s peer=%s "
+                        "inbound=%s)",
+                        my_ip,
+                        peer_ip,
+                        inbound,
+                    )
+                else:
+                    # Discard this connection, keep existing
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    return
 
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
