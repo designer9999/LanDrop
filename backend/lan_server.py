@@ -359,10 +359,10 @@ class LANPeer:
             elif os.path.isfile(path):
                 file_list.append((path, os.path.basename(path)))
             else:
-                logger.warning("LAN send: path not found: %s", path)
+                self._on_log("error", f"LAN direct: file not found — {path}")
 
         if not file_list:
-            logger.warning("LAN send: no files to send")
+            self._on_log("error", "LAN direct: no valid files to send")
             return False
 
         with self._send_lock:
