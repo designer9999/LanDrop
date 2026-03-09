@@ -8,7 +8,7 @@
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { getStatus, stopTransfer, checkUpdate, downloadUpdate, launchUpdate, installCroc, sendFiles, sendText, startLAN, stopLAN, lanSendText, lanSendFiles } from "$lib/api/bridge";
+  import { getStatus, stopTransfer, checkUpdate, downloadUpdate, launchUpdate, installCroc, sendFiles, sendText, startLAN, stopLAN, lanSendText, lanSendFiles, setFocused, setNotifications } from "$lib/api/bridge";
   import Icon from "$lib/ui/Icon.svelte";
   import IconButton from "$lib/ui/IconButton.svelte";
   import Button from "$lib/ui/Button.svelte";
@@ -76,6 +76,11 @@
     app.crocVersion = status.version?.replace("croc version ", "") ?? "not found";
     app.localIp = status.local_ip ?? "unknown";
     if (status.app_version) appVersion = status.app_version;
+
+    // Track focus state for notifications
+    window.addEventListener("focus", () => setFocused(true));
+    window.addEventListener("blur", () => setFocused(false));
+    setNotifications(app.notificationsEnabled);
 
     window.onLog = (level: string, msg: string) => {
       const clean = msg.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "");

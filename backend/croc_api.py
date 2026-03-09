@@ -74,11 +74,32 @@ class CrocAPI:
         self._croc_path = self._find_croc()
         self._lan_peer: LANPeer | None = None
         self._lan_peer_lock = threading.Lock()
+        self._window_focused = True
+        self._notifications_enabled = True
 
         atexit.register(self._cleanup)
 
     def set_window(self, window: webview.Window) -> None:
         self._window = window
+
+    def set_focused(self, focused: bool) -> None:
+        self._window_focused = focused
+
+    def set_notifications(self, enabled: bool) -> None:
+        self._notifications_enabled = enabled
+
+    def _notify(self, title: str) -> None:
+        """Play system notification sound when app is not focused."""
+        if self._window_focused or not self._notifications_enabled:
+            return
+        if sys.platform != "win32":
+            return
+        try:
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
 
     def _cleanup(self) -> None:
         """Kill croc processes and stop LAN peer on exit."""
@@ -590,9 +611,14 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
 
         self._stop_lan_internal()
 
+        def _lan_event(ev: str, d: dict) -> None:
+            self._js_event(ev, d)
+            if ev in ("lan_text_received", "lan_files_received"):
+                self._notify(ev)
+
         peer = LANPeer(
             code,
-            on_event=lambda ev, d: self._js_event(ev, d),
+            on_event=_lan_event,
             on_log=lambda lv, m: self._js_log(lv, m),
         )
         with self._lan_peer_lock:
@@ -869,6 +895,8 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                 return
             if error_msg:
                 self._js_log("error", error_msg)
+            if success:
+                self._notify("receive_done")
             self._js_event(
                 "transfer_done",
                 {"success": success, "files": received_files, "mode": "receive"},

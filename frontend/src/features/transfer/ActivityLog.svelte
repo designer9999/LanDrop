@@ -94,9 +94,15 @@
             </div>
             <span class="text-xs text-outline shrink-0">{formatTime(entry.timestamp)}</span>
             {#if isClickable(entry)}
-              <span class="text-on-surface-variant">
-                <Icon name="folder_open" size={14} />
-              </span>
+              <button
+                class="text-on-surface-variant bg-transparent border-none cursor-pointer p-0.5 rounded-full
+                       hover:text-primary"
+                style="transition: color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+                title="Open folder"
+                onclick={(e) => { e.stopPropagation(); handleClick(entry); }}
+              >
+                <Icon name="folder_open" size={16} />
+              </button>
             {:else}
               <span class={entry.success ? "text-tertiary" : "text-error"}>
                 <Icon name={entry.success ? "check_circle" : "error"} size={14} />

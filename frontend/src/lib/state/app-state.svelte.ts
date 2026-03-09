@@ -44,6 +44,7 @@ export interface MessageEntry {
   direction: "sent" | "received";
   text: string;
   timestamp: string;
+  starred?: boolean;
 }
 
 export interface SelectedFile {
@@ -68,6 +69,9 @@ const SEND_OPTS_KEY = "crude-send-options";
 const RECV_OPTS_KEY = "crude-receive-options";
 const CONTACTS_KEY = "crude-contacts";
 const ACTIVE_CONTACT_KEY = "crude-active-contact";
+const MESSAGES_KEY = "crude-messages";
+const ACTIVITY_KEY = "crude-activity";
+const SETTINGS_KEY = "crude-settings";
 
 function loadJson<T>(key: string, fallback: T): T {
   try {
@@ -165,10 +169,17 @@ class AppState {
   lanConnected = $state(false);
   lanPeerIp = $state<string | null>(null);
 
-  // Logs, activity & messages
+  // Logs (session only), activity & messages (persisted)
   logs = $state<LogEntry[]>([]);
-  activity = $state<ActivityEntry[]>([]);
-  messages = $state<MessageEntry[]>([]);
+  activity = $state<ActivityEntry[]>(loadArray<ActivityEntry>(ACTIVITY_KEY));
+  messages = $state<MessageEntry[]>(loadArray<MessageEntry>(MESSAGES_KEY));
+
+  // Message search & filter
+  messageSearch = $state("");
+  messageViewAll = $state(false);
+
+  // Persisted app settings
+  notificationsEnabled = $state<boolean>(loadJson<{n: boolean}>(SETTINGS_KEY, {n: true}).n);
 
   // Persisted global options
   sendOptions = $state<SendOptions>(loadJson(SEND_OPTS_KEY, DEFAULT_SEND_OPTS));
@@ -289,10 +300,20 @@ class AppState {
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
     }];
+    // Keep max 200 entries
+    if (this.activity.length > 200) {
+      this.activity = this.activity.slice(-200);
+    }
+    this._saveActivity();
   }
 
   clearActivity() {
     this.activity = [];
+    this._saveActivity();
+  }
+
+  private _saveActivity() {
+    saveJson(ACTIVITY_KEY, this.activity);
   }
 
   addMessage(entry: Omit<MessageEntry, "id" | "timestamp">) {
@@ -301,18 +322,72 @@ class AppState {
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
     }];
-    // Keep max 100 messages
-    if (this.messages.length > 100) {
-      this.messages = this.messages.slice(-100);
-    }
+    this._pruneMessages();
+    this._saveMessages();
   }
 
   getContactMessages(contactId: string): MessageEntry[] {
     return this.messages.filter(m => m.contactId === contactId);
   }
 
+  /** Search messages — optionally filtered to a contact */
+  searchMessages(query: string, contactId?: string): MessageEntry[] {
+    const q = query.toLowerCase();
+    return this.messages.filter(m => {
+      if (contactId && m.contactId !== contactId) return false;
+      return m.text.toLowerCase().includes(q);
+    });
+  }
+
+  /** Get all starred messages, optionally for a specific contact */
+  getStarredMessages(contactId?: string): MessageEntry[] {
+    return this.messages.filter(m => {
+      if (!m.starred) return false;
+      if (contactId && m.contactId !== contactId) return false;
+      return true;
+    });
+  }
+
+  toggleStar(messageId: string) {
+    this.messages = this.messages.map(m =>
+      m.id === messageId ? { ...m, starred: !m.starred } : m
+    );
+    this._saveMessages();
+  }
+
+  /** Clear conversation but keep starred messages */
   clearMessages(contactId: string) {
+    this.messages = this.messages.filter(m =>
+      m.contactId !== contactId || m.starred
+    );
+    this._saveMessages();
+  }
+
+  /** Delete all messages for a contact including starred */
+  deleteAllMessages(contactId: string) {
     this.messages = this.messages.filter(m => m.contactId !== contactId);
+    this._saveMessages();
+  }
+
+  /** Delete old messages across all contacts (keep starred + last N days) */
+  deleteOldMessages(daysOld: number) {
+    const cutoff = new Date(Date.now() - daysOld * 86400000).toISOString();
+    this.messages = this.messages.filter(m => m.starred || m.timestamp >= cutoff);
+    this._saveMessages();
+  }
+
+  private _pruneMessages() {
+    // Keep max 500 messages, never prune starred
+    if (this.messages.length <= 500) return;
+    const starred = this.messages.filter(m => m.starred);
+    const unstarred = this.messages.filter(m => !m.starred);
+    const keep = Math.max(0, 500 - starred.length);
+    this.messages = [...unstarred.slice(-keep), ...starred]
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }
+
+  private _saveMessages() {
+    saveJson(MESSAGES_KEY, this.messages);
   }
 
   // ── Transfer orchestration ──
@@ -330,6 +405,11 @@ class AppState {
   }
 
   // ── Persisted options ──
+
+  setNotifications(enabled: boolean) {
+    this.notificationsEnabled = enabled;
+    saveJson(SETTINGS_KEY, { n: enabled });
+  }
 
   saveSendOptions() {
     saveJson(SEND_OPTS_KEY, this.sendOptions);

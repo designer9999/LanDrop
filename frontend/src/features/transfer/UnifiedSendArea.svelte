@@ -6,6 +6,7 @@
   import Card from "$lib/ui/Card.svelte";
   import Button from "$lib/ui/Button.svelte";
   import Icon from "$lib/ui/Icon.svelte";
+  import IconButton from "$lib/ui/IconButton.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
   import { pickFiles, pickFolder, getFileInfo, copyToClipboard } from "$lib/api/bridge";
@@ -24,16 +25,34 @@
   let messagesEl: HTMLDivElement | undefined = $state();
   let msgOpen = $state(true);
   let copiedMsgId = $state<string | null>(null);
+  let showStarredOnly = $state(false);
+  let showClearMenu = $state(false);
+
+  // Filtered messages for display
+  const displayMessages = $derived.by(() => {
+    const contactId = app.messageViewAll ? undefined : app.activeContact?.id;
+    if (!contactId && !app.messageViewAll) return [];
+
+    let msgs: import("$lib/state/app-state.svelte").MessageEntry[];
+
+    if (showStarredOnly) {
+      msgs = app.getStarredMessages(contactId);
+    } else if (app.messageSearch) {
+      msgs = app.searchMessages(app.messageSearch, contactId);
+    } else if (contactId) {
+      msgs = app.getContactMessages(contactId);
+    } else {
+      msgs = [...app.messages];
+    }
+    return msgs;
+  });
 
   // Auto-scroll messages to bottom when new messages arrive
   $effect(() => {
-    if (app.activeContact) {
-      const msgs = app.getContactMessages(app.activeContact.id);
-      if (msgs.length && messagesEl) {
-        requestAnimationFrame(() => {
-          if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-        });
-      }
+    if (displayMessages.length && messagesEl && !showStarredOnly && !app.messageSearch) {
+      requestAnimationFrame(() => {
+        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+      });
     }
   });
 
@@ -42,6 +61,10 @@
     copiedMsgId = msgId;
     setTimeout(() => { if (copiedMsgId === msgId) copiedMsgId = null; }, 1200);
     onsnackbar?.("Copied to clipboard");
+  }
+
+  function getContactName(contactId: string): string {
+    return app.contacts.find(c => c.id === contactId)?.name ?? "Unknown";
   }
 
   async function addPaths(paths: string[]) {
@@ -124,27 +147,95 @@
 
     {#if msgOpen}
       <div class="section-enter">
-        <!-- Chat history -->
-        {#if app.activeContact}
-          {@const msgs = app.getContactMessages(app.activeContact.id)}
-          {#if msgs.length > 0}
-            <div class="flex items-center gap-2 mt-3 mb-1">
-              <span class="text-xs text-on-surface-variant flex-1">Chat</span>
+        <!-- Chat toolbar: All texts toggle, starred filter, search, clear -->
+        {#if app.messages.length > 0}
+          <div class="flex items-center gap-1 mt-3 mb-1 flex-wrap">
+            <!-- All texts / This contact toggle -->
+            <button
+              class="text-xs px-2 py-1 rounded-full border-none cursor-pointer
+                     {app.messageViewAll
+                       ? 'bg-primary text-on-primary'
+                       : 'bg-surface-container-high text-on-surface-variant'}"
+              style="transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+              onclick={() => app.messageViewAll = !app.messageViewAll}
+            >
+              {app.messageViewAll ? "All contacts" : "This contact"}
+            </button>
+
+            <!-- Starred filter -->
+            <button
+              class="text-xs px-2 py-1 rounded-full border-none cursor-pointer
+                     {showStarredOnly
+                       ? 'bg-primary text-on-primary'
+                       : 'bg-surface-container-high text-on-surface-variant'}"
+              style="transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+              onclick={() => showStarredOnly = !showStarredOnly}
+            >
+              <Icon name={showStarredOnly ? "star" : "star_border"} size={12} />
+              Saved
+            </button>
+
+            <span class="flex-1"></span>
+
+            <!-- Search icon toggle -->
+            <button
+              class="text-xs text-on-surface-variant cursor-pointer bg-transparent border-none px-1 py-0.5"
+              onclick={() => { app.messageSearch = app.messageSearch ? "" : " "; }}
+              title="Search messages"
+            >
+              <Icon name="search" size={16} />
+            </button>
+
+            <!-- Clear menu -->
+            <div class="relative">
               <button
                 class="text-xs text-on-surface-variant cursor-pointer bg-transparent border-none px-1 py-0.5
                        hover:text-error"
                 style="transition: color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
-                onclick={() => app.activeContact && app.clearMessages(app.activeContact.id)}
+                onclick={() => showClearMenu = !showClearMenu}
               >
                 Clear
               </button>
+              {#if showClearMenu}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="clear-menu" onclick={() => showClearMenu = false}>
+                  <button onclick={() => { app.activeContact && app.clearMessages(app.activeContact.id); }}>
+                    Clear chat (keep saved)
+                  </button>
+                  <button onclick={() => { app.activeContact && app.deleteAllMessages(app.activeContact.id); }}>
+                    Delete all for this contact
+                  </button>
+                  <button onclick={() => { app.deleteOldMessages(7); }}>
+                    Delete older than 7 days
+                  </button>
+                  <button onclick={() => { app.deleteOldMessages(30); }}>
+                    Delete older than 30 days
+                  </button>
+                </div>
+              {/if}
             </div>
+          </div>
 
+          <!-- Search input -->
+          {#if app.messageSearch !== ""}
+            <div class="mb-2">
+              <TextField
+                label="Search messages"
+                placeholder="Type to search..."
+                mono
+                bind:value={app.messageSearch}
+              />
+            </div>
+          {/if}
+
+          <!-- Message list -->
+          {#if displayMessages.length > 0}
             <div
               bind:this={messagesEl}
               class="flex flex-col gap-1 max-h-52 overflow-y-auto msg-scroll"
             >
-              {#each msgs as msg (msg.id)}
+              {#each displayMessages as msg (msg.id)}
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
@@ -155,6 +246,11 @@
                   title="Click to copy"
                 >
                   <div class="px-3 py-2">
+                    {#if app.messageViewAll}
+                      <div class="text-[10px] text-on-surface-variant mb-0.5">
+                        {getContactName(msg.contactId)}
+                      </div>
+                    {/if}
                     <div class="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all select-text">
                       {msg.text}
                     </div>
@@ -163,6 +259,15 @@
                         <span class="text-primary msg-check"><Icon name="check" size={10} /></span>
                         <span class="text-[10px] text-primary font-medium">Copied</span>
                       {:else}
+                        <!-- Star button -->
+                        <button
+                          class="star-btn"
+                          class:starred={msg.starred}
+                          onclick={(e) => { e.stopPropagation(); app.toggleStar(msg.id); }}
+                          title={msg.starred ? "Unsave" : "Save"}
+                        >
+                          <Icon name={msg.starred ? "star" : "star_border"} size={12} />
+                        </button>
                         <span class="text-[10px] opacity-40">
                           {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                         </span>
@@ -171,6 +276,10 @@
                   </div>
                 </div>
               {/each}
+            </div>
+          {:else if app.messageSearch || showStarredOnly}
+            <div class="text-xs text-on-surface-variant text-center py-3">
+              {showStarredOnly ? "No saved messages" : "No results"}
             </div>
           {/if}
         {/if}
@@ -286,5 +395,52 @@
   .msg-scroll {
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--md-sys-color-outline) 30%, transparent) transparent;
+  }
+  .star-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    color: var(--md-sys-color-outline);
+    opacity: 0;
+    transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
+                color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    display: flex;
+    align-items: center;
+  }
+  .star-btn.starred {
+    opacity: 1;
+    color: var(--md-sys-color-primary);
+  }
+  .msg-bubble:hover .star-btn {
+    opacity: 1;
+  }
+  .clear-menu {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    z-index: 10;
+    background: var(--md-sys-color-surface-container-high);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 200px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    animation: section-slide var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
+  }
+  .clear-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    color: var(--md-sys-color-on-surface);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+  }
+  .clear-menu button:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
   }
 </style>

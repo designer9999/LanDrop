@@ -151,3 +151,13 @@ export async function lanSendText(text: string): Promise<boolean> {
 export async function lanSendFiles(paths: string[]): Promise<boolean> {
   return (await api()?.lan_send_files(paths)) ?? false;
 }
+
+// ── App focus & notifications ──
+
+export async function setFocused(focused: boolean): Promise<void> {
+  await api()?.set_focused(focused);
+}
+
+export async function setNotifications(enabled: boolean): Promise<void> {
+  await api()?.set_notifications(enabled);
+}

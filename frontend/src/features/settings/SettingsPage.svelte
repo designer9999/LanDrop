@@ -9,7 +9,7 @@
   import Select from "$lib/ui/Select.svelte";
   import Button from "$lib/ui/Button.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickSaveFolder, installCroc, openUrl, copyToClipboard } from "$lib/api/bridge";
+  import { pickSaveFolder, installCroc, openUrl, copyToClipboard, setNotifications } from "$lib/api/bridge";
 
   interface Props {
     appVersion: string;
@@ -192,6 +192,21 @@
         </div>
       </div>
     {/if}
+  </Card>
+
+  <!-- Notifications -->
+  <Card variant="outlined">
+    <div class="flex items-center gap-2 text-on-surface text-sm font-medium">
+      <span class="text-primary"><Icon name="notifications" size={20} /></span>
+      Notifications
+    </div>
+    <div class="flex items-center justify-between py-1 mt-3">
+      <div>
+        <div class="text-sm text-on-surface">Notification sounds</div>
+        <div class="text-xs text-on-surface-variant">Play sound when files or messages arrive while app is unfocused</div>
+      </div>
+      <Switch checked={app.notificationsEnabled} onchange={(v) => { app.setNotifications(v); setNotifications(v); }} />
+    </div>
   </Card>
 
   <!-- About & Status (last, less important) -->
