@@ -664,7 +664,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                     },
                 )
             else:
-                self._js_log("error", "LAN direct: file send failed")
+                self._js_log("error", f"LAN direct: file send failed (connected={peer.connected})")
             return success
         return False
 

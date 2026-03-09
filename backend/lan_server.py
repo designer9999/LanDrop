@@ -368,10 +368,10 @@ class LANPeer:
         with self._send_lock:
             with self._conn_lock:
                 if not self._conn or not self._connected:
-                    logger.error(
-                        "LAN send: not connected (conn=%s, connected=%s)",
-                        self._conn is not None,
-                        self._connected,
+                    self._on_log(
+                        "error",
+                        f"LAN direct: not connected (conn={'yes' if self._conn else 'no'}, "
+                        f"connected={self._connected})",
                     )
                     return False
                 conn = self._conn
@@ -397,7 +397,7 @@ class LANPeer:
 
             except Exception as e:
                 logger.error("LAN send_files failed: %s (%s)", e, type(e).__name__)
-                self._on_log("error", f"LAN direct: file transfer error: {e}")
+                self._on_log("error", f"LAN direct: transfer error — {e}")
                 self._handle_disconnect(conn)
                 return False
 
