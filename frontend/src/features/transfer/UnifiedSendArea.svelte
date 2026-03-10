@@ -27,6 +27,7 @@
   let copiedMsgId = $state<string | null>(null);
   let showStarredOnly = $state(false);
   let showClearMenu = $state(false);
+  let searchOpen = $state(false);
 
   // Filtered messages for display
   const displayMessages = $derived.by(() => {
@@ -47,14 +48,37 @@
     return msgs;
   });
 
-  // Auto-scroll messages to bottom when new messages arrive
+  // Auto-scroll to bottom only when user is near the bottom
+  let wasAtBottom = true;
   $effect(() => {
     if (displayMessages.length && messagesEl && !showStarredOnly && !app.messageSearch) {
       requestAnimationFrame(() => {
-        if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+        if (messagesEl && wasAtBottom) {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
       });
     }
   });
+
+  function handleScroll() {
+    if (!messagesEl) return;
+    const { scrollTop, scrollHeight, clientHeight } = messagesEl;
+    wasAtBottom = scrollTop + clientHeight >= scrollHeight - 60;
+  }
+
+  // Message grouping: consecutive same-direction messages get visual grouping
+  function getBubblePosition(index: number): "solo" | "first" | "middle" | "last" {
+    const msgs = displayMessages;
+    const curr = msgs[index];
+    const prev = index > 0 ? msgs[index - 1] : null;
+    const next = index < msgs.length - 1 ? msgs[index + 1] : null;
+    const sameAsPrev = prev && prev.direction === curr.direction && prev.contactId === curr.contactId;
+    const sameAsNext = next && next.direction === curr.direction && next.contactId === curr.contactId;
+    if (sameAsPrev && sameAsNext) return "middle";
+    if (sameAsPrev) return "last";
+    if (sameAsNext) return "first";
+    return "solo";
+  }
 
   async function handleCopy(msgId: string, text: string) {
     await copyToClipboard(text);
@@ -65,6 +89,10 @@
 
   function getContactName(contactId: string): string {
     return app.contacts.find(c => c.id === contactId)?.name ?? "Unknown";
+  }
+
+  function formatTime(ts: number): string {
+    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
   async function addPaths(paths: string[]) {
@@ -139,7 +167,7 @@
       onclick={() => msgOpen = !msgOpen}
     >
       <Icon name="chat" size={18} />
-      <span class="text-sm font-medium text-on-surface-variant flex-1">Message</span>
+      <span class="text-sm font-medium text-on-surface-variant flex-1">Messages</span>
       <span class="text-on-surface-variant section-arrow" class:section-arrow-open={msgOpen}>
         <Icon name="expand_more" size={20} />
       </span>
@@ -147,28 +175,20 @@
 
     {#if msgOpen}
       <div class="section-enter">
-        <!-- Chat toolbar: All texts toggle, starred filter, search, clear -->
+        <!-- Chat toolbar -->
         {#if app.messages.length > 0}
-          <div class="flex items-center gap-1 mt-3 mb-1 flex-wrap">
-            <!-- All texts / This contact toggle -->
+          <div class="chat-toolbar">
             <button
-              class="text-xs px-2 py-1 rounded-full border-none cursor-pointer
-                     {app.messageViewAll
-                       ? 'bg-primary text-on-primary'
-                       : 'bg-surface-container-high text-on-surface-variant'}"
-              style="transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+              class="chip"
+              class:chip-active={app.messageViewAll}
               onclick={() => app.messageViewAll = !app.messageViewAll}
             >
               {app.messageViewAll ? "All contacts" : "This contact"}
             </button>
 
-            <!-- Starred filter -->
             <button
-              class="text-xs px-2 py-1 rounded-full border-none cursor-pointer
-                     {showStarredOnly
-                       ? 'bg-primary text-on-primary'
-                       : 'bg-surface-container-high text-on-surface-variant'}"
-              style="transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+              class="chip"
+              class:chip-active={showStarredOnly}
               onclick={() => showStarredOnly = !showStarredOnly}
             >
               <Icon name={showStarredOnly ? "star" : "star_border"} size={12} />
@@ -177,24 +197,22 @@
 
             <span class="flex-1"></span>
 
-            <!-- Search icon toggle -->
             <button
-              class="text-xs text-on-surface-variant cursor-pointer bg-transparent border-none px-1 py-0.5"
-              onclick={() => { app.messageSearch = app.messageSearch ? "" : " "; }}
+              class="toolbar-icon"
+              class:toolbar-icon-active={searchOpen}
+              onclick={() => { searchOpen = !searchOpen; if (!searchOpen) app.messageSearch = ""; }}
               title="Search messages"
             >
               <Icon name="search" size={16} />
             </button>
 
-            <!-- Clear menu -->
             <div class="relative">
               <button
-                class="text-xs text-on-surface-variant cursor-pointer bg-transparent border-none px-1 py-0.5
-                       hover:text-error"
-                style="transition: color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
+                class="toolbar-icon hover:text-error"
                 onclick={() => showClearMenu = !showClearMenu}
+                title="Clear messages"
               >
-                Clear
+                <Icon name="delete_outline" size={16} />
               </button>
               {#if showClearMenu}
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -218,7 +236,7 @@
           </div>
 
           <!-- Search input -->
-          {#if app.messageSearch !== ""}
+          {#if searchOpen}
             <div class="mb-2">
               <TextField
                 label="Search messages"
@@ -233,58 +251,70 @@
           {#if displayMessages.length > 0}
             <div
               bind:this={messagesEl}
-              class="flex flex-col gap-1 max-h-52 overflow-y-auto msg-scroll"
+              class="chat-area"
+              onscroll={handleScroll}
             >
-              {#each displayMessages as msg (msg.id)}
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
+              {#each displayMessages as msg, i (msg.id)}
+                {@const pos = getBubblePosition(i)}
+                {@const isSent = msg.direction === "sent"}
                 <div
-                  class="msg-bubble rounded-lg msg-row cursor-pointer
-                         {msg.direction === 'sent' ? 'msg-sent' : 'msg-received'}
-                         {copiedMsgId === msg.id ? 'msg-copied' : ''}"
-                  onclick={() => handleCopy(msg.id, msg.text)}
-                  title="Click to copy"
+                  class="msg-row"
+                  class:msg-row-sent={isSent}
+                  class:msg-row-received={!isSent}
+                  class:msg-group-break={pos === "solo" || pos === "first"}
                 >
-                  <div class="px-3 py-2">
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="bubble"
+                    class:bubble-sent={isSent}
+                    class:bubble-received={!isSent}
+                    class:bubble-solo={pos === "solo"}
+                    class:bubble-first={pos === "first"}
+                    class:bubble-middle={pos === "middle"}
+                    class:bubble-last={pos === "last"}
+                    class:bubble-copied={copiedMsgId === msg.id}
+                    onclick={() => handleCopy(msg.id, msg.text)}
+                    title="Click to copy"
+                  >
                     {#if app.messageViewAll}
-                      <div class="text-[10px] text-on-surface-variant mb-0.5">
-                        {getContactName(msg.contactId)}
-                      </div>
+                      <div class="bubble-contact">{getContactName(msg.contactId)}</div>
                     {/if}
-                    <div class="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all select-text">
-                      {msg.text}
-                    </div>
-                    <div class="flex items-center gap-1 mt-0.5 justify-end msg-footer">
+                    <span class="bubble-text">{msg.text}</span>
+                    <span class="bubble-time-spacer"></span>
+                    <span class="bubble-meta">
                       {#if copiedMsgId === msg.id}
-                        <span class="text-primary msg-check"><Icon name="check" size={10} /></span>
-                        <span class="text-[10px] text-primary font-medium">Copied</span>
+                        <span class="bubble-copied-badge"><Icon name="check" size={10} /> Copied</span>
                       {:else}
-                        <!-- Star button -->
                         <button
                           class="star-btn"
                           class:starred={msg.starred}
                           onclick={(e) => { e.stopPropagation(); app.toggleStar(msg.id); }}
                           title={msg.starred ? "Unsave" : "Save"}
                         >
-                          <Icon name={msg.starred ? "star" : "star_border"} size={12} />
+                          <Icon name={msg.starred ? "star" : "star_border"} size={11} />
                         </button>
-                        <span class="text-[10px] opacity-40">
-                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                        </span>
+                        <span class="bubble-time">{formatTime(msg.timestamp)}</span>
                       {/if}
-                    </div>
+                    </span>
                   </div>
                 </div>
               {/each}
             </div>
           {:else if app.messageSearch || showStarredOnly}
-            <div class="text-xs text-on-surface-variant text-center py-3">
-              {showStarredOnly ? "No saved messages" : "No results"}
+            <div class="chat-empty">
+              <Icon name={showStarredOnly ? "star_border" : "search_off"} size={32} />
+              <span>{showStarredOnly ? "No saved messages" : "No results"}</span>
             </div>
           {/if}
+        {:else}
+          <div class="chat-empty mt-3">
+            <Icon name="chat_bubble_outline" size={32} />
+            <span>No messages yet</span>
+          </div>
         {/if}
 
-        <!-- Text input — always visible when section is open -->
+        <!-- Text input -->
         <div class="mt-3">
           <TextField
             label="Message"
@@ -340,81 +370,222 @@
     from { opacity: 0; transform: translateY(-8px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-  .msg-sent {
-    background-color: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
-    color: var(--md-sys-color-on-surface);
-    margin-left: 1.5rem;
+
+  /* ── Chat Toolbar ── */
+  .chat-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
   }
-  .msg-received {
-    background-color: color-mix(in srgb, var(--md-sys-color-tertiary) 12%, transparent);
-    color: var(--md-sys-color-on-surface);
-    margin-right: 1.5rem;
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 99px;
+    border: none;
+    cursor: pointer;
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface-variant);
+    transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .msg-bubble {
+  .chip-active {
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+  }
+  .toolbar-icon {
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    color: var(--md-sys-color-on-surface-variant);
+    transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+  }
+  .toolbar-icon-active {
+    color: var(--md-sys-color-primary);
+  }
+
+  /* ── Chat Area ── */
+  .chat-area {
+    display: flex;
+    flex-direction: column;
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 8px 4px;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--md-sys-color-outline) 30%, transparent) transparent;
+  }
+
+  /* ── Message Row ── */
+  .msg-row {
+    display: flex;
+    margin-top: 2px;
+  }
+  .msg-row-sent {
+    justify-content: flex-end;
+  }
+  .msg-row-received {
+    justify-content: flex-start;
+  }
+  .msg-group-break {
+    margin-top: 10px;
+  }
+  .msg-row:first-child {
+    margin-top: 0;
+  }
+
+  /* ── Bubble ── */
+  .bubble {
     position: relative;
-    overflow: hidden;
-    transition: background-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    max-width: clamp(140px, 78%, 400px);
+    width: fit-content;
+    padding: 7px 10px 4px;
+    cursor: pointer;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    animation: bubble-in var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
   }
-  /* M3 state layer: 8% hover, 10% press */
-  .msg-bubble::after {
+  @keyframes bubble-in {
+    from { opacity: 0; transform: translateY(4px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  /* Sent bubble — right side, primary tint */
+  .bubble-sent {
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+  /* Received bubble — left side, surface */
+  .bubble-received {
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
+  }
+
+  /* Bubble grouping corner radius (sent = right side corners change) */
+  .bubble-sent.bubble-solo   { border-radius: 18px 18px 4px 18px; }
+  .bubble-sent.bubble-first  { border-radius: 18px 18px 4px 18px; }
+  .bubble-sent.bubble-middle { border-radius: 18px 4px 4px 18px; }
+  .bubble-sent.bubble-last   { border-radius: 18px 4px 18px 18px; }
+
+  .bubble-received.bubble-solo   { border-radius: 18px 18px 18px 4px; }
+  .bubble-received.bubble-first  { border-radius: 18px 18px 18px 4px; }
+  .bubble-received.bubble-middle { border-radius: 4px 18px 18px 4px; }
+  .bubble-received.bubble-last   { border-radius: 4px 18px 18px 18px; }
+
+  /* Hover state layer */
+  .bubble::after {
     content: "";
     position: absolute;
     inset: 0;
+    border-radius: inherit;
     background: var(--md-sys-color-on-surface);
     opacity: 0;
     pointer-events: none;
     transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .msg-bubble:hover::after { opacity: 0.08; }
-  .msg-bubble:active::after { opacity: 0.1; }
-  .msg-copied {
-    animation: msg-flash var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+  .bubble:hover::after { opacity: 0.06; }
+  .bubble:active::after { opacity: 0.1; }
+
+  .bubble-copied {
+    animation: bubble-flash 0.2s ease;
   }
-  @keyframes msg-flash {
+  @keyframes bubble-flash {
     from { opacity: 0.7; }
     to   { opacity: 1; }
   }
-  .msg-check {
-    animation: check-pop var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
+
+  /* ── Bubble Content ── */
+  .bubble-contact {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--md-sys-color-primary);
+    margin-bottom: 2px;
   }
-  @keyframes check-pop {
+  .bubble-text {
+    font-family: var(--md-sys-typescale-body-small-font, "Roboto Mono", monospace);
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    user-select: text;
+  }
+  /* Invisible spacer to reserve room for the timestamp so text doesn't overlap */
+  .bubble-time-spacer {
+    display: inline-block;
+    width: 64px;
+    height: 1px;
+  }
+  .bubble-meta {
+    position: absolute;
+    right: 8px;
+    bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .bubble-time {
+    font-size: 10px;
+    line-height: 1;
+    opacity: 0.5;
+    white-space: nowrap;
+  }
+  .bubble-copied-badge {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--md-sys-color-primary);
+    animation: badge-pop var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
+  }
+  @keyframes badge-pop {
     from { transform: scale(0.8); opacity: 0; }
     to   { transform: scale(1); opacity: 1; }
   }
-  .msg-row {
-    animation: msg-in var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
-  }
-  @keyframes msg-in {
-    from { opacity: 0; transform: translateY(4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-  .msg-footer {
-    height: 1rem;
-    min-height: 1rem;
-  }
-  .msg-scroll {
-    scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--md-sys-color-outline) 30%, transparent) transparent;
-  }
+
+  /* ── Star Button ── */
   .star-btn {
+    display: flex;
+    align-items: center;
     background: transparent;
     border: none;
     cursor: pointer;
     padding: 0;
     color: var(--md-sys-color-outline);
     opacity: 0;
-    transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
-                color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
-    display: flex;
-    align-items: center;
+    transition: opacity 0.15s ease, color 0.15s ease;
   }
   .star-btn.starred {
     opacity: 1;
     color: var(--md-sys-color-primary);
   }
-  .msg-bubble:hover .star-btn {
+  .bubble:hover .star-btn {
+    opacity: 0.7;
+  }
+  .bubble:hover .star-btn.starred {
     opacity: 1;
   }
+
+  /* ── Empty State ── */
+  .chat-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 24px 0;
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 0.5;
+    font-size: 13px;
+  }
+
+  /* ── Clear Menu ── */
   .clear-menu {
     position: absolute;
     right: 0;

@@ -82,7 +82,8 @@ class CrocAPI:
 
     def set_window(self, window: webview.Window) -> None:
         self._window = window
-        self._bind_drop_handler(window)
+        # Drop handler must bind AFTER window is loaded (DOM not ready before)
+        window.events.loaded += lambda: self._bind_drop_handler(window)
 
     def _bind_drop_handler(self, window: webview.Window) -> None:
         """Bind native drop handler to get full file paths from pywebview."""

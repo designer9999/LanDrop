@@ -23,22 +23,20 @@
 
   function handleDragOver(e: DragEvent) {
     e.preventDefault();
-    e.stopPropagation();
     dragOver = true;
   }
 
   function handleDragLeave(e: DragEvent) {
     e.preventDefault();
-    e.stopPropagation();
     dragOver = false;
   }
 
   function handleDrop(e: DragEvent) {
     e.preventDefault();
-    e.stopPropagation();
     dragOver = false;
-    // Full file paths come from Python via "files_dropped" event
-    // (pywebview's pywebviewFullPath — browser JS can't access real paths)
+    // Do NOT call e.stopPropagation() — pywebview's native document-level
+    // drop handler needs the event to bubble up to get full file paths
+    // (pywebviewFullPath). Paths arrive via "files_dropped" event.
   }
 </script>
 

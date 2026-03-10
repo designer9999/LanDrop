@@ -1,2 +1,2 @@
-APP_VERSION = "1.2.0"
+APP_VERSION = "2.0.0"
 GITHUB_REPO = "designer9999/Crude"
