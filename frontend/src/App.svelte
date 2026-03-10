@@ -11,16 +11,7 @@
   import { getStatus, stopTransfer, checkUpdate, downloadUpdate, launchUpdate, installCroc, sendFiles, sendText, startLAN, stopLAN, lanSendText, lanSendFiles, setFocused, setNotifications, getFileInfo } from "$lib/api/bridge";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
 
-  const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".svg"]);
-  function fileIsImage(name: string): boolean {
-    const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-    return IMAGE_EXTS.has(ext);
-  }
-  function fileSizeStr(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  }
+  import { isImage as fileIsImage, fileSizeStr } from "$lib/utils/file-utils";
   import Icon from "$lib/ui/Icon.svelte";
   import IconButton from "$lib/ui/IconButton.svelte";
   import Button from "$lib/ui/Button.svelte";

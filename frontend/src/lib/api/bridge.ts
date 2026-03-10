@@ -158,6 +158,10 @@ export async function getThumbnail(path: string): Promise<string | null> {
   return (await api()?.get_thumbnail(path)) ?? null;
 }
 
+export async function getFullImage(path: string, maxPx: number = 800): Promise<string | null> {
+  return (await api()?.get_thumbnail(path, maxPx)) ?? null;
+}
+
 // ── App focus & notifications ──
 
 export async function setFocused(focused: boolean): Promise<void> {

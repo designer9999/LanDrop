@@ -23,6 +23,17 @@
   let sendOpen = $state(true);
   let receiveOpen = $state(true);
   let aboutOpen = $state(false);
+  let debugOpen = $state(false);
+  let debugEl: HTMLDivElement | undefined = $state();
+
+  // Auto-scroll debug log to bottom
+  $effect(() => {
+    if (debugOpen && app.logs.length && debugEl) {
+      requestAnimationFrame(() => {
+        if (debugEl) debugEl.scrollTop = debugEl.scrollHeight;
+      });
+    }
+  });
 
   const curveOptions = [
     { value: "",        label: "P-256 (default)" },
@@ -280,6 +291,65 @@
     {/if}
   </Card>
 
+  <!-- Debug Log -->
+  <Card variant="outlined">
+    <button
+      class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
+             cursor-pointer border-none bg-transparent p-0 -my-0.5"
+      onclick={() => debugOpen = !debugOpen}
+    >
+      <span class="text-primary"><Icon name="bug_report" size={20} /></span>
+      Debug Log
+      {#if app.logs.length > 0}
+        <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant">
+          {app.logs.length}
+        </span>
+      {/if}
+      <span class="flex-1"></span>
+      <span class="text-on-surface-variant section-arrow" class:section-arrow-open={debugOpen}>
+        <Icon name="expand_more" size={20} />
+      </span>
+    </button>
+
+    {#if debugOpen}
+      <div class="flex flex-col gap-2 mt-3 section-enter">
+        <p class="text-xs text-on-surface-variant">
+          Real-time log of backend events, transfers, and errors. Share this when reporting bugs.
+        </p>
+        <div
+          bind:this={debugEl}
+          class="debug-log"
+        >
+          {#if app.logs.length === 0}
+            <div class="text-xs text-on-surface-variant opacity-40 text-center py-4">No log entries yet</div>
+          {:else}
+            {#each app.logs as log}
+              <div class="debug-entry" class:debug-error={log.level === "error"} class:debug-warn={log.level === "warn"} class:debug-success={log.level === "success"}>
+                <span class="debug-time">{log.time}</span>
+                <span class="debug-level">{log.level.toUpperCase()}</span>
+                <span class="debug-text">{log.text}</span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+        <div class="flex gap-2">
+          <Button variant="outlined" onclick={() => app.clearLogs()}>
+            <Icon name="delete_sweep" size={16} />
+            Clear log
+          </Button>
+          <Button variant="outlined" onclick={async () => {
+            const text = app.logs.map(l => `[${l.time}] ${l.level.toUpperCase()} ${l.text}`).join("\n");
+            await copyToClipboard(text);
+            onsnackbar?.("Log copied to clipboard");
+          }}>
+            <Icon name="content_copy" size={16} />
+            Copy log
+          </Button>
+        </div>
+      </div>
+    {/if}
+  </Card>
+
 </div>
 
 <style>
@@ -296,4 +366,50 @@
     from { opacity: 0; transform: translateY(-8px); }
     to   { opacity: 1; transform: translateY(0); }
   }
+
+  /* ── Debug Log ── */
+  .debug-log {
+    max-height: 300px;
+    overflow-y: auto;
+    border-radius: 8px;
+    background: var(--md-sys-color-surface-container-lowest);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    padding: 4px 0;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--md-sys-color-outline) 30%, transparent) transparent;
+  }
+  .debug-entry {
+    display: flex;
+    gap: 6px;
+    padding: 2px 8px;
+    font-family: "Roboto Mono", monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    align-items: baseline;
+  }
+  .debug-entry:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 4%, transparent);
+  }
+  .debug-time {
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 0.5;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .debug-level {
+    flex-shrink: 0;
+    width: 48px;
+    font-weight: 600;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+  .debug-error .debug-level { color: var(--md-sys-color-error); }
+  .debug-warn .debug-level { color: var(--md-sys-color-tertiary); }
+  .debug-success .debug-level { color: #4caf50; }
+  .debug-text {
+    color: var(--md-sys-color-on-surface);
+    white-space: pre-wrap;
+    word-break: break-all;
+    min-width: 0;
+  }
+  .debug-error .debug-text { color: var(--md-sys-color-error); }
 </style>

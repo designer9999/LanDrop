@@ -8,13 +8,9 @@
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
-  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail } from "$lib/api/bridge";
+  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail, getFullImage } from "$lib/api/bridge";
 
-  const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".svg"]);
-  function isImage(name: string): boolean {
-    const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-    return IMAGE_EXTS.has(ext);
-  }
+  import { isImage } from "$lib/utils/file-utils";
 
   // Cache for base64 image thumbnails ("loading" = in progress, string = data URI)
   let thumbCache = $state<Record<string, string>>({});
@@ -38,6 +34,26 @@
   let searchOpen = $state(false);
   let dragOver = $state(false);
   let composerEl: HTMLTextAreaElement | undefined = $state();
+
+  // Lightbox for full-size image preview
+  let lightboxSrc = $state<string | null>(null);
+  let lightboxName = $state("");
+  let lightboxLoading = $state(false);
+
+  async function openLightbox(path: string, name: string) {
+    lightboxName = name;
+    lightboxLoading = true;
+    lightboxSrc = thumbCache[path] ?? null; // Show thumbnail immediately while loading
+    const full = await getFullImage(path, 800);
+    lightboxLoading = false;
+    if (full) lightboxSrc = full;
+  }
+
+  function closeLightbox() {
+    lightboxSrc = null;
+    lightboxName = "";
+    lightboxLoading = false;
+  }
 
   // Filtered messages for display
   const displayMessages = $derived.by(() => {
@@ -117,12 +133,15 @@
 
   // Load thumbnails lazily — one at a time to avoid IPC flood
   function loadThumb(path: string) {
-    if (thumbCache[path] || _thumbLoading.has(path)) return;
+    if (path in thumbCache || _thumbLoading.has(path)) return;
     _thumbLoading.add(path);
     getThumbnail(path).then(uri => {
       _thumbLoading.delete(path);
-      if (uri) thumbCache = { ...thumbCache, [path]: uri };
-    }).catch(() => _thumbLoading.delete(path));
+      thumbCache = { ...thumbCache, [path]: uri ?? "" }; // "" = no thumbnail available
+    }).catch(() => {
+      _thumbLoading.delete(path);
+      thumbCache = { ...thumbCache, [path]: "" };
+    });
   }
 
   // Trigger loading for visible images
@@ -314,12 +333,14 @@
               <div class="bubble-contact">{getContactName(msg.contactId)}</div>
             {/if}
 
-            <!-- Image attachments -->
+            <!-- Image attachments (clickable for full-size) -->
             {#if images.length > 0}
               <div class="att-images" class:att-grid={images.length > 1}>
                 {#each images as img}
-                  <div class="att-img-wrap">
-                    {#if thumbCache[img.path]}
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div class="att-img-wrap" onclick={(e) => { e.stopPropagation(); openLightbox(img.path, img.name); }}>
+                    {#if thumbCache[img.path] && thumbCache[img.path] !== ""}
                       <img src={thumbCache[img.path]} alt={img.name} class="att-img" />
                     {:else}
                       <div class="att-img-placeholder"><Icon name="image" size={24} /></div>
@@ -389,7 +410,7 @@
       <div class="composer-attachments">
         {#each imageFiles as file (file.path)}
           <div class="att-thumb">
-            {#if thumbCache[file.path]}
+            {#if thumbCache[file.path] && thumbCache[file.path] !== ""}
               <img src={thumbCache[file.path]} alt={file.info?.name ?? "image"} class="att-thumb-img" />
             {:else}
               <div class="att-thumb-placeholder"><Icon name="image" size={16} /></div>
@@ -454,6 +475,24 @@
     <div class="drag-overlay">
       <Icon name="upload_file" size={40} />
       <span>Drop files here</span>
+    </div>
+  {/if}
+
+  <!-- Image lightbox -->
+  {#if lightboxSrc}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="lightbox" onclick={closeLightbox}>
+      <div class="lightbox-header">
+        <span class="lightbox-name">{lightboxName}</span>
+        <button class="lightbox-close" onclick={closeLightbox}>
+          <Icon name="close" size={20} />
+        </button>
+      </div>
+      <img src={lightboxSrc} alt={lightboxName} class="lightbox-img" class:lightbox-img-loading={lightboxLoading} />
+      {#if lightboxLoading}
+        <span class="lightbox-loading">Loading full image...</span>
+      {/if}
     </div>
   {/if}
 </div>
@@ -820,5 +859,70 @@
   }
   .clear-menu button:hover {
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
+  }
+
+  /* ── Lightbox (full-size image overlay) ── */
+  .lightbox {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.85);
+    animation: overlay-in 0.15s ease both;
+    cursor: pointer;
+  }
+  .lightbox-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: linear-gradient(rgba(0,0,0,0.6), transparent);
+  }
+  .lightbox-name {
+    font-size: 12px;
+    color: rgba(255,255,255,0.8);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lightbox-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.15);
+    color: #fff;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .lightbox-close:hover {
+    background: rgba(255,255,255,0.25);
+  }
+  .lightbox-img {
+    max-width: 90%;
+    max-height: 80%;
+    object-fit: contain;
+    border-radius: 8px;
+    cursor: default;
+    transition: opacity 0.2s ease;
+  }
+  .lightbox-img-loading {
+    opacity: 0.5;
+    filter: blur(2px);
+  }
+  .lightbox-loading {
+    margin-top: 8px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.5);
   }
 </style>

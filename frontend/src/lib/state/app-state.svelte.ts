@@ -232,12 +232,6 @@ class AppState {
     return this.files.map(f => f.path);
   }
 
-  get canSend(): boolean {
-    return !this.transferActive && (
-      this.hasFiles || !!this.sendTextContent.trim()
-    );
-  }
-
   // ── Contact CRUD ──
 
   addContact(contact: Contact) {
@@ -294,6 +288,9 @@ class AppState {
   addLog(level: LogEntry["level"], text: string) {
     const time = new Date().toLocaleTimeString("en-GB", { hour12: false });
     this.logs = [...this.logs, { level, text, time }];
+    if (this.logs.length > 500) {
+      this.logs = this.logs.slice(-500);
+    }
   }
 
   clearLogs() {

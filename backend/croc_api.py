@@ -18,9 +18,15 @@ import sys
 import tempfile
 import threading
 import webbrowser
+from io import BytesIO
 
 import webview
 from webview.dom import DOMEventHandler
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment,misc]
 
 from backend.lan_server import LANPeer
 from backend.updater import check_for_updates, download_update
@@ -41,9 +47,14 @@ def _file_size_str(size_bytes: int) -> str:
 
 
 def _safe_close_process(proc: subprocess.Popen | None) -> None:
-    """Safely close a subprocess and its pipes."""
+    """Safely close a subprocess — kill first (instant on Windows), then clean up pipes."""
     if proc is None:
         return
+    try:
+        proc.kill()  # SIGKILL / TerminateProcess — instant, no graceful wait
+        proc.wait(timeout=2)
+    except Exception:
+        pass
     try:
         if proc.stdout:
             proc.stdout.close()
@@ -51,15 +62,6 @@ def _safe_close_process(proc: subprocess.Popen | None) -> None:
             proc.stderr.close()
     except Exception:
         pass
-    try:
-        proc.terminate()
-        proc.wait(timeout=5)
-    except Exception:
-        try:
-            proc.kill()
-            proc.wait(timeout=3)
-        except Exception:
-            pass
 
 
 class CrocAPI:
@@ -602,13 +604,12 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
     def stop_transfer(self) -> bool:
         with self._lock:
             proc = self._process
-            if proc:
-                _safe_close_process(proc)
-                self._process = None
-
-                self._js_log("warn", "Transfer stopped")
-                self._js_event("transfer_done", {"success": False, "stopped": True})
-                return True
+            self._process = None  # Clear ref immediately so transfer thread sees it
+        if proc:
+            _safe_close_process(proc)
+            self._js_log("warn", "Transfer stopped")
+            self._js_event("transfer_done", {"success": False, "stopped": True})
+            return True
         return False
 
     def _kill_existing_process(self) -> None:
@@ -809,7 +810,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         finally:
             _safe_close_process(proc)
             with self._lock:
-                stopped = self._process is None
+                stopped = self._process is not proc  # stop_transfer cleared it
                 self._process = None
             if stopped:
                 return  # stop_transfer already handled events
@@ -860,7 +861,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         finally:
             _safe_close_process(proc)
             with self._lock:
-                stopped = self._process is None
+                stopped = self._process is not proc
                 self._process = None
             if stopped:
                 return
@@ -912,7 +913,7 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         finally:
             _safe_close_process(proc)
             with self._lock:
-                stopped = self._process is None
+                stopped = self._process is not proc
                 self._process = None
             if stopped:
                 return
@@ -930,16 +931,15 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
     def get_thumbnail(self, path: str, max_px: int = 200) -> str | None:
         """Return a small base64 data URI thumbnail for an image file.
 
-        Resizes large images to max_px using PIL if available, otherwise
-        reads raw file (capped at 500KB to avoid UI freeze).
-        SVG files are returned as-is (they're small).
+        Uses PIL to resize to max_px — produces ~5-10KB thumbnails.
+        SVG files are returned as-is (vector, usually tiny).
         """
         path = os.path.normpath(path)
         if not os.path.isfile(path):
             return None
         ext = os.path.splitext(path)[1].lower()
 
-        # SVG — return raw (usually tiny)
+        # SVG — return raw (vector, usually tiny)
         if ext == ".svg":
             try:
                 size = os.path.getsize(path)
@@ -956,37 +956,32 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         if not mime or not mime.startswith("image/"):
             return None
 
-        # Try PIL resize for fast, small thumbnails
-        try:
-            from PIL import Image
-            import io
+        if Image is None:
+            # Pillow not available — raw fallback, cap at 500KB
+            try:
+                size = os.path.getsize(path)
+                if size > 500_000:
+                    return None
+                with open(path, "rb") as f:
+                    data = f.read()
+                encoded = base64.b64encode(data).decode("ascii")
+                return f"data:{mime};base64,{encoded}"
+            except Exception:
+                return None
 
-            img = Image.open(path)
-            img.thumbnail((max_px, max_px), Image.LANCZOS)
-            if img.mode in ("RGBA", "P"):
-                buf_fmt, out_mime = "PNG", "image/png"
-            else:
-                buf_fmt, out_mime = "JPEG", "image/jpeg"
-            buf = io.BytesIO()
-            img.save(buf, format=buf_fmt, quality=75, optimize=True)
-            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-            return f"data:{out_mime};base64,{encoded}"
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.debug("PIL thumbnail failed for %s: %s", path, e)
-
-        # Fallback: raw file but ONLY if small (< 500KB)
         try:
-            size = os.path.getsize(path)
-            if size > 500_000:
-                return None  # Too large without resize — skip
-            with open(path, "rb") as f:
-                data = f.read()
-            encoded = base64.b64encode(data).decode("ascii")
-            return f"data:{mime};base64,{encoded}"
+            with Image.open(path) as img:
+                img.thumbnail((max_px, max_px), Image.LANCZOS)
+                if img.mode in ("RGBA", "P"):
+                    buf_fmt, out_mime = "PNG", "image/png"
+                else:
+                    buf_fmt, out_mime = "JPEG", "image/jpeg"
+                buf = BytesIO()
+                img.save(buf, format=buf_fmt, quality=75, optimize=True)
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                return f"data:{out_mime};base64,{encoded}"
         except Exception as e:
-            logger.warning("Thumbnail failed for %s: %s", path, e)
+            logger.debug("Thumbnail failed for %s: %s", path, e)
             return None
 
     # ── JS bridge helpers ──
