@@ -1,10 +1,12 @@
 <!--
   File list — shows selected files as compact thumbnails (images) or cards (other files).
   Claude-style: images as small square thumbnails in a row, files as compact chips.
+  Uses base64 data URIs via backend API (WebView2 blocks file:/// cross-origin).
 -->
 <script lang="ts">
   import Icon from "$lib/ui/Icon.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
+  import { getThumbnail } from "$lib/api/bridge";
 
   const app = getAppState();
 
@@ -26,9 +28,19 @@
     return "draft";
   }
 
-  function fileUrl(path: string): string {
-    return "file:///" + path.replace(/\\/g, "/");
-  }
+  // Cache for base64 thumbnails keyed by file path
+  let thumbCache = $state<Record<string, string>>({});
+
+  // Load thumbnails for image files
+  $effect(() => {
+    for (const file of images) {
+      if (!thumbCache[file.path]) {
+        getThumbnail(file.path).then(uri => {
+          if (uri) thumbCache = { ...thumbCache, [file.path]: uri };
+        });
+      }
+    }
+  });
 
   const images = $derived(app.files.filter(f => f.info && isImage(f.info.type)));
   const otherFiles = $derived(app.files.filter(f => !f.info || !isImage(f.info.type)));
@@ -39,12 +51,17 @@
   <div class="thumb-row">
     {#each images as file (file.path)}
       <div class="thumb-wrap group">
-        <img
-          src={fileUrl(file.path)}
-          alt={file.info?.name ?? "image"}
-          class="thumb-img"
-          loading="lazy"
-        />
+        {#if thumbCache[file.path]}
+          <img
+            src={thumbCache[file.path]}
+            alt={file.info?.name ?? "image"}
+            class="thumb-img"
+          />
+        {:else}
+          <div class="thumb-placeholder">
+            <Icon name="image" size={20} />
+          </div>
+        {/if}
         {#if !app.transferActive}
           <button
             class="thumb-remove"
@@ -108,6 +125,15 @@
     height: 100%;
     object-fit: cover;
     display: block;
+  }
+  .thumb-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 0.4;
   }
   .thumb-remove {
     position: absolute;

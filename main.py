@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -199,7 +200,29 @@ def main():
 
     api.set_window(window)
 
-    window.events.closing += lambda: os._exit(0)
+    def _on_closing():
+        """Immediate kill — no cleanup delays."""
+        _kill_all_croc()
+        os._exit(0)
+
+    window.events.closing += _on_closing
+
+    # Watchdog thread: if the main window is destroyed but closing event
+    # didn't fire (pywebview bug), force kill after 1 second.
+    def _exit_watchdog():
+        import time as _time
+        while True:
+            _time.sleep(1)
+            try:
+                # If window handle is gone, the app should have exited
+                if window and not window.uid:
+                    _kill_all_croc()
+                    os._exit(0)
+            except Exception:
+                _kill_all_croc()
+                os._exit(0)
+
+    threading.Thread(target=_exit_watchdog, daemon=True, name="exit-watchdog").start()
 
     storage = os.path.join(
         os.environ.get("APPDATA", tempfile.gettempdir()),
@@ -207,7 +230,8 @@ def main():
     )
     webview.start(debug=dev_mode, private_mode=False, storage_path=storage)
 
-    # Fallback if closing event didn't fire
+    # Fallback: webview.start() returned — force exit immediately
+    _kill_all_croc()
     os._exit(0)
 
 

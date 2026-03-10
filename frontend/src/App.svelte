@@ -391,28 +391,36 @@
 
 <div class="flex flex-col h-screen bg-surface text-on-surface overflow-hidden select-none">
 
-  <!-- Top App Bar — compact -->
-  <div class="flex items-center gap-2 px-3 py-1.5">
-    <span class="text-primary"><Icon name="swap_horiz" size={22} /></span>
-    <h1 class="flex-1 text-base font-medium text-on-surface" style="font-family: var(--font-brand);">Croc Transfer</h1>
-    <span class="text-[10px] px-2 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant">
+  <!-- Top bar — title + contacts + settings on ONE row -->
+  <div class="top-bar">
+    <span class="text-primary shrink-0"><Icon name="swap_horiz" size={20} /></span>
+    {#if app.activeView === "transfer"}
+      <div class="contact-strip">
+        <ContactBar onadd={openAddContact} onedit={openEditContact} />
+      </div>
+    {:else}
+      <span class="text-sm font-medium text-on-surface whitespace-nowrap">Settings</span>
+      <span class="flex-1"></span>
+    {/if}
+    <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant shrink-0">
       v{appVersion}
     </span>
     <IconButton
       title="Settings"
       onclick={() => app.activeView = app.activeView === "settings" ? "transfer" : "settings"}
     >
-      <Icon name={app.activeView === "settings" ? "close" : "settings"} size={20} />
+      <Icon name={app.activeView === "settings" ? "close" : "settings"} size={18} />
     </IconButton>
   </div>
+  <Divider />
 
   <!-- Update banner -->
   {#if updateAvailable && !updateDownloading && !updateFilePath}
-    <div class="flex items-center gap-2 px-4 py-2 bg-tertiary-container text-on-tertiary-container text-sm">
-      <Icon name="system_update" size={18} />
+    <div class="flex items-center gap-2 px-4 py-1.5 bg-tertiary-container text-on-tertiary-container text-xs">
+      <Icon name="system_update" size={16} />
       <span class="flex-1">Update {updateVersion} available</span>
       <button
-        class="text-sm font-medium px-3 py-1 rounded-full bg-tertiary text-on-tertiary
+        class="text-xs font-medium px-2.5 py-0.5 rounded-full bg-tertiary text-on-tertiary
                cursor-pointer border-none"
         onclick={handleDownloadUpdate}
       >Download</button>
@@ -420,21 +428,21 @@
   {/if}
 
   {#if updateDownloading}
-    <div class="flex items-center gap-2 px-4 py-2 bg-tertiary-container text-on-tertiary-container text-sm">
-      <Icon name="downloading" size={18} />
-      <span class="flex-1">Downloading update... {updateProgress}%</span>
+    <div class="flex items-center gap-2 px-4 py-1.5 bg-tertiary-container text-on-tertiary-container text-xs">
+      <Icon name="downloading" size={16} />
+      <span class="flex-1">Downloading... {updateProgress}%</span>
     </div>
-    <div class="h-1 bg-surface-container-highest">
+    <div class="h-0.5 bg-surface-container-highest">
       <div class="h-full bg-tertiary" style="width: {updateProgress}%; transition: width 200ms ease;"></div>
     </div>
   {/if}
 
   {#if updateFilePath}
-    <div class="flex items-center gap-2 px-4 py-2 bg-primary-container text-on-primary-container text-sm">
-      <Icon name="check_circle" size={18} />
-      <span class="flex-1">Update ready to install</span>
+    <div class="flex items-center gap-2 px-4 py-1.5 bg-primary-container text-on-primary-container text-xs">
+      <Icon name="check_circle" size={16} />
+      <span class="flex-1">Update ready</span>
       <button
-        class="text-sm font-medium px-3 py-1 rounded-full bg-primary text-on-primary
+        class="text-xs font-medium px-2.5 py-0.5 rounded-full bg-primary text-on-primary
                cursor-pointer border-none"
         onclick={handleInstallUpdate}
       >Install & restart</button>
@@ -443,11 +451,11 @@
 
   <!-- croc not found banner -->
   {#if !app.crocOk && !app.crocInstalling}
-    <div class="flex items-center gap-2 px-4 py-2 bg-error-container text-on-error-container text-sm">
-      <Icon name="error" size={18} />
+    <div class="flex items-center gap-2 px-4 py-1.5 bg-error-container text-on-error-container text-xs">
+      <Icon name="error" size={16} />
       <span class="flex-1">croc not found</span>
       <button
-        class="text-sm font-medium px-3 py-1 rounded-full bg-error text-on-error
+        class="text-xs font-medium px-2.5 py-0.5 rounded-full bg-error text-on-error
                cursor-pointer border-none"
         onclick={async () => await installCroc()}
       >Install</button>
@@ -455,16 +463,10 @@
   {/if}
 
   {#if app.crocInstalling}
-    <div class="flex items-center gap-2 px-4 py-2 bg-tertiary-container text-on-tertiary-container text-sm">
-      <Icon name="hourglass_empty" size={18} />
+    <div class="flex items-center gap-2 px-4 py-1.5 bg-tertiary-container text-on-tertiary-container text-xs">
+      <Icon name="hourglass_empty" size={16} />
       <span class="flex-1">Installing croc...</span>
     </div>
-  {/if}
-
-  <!-- Contact Bar (only in transfer view) -->
-  {#if app.activeView === "transfer"}
-    <ContactBar onadd={openAddContact} onedit={openEditContact} />
-    <Divider />
   {/if}
 
   <!-- Content -->
@@ -547,6 +549,20 @@
 <Snackbar message={snackbarMsg} bind:visible={snackbarVisible} />
 
 <style>
+  /* ── Top bar — single row with contacts inline ── */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px 2px 10px;
+    min-height: 36px;
+  }
+  .contact-strip {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+
   /* M3 Split Button — two separate segments with gap */
   .split-btn {
     display: flex;

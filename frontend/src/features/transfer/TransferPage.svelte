@@ -12,7 +12,6 @@
   import ActivityLog from "./ActivityLog.svelte";
   import CodeDisplay from "../send/CodeDisplay.svelte";
   import LogPanel from "../LogPanel.svelte";
-  import ContactAvatar from "../contacts/ContactAvatar.svelte";
 
   interface Props {
     onsnackbar?: (msg: string) => void;
@@ -44,22 +43,6 @@
         </Button>
       </div>
     </Card>
-  {/if}
-
-  {#if contact}
-    <!-- Contact header — minimal inline -->
-    <div class="flex items-center gap-2 px-1">
-      <ContactAvatar name={contact.name} color={contact.color} size="sm" />
-      <span class="text-sm font-medium text-on-surface truncate flex-1">{contact.name}</span>
-      {#if app.lanConnected}
-        <span class="flex items-center gap-1 text-[11px] text-primary">
-          <Icon name="bolt" size={11} />
-          LAN — {app.lanPeerIp}
-        </span>
-      {:else}
-        <span class="text-[11px] text-on-surface-variant">Searching LAN...</span>
-      {/if}
-    </div>
   {/if}
 
   <!-- Unified send -->

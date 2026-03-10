@@ -6,9 +6,11 @@ Requires Python 3.14+.
 """
 
 import atexit
+import base64
 import glob as _glob
 import json
 import logging
+import mimetypes
 import os
 import shutil
 import socket
@@ -925,6 +927,30 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
                 "transfer_done",
                 {"success": success, "files": received_files, "mode": "receive"},
             )
+
+    # ── Thumbnail API ──
+
+    def get_thumbnail(self, path: str, max_size: int = 200) -> str | None:
+        """Return a base64 data URI for an image file, or None."""
+        path = os.path.normpath(path)
+        if not os.path.isfile(path):
+            return None
+        ext = os.path.splitext(path)[1].lower()
+        mime = mimetypes.guess_type(path)[0]
+        if not mime or not mime.startswith("image/"):
+            # SVG special case
+            if ext == ".svg":
+                mime = "image/svg+xml"
+            else:
+                return None
+        try:
+            with open(path, "rb") as f:
+                data = f.read(10 * 1024 * 1024)  # Max 10MB
+            encoded = base64.b64encode(data).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+        except Exception as e:
+            logger.warning("Thumbnail failed for %s: %s", path, e)
+            return None
 
     # ── JS bridge helpers ──
 

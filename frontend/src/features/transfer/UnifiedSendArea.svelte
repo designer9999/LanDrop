@@ -10,7 +10,7 @@
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
-  import { pickFiles, pickFolder, getFileInfo, copyToClipboard } from "$lib/api/bridge";
+  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail } from "$lib/api/bridge";
   import DropZone from "../send/DropZone.svelte";
   import FileList from "../send/FileList.svelte";
 
@@ -19,6 +19,9 @@
     const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
     return IMAGE_EXTS.has(ext);
   }
+
+  // Cache for base64 image thumbnails in chat
+  let chatThumbCache = $state<Record<string, string>>({});
 
   interface Props {
     contactName?: string;
@@ -55,8 +58,15 @@
     return msgs;
   });
 
-  // Show toolbar if there are any messages at all OR we're in starred/search mode
-  const showToolbar = $derived(app.messages.length > 0 || showStarredOnly || searchOpen);
+  // Show toolbar if current view has messages OR we're in starred/search mode
+  const currentContactMessages = $derived(
+    app.messageViewAll
+      ? app.messages
+      : app.activeContact
+        ? app.getContactMessages(app.activeContact.id)
+        : []
+  );
+  const showToolbar = $derived(currentContactMessages.length > 0 || showStarredOnly || searchOpen);
 
   // Auto-scroll to bottom only when user is near the bottom
   let wasAtBottom = true;
@@ -111,6 +121,20 @@
       app.addFile(path, info);
     }
   }
+
+  // Load thumbnails for image attachments in chat messages
+  $effect(() => {
+    for (const msg of displayMessages) {
+      if (!msg.attachments) continue;
+      for (const att of msg.attachments) {
+        if (att.type === "image" && att.path && !chatThumbCache[att.path]) {
+          getThumbnail(att.path).then(uri => {
+            if (uri) chatThumbCache = { ...chatThumbCache, [att.path]: uri };
+          });
+        }
+      }
+    }
+  });
 
   async function handlePickFiles() {
     const result = await pickFiles();
@@ -304,12 +328,17 @@
                     <div class="att-images" class:att-grid={images.length > 1}>
                       {#each images as img}
                         <div class="att-img-wrap">
-                          <img
-                            src={"file:///" + img.path.replace(/\\/g, "/")}
-                            alt={img.name}
-                            class="att-img"
-                            loading="lazy"
-                          />
+                          {#if chatThumbCache[img.path]}
+                            <img
+                              src={chatThumbCache[img.path]}
+                              alt={img.name}
+                              class="att-img"
+                            />
+                          {:else}
+                            <div class="att-img-placeholder">
+                              <Icon name="image" size={24} />
+                            </div>
+                          {/if}
                         </div>
                       {/each}
                     </div>
@@ -647,6 +676,15 @@
     max-height: 200px;
     object-fit: cover;
     cursor: pointer;
+  }
+  .att-img-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 80px;
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 0.4;
   }
   .att-grid .att-img {
     aspect-ratio: 1;

@@ -152,6 +152,12 @@ export async function lanSendFiles(paths: string[]): Promise<boolean> {
   return (await api()?.lan_send_files(paths)) ?? false;
 }
 
+// ── Thumbnails ──
+
+export async function getThumbnail(path: string): Promise<string | null> {
+  return (await api()?.get_thumbnail(path)) ?? null;
+}
+
 // ── App focus & notifications ──
 
 export async function setFocused(focused: boolean): Promise<void> {
