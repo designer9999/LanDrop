@@ -1,6 +1,6 @@
 <!--
-  Main transfer view — per-contact or fallback mode
-  Assembles: UnifiedSendArea + QuickReceive + CodeDisplay + ActivityLog + LogPanel
+  Main transfer view — Claude-style chat layout
+  Chat fills the space, activity/log are collapsible below
 -->
 <script lang="ts">
   import { getAppState } from "$lib/state/app-state.svelte";
@@ -8,26 +8,25 @@
   import Card from "$lib/ui/Card.svelte";
   import Button from "$lib/ui/Button.svelte";
   import UnifiedSendArea from "./UnifiedSendArea.svelte";
-  import QuickReceive from "./QuickReceive.svelte";
   import ActivityLog from "./ActivityLog.svelte";
-  import CodeDisplay from "../send/CodeDisplay.svelte";
   import LogPanel from "../LogPanel.svelte";
 
   interface Props {
     onsnackbar?: (msg: string) => void;
     onaddcontact?: () => void;
+    onsend?: () => void;
+    onsendtext?: () => void;
   }
 
-  let { onsnackbar, onaddcontact }: Props = $props();
+  let { onsnackbar, onaddcontact, onsend, onsendtext }: Props = $props();
 
   const app = getAppState();
   const contact = $derived(app.activeContact);
 </script>
 
-<div class="flex flex-col gap-4">
-
-  {#if !app.contacts.length}
-    <!-- No contacts — onboarding -->
+{#if !app.contacts.length}
+  <!-- No contacts — onboarding -->
+  <div class="p-4">
     <Card variant="filled">
       <div class="flex flex-col items-center text-center gap-3 py-4">
         <span class="text-primary"><Icon name="group_add" size={48} /></span>
@@ -43,23 +42,35 @@
         </Button>
       </div>
     </Card>
-  {/if}
+  </div>
+{/if}
 
-  <!-- Unified send -->
-  <UnifiedSendArea contactName={contact?.name} {onsnackbar} />
+<!-- Chat area — fills available space -->
+<UnifiedSendArea contactName={contact?.name} {onsnackbar} {onsend} {onsendtext} />
 
-  <!-- Transfer code display (only for manual/no-contact sends) -->
-  {#if app.transferCode && !contact}
-    <CodeDisplay code={app.transferCode} oncopied={() => onsnackbar?.("Code copied!")} />
-  {/if}
+<!-- LAN status indicator -->
+{#if contact}
+  <div class="lan-status">
+    {#if app.lanConnected}
+      <span class="text-primary flex items-center gap-1">
+        <Icon name="bolt" size={12} />
+        LAN direct — {app.lanPeerIp}
+      </span>
+    {:else}
+      <span class="flex items-center gap-1 text-on-surface-variant">
+        <Icon name="sync" size={12} />
+        Searching LAN...
+      </span>
+    {/if}
+  </div>
+{/if}
 
-  <!-- Quick receive -->
-  <QuickReceive contactName={contact?.name} {onsnackbar} />
-
-  <!-- Activity log -->
-  <ActivityLog />
-
-  <!-- Raw croc log (collapsible) -->
-  <LogPanel />
-
-</div>
+<style>
+  .lan-status {
+    display: flex;
+    justify-content: center;
+    padding: 2px 8px;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+</style>

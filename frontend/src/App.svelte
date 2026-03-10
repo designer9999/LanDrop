@@ -292,11 +292,6 @@
     }
   });
 
-  // Split send — files and text are separate actions
-  const fabHasFiles = $derived(app.hasFiles);
-  const fabHasText = $derived(!!app.sendTextContent.trim());
-  const fabShowSplit = $derived(fabHasFiles && fabHasText);
-
   async function handleSendFiles() {
     if (!app.hasFiles || app.transferActive) return;
     const contact = app.activeContact;
@@ -366,15 +361,6 @@
     // No LAN connection — use croc
     const opts = app.effectiveSendOptions;
     await sendText(textToSend, opts);
-  }
-
-  async function handleSendAll() {
-    if (!app.canSend || app.transferActive) return;
-    if (app.hasFiles) {
-      await handleSendFiles();
-    } else if (fabHasText) {
-      await handleSendText();
-    }
   }
 
   async function handleDownloadUpdate() {
@@ -470,46 +456,21 @@
   {/if}
 
   <!-- Content -->
-  <div class="flex-1 overflow-y-auto p-4">
-    {#if app.activeView === "transfer"}
-      <TransferPage onsnackbar={showSnackbar} onaddcontact={openAddContact} />
-    {:else}
-      <SettingsPage {appVersion} onsnackbar={showSnackbar} />
-    {/if}
-  </div>
-
-  <!-- FAB Send / Stop — always visible at bottom -->
   {#if app.activeView === "transfer"}
-    <div class="px-4 py-2 border-t border-outline-variant bg-surface">
-      {#if app.transferActive}
+    <div class="flex-1 flex flex-col min-h-0">
+      <TransferPage onsnackbar={showSnackbar} onaddcontact={openAddContact} onsend={handleSendFiles} onsendtext={handleSendText} />
+    </div>
+    {#if app.transferActive}
+      <div class="px-4 py-1.5 border-t border-outline-variant bg-surface">
         <Button variant="error" full onclick={stopTransfer}>
           <Icon name="stop" size={18} />
           Stop Transfer
         </Button>
-      {:else if fabShowSplit}
-        <!-- M3 Split Button: two separate rounded segments with gap -->
-        <div class="split-btn">
-          <button class="split-btn-leading" onclick={handleSendFiles}>
-            <div class="split-btn-state"></div>
-            <span class="split-btn-content">
-              <Icon name="upload_file" size={18} />
-              <span>Send files</span>
-            </span>
-          </button>
-          <button class="split-btn-trailing" onclick={handleSendText}>
-            <div class="split-btn-state"></div>
-            <span class="split-btn-content">
-              <Icon name="chat" size={18} />
-              <span>Send text</span>
-            </span>
-          </button>
-        </div>
-      {:else if app.canSend}
-        <Button full onclick={handleSendAll}>
-          <Icon name="send" size={18} />
-          {fabHasText ? "Send text" : "Send"}
-        </Button>
-      {/if}
+      </div>
+    {/if}
+  {:else}
+    <div class="flex-1 overflow-y-auto p-4">
+      <SettingsPage {appVersion} onsnackbar={showSnackbar} />
     </div>
   {/if}
 
@@ -563,85 +524,4 @@
     overflow: hidden;
   }
 
-  /* M3 Split Button — two separate segments with gap */
-  .split-btn {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    height: 40px;
-    gap: 2px;
-  }
-
-  /* Shared segment styles */
-  .split-btn-leading,
-  .split-btn-trailing {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    border: none;
-    background: var(--md-sys-color-primary);
-    color: var(--md-sys-color-on-primary);
-    cursor: pointer;
-    user-select: none;
-    outline: none;
-    overflow: hidden;
-    box-shadow: var(--shadow-level0);
-    transition: box-shadow var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
-  }
-  .split-btn-leading:hover,
-  .split-btn-trailing:hover {
-    box-shadow: var(--shadow-level1);
-  }
-
-  /* Leading segment — pill left, flat right */
-  .split-btn-leading {
-    flex: 1;
-    border-radius: 9999px 4px 4px 9999px;
-    padding: 0 20px 0 24px;
-  }
-
-  /* Trailing segment — flat left, pill right */
-  .split-btn-trailing {
-    flex: 1;
-    border-radius: 4px 9999px 9999px 4px;
-    padding: 0 24px 0 20px;
-  }
-
-  /* State layer — M3 spring animation */
-  .split-btn-state {
-    position: absolute;
-    inset: 0;
-    background: var(--md-sys-color-on-primary);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
-  }
-  .split-btn-leading:hover .split-btn-state,
-  .split-btn-trailing:hover .split-btn-state {
-    opacity: 0.08;
-  }
-  .split-btn-leading:focus-visible .split-btn-state,
-  .split-btn-trailing:focus-visible .split-btn-state {
-    opacity: 0.1;
-  }
-  .split-btn-leading:active .split-btn-state,
-  .split-btn-trailing:active .split-btn-state {
-    opacity: 0.1;
-  }
-
-  /* Content — label + icon */
-  .split-btn-content {
-    position: relative;
-    z-index: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 500;
-    letter-spacing: 0.1px;
-    white-space: nowrap;
-  }
 </style>

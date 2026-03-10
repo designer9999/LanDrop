@@ -5,7 +5,6 @@ Exposed to the Svelte frontend via window.pywebview.api.
 Requires Python 3.14+.
 """
 
-import atexit
 import base64
 import glob as _glob
 import json
@@ -79,8 +78,6 @@ class CrocAPI:
         self._lan_peer_lock = threading.Lock()
         self._window_focused = True
         self._notifications_enabled = True
-
-        atexit.register(self._cleanup)
 
     def set_window(self, window: webview.Window) -> None:
         self._window = window
