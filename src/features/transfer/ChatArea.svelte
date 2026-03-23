@@ -696,7 +696,7 @@
   .chat-messages {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 12px;
+    padding: 8px 12px 80px;
     display: flex;
     flex-direction: column;
     scrollbar-width: thin;
@@ -873,15 +873,16 @@
   }
 
   .composer {
-    flex-shrink: 1;
-    min-height: 0;
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
     max-height: 70%;
-    border-top: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 50%, transparent);
-    background: var(--md-sys-color-surface);
-    padding: 8px 12px;
-    position: relative;
+    padding: 8px 12px 12px;
     display: flex;
     flex-direction: column;
+    pointer-events: none;
+    z-index: 10;
   }
 
   .composer-box {
@@ -889,14 +890,16 @@
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
-    border-radius: 24px;
-    background: var(--md-sys-color-surface-container-high);
-    transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    border-radius: 12px;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    background: var(--md-sys-color-surface);
+    transition: border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
     cursor: text;
     overflow: hidden;
+    pointer-events: auto;
   }
   .composer-box:focus-within {
-    background: var(--md-sys-color-surface-container-highest);
+    border-color: var(--md-sys-color-primary);
   }
 
   .composer-actions {
@@ -1147,6 +1150,7 @@
     flex-direction: column;
     gap: 8px;
     z-index: 10;
+    pointer-events: auto;
   }
   .fab-menu-item {
     display: flex;

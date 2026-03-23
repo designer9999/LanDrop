@@ -360,10 +360,10 @@
     background: transparent;
   }
   .mica-on :global(.composer) {
-    background: rgba(0, 0, 0, 0.15) !important;
+    background: transparent !important;
   }
   .mica-on :global(.composer-box) {
-    background: rgba(255, 255, 255, 0.06) !important;
+    background: var(--md-sys-color-surface) !important;
   }
   .mica-on :global(.chat-toolbar) {
     background: transparent;
