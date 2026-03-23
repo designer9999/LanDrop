@@ -116,12 +116,12 @@
         </div>
 
         <!-- Mica / transparent background (Windows 11) -->
-        <div class="flex items-center justify-between py-1">
+        <div class="flex items-center justify-between py-1" class:opacity-40={!theme.isDark}>
           <div>
             <div class="text-sm text-on-surface">Transparency</div>
-            <div class="text-xs text-on-surface-variant">Blurred translucent background</div>
+            <div class="text-xs text-on-surface-variant">{!theme.isDark ? "Requires dark mode" : "Blurred translucent background"}</div>
           </div>
-          <Switch checked={theme.mica} onchange={toggleMica} />
+          <Switch checked={theme.mica} disabled={!theme.isDark} onchange={toggleMica} />
         </div>
 
         {#if theme.mica}

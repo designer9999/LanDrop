@@ -696,7 +696,7 @@
   .chat-messages {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 12px 80px;
+    padding: 8px 12px 105px;
     display: flex;
     flex-direction: column;
     scrollbar-width: thin;
