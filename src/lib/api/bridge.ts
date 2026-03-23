@@ -97,16 +97,70 @@ export async function openFile(path: string): Promise<void> {
   return invoke("open_file", { path });
 }
 
+export async function downloadFile(path: string): Promise<string> {
+  // Files received from LAN are already at /storage/emulated/0/Download/LanDrop/
+  // Copy to standard Downloads so it shows in gallery and file manager
+  const { readFile, writeFile, mkdir, exists } = await import("@tauri-apps/plugin-fs");
+  const name = path.split("/").pop() ?? "file";
+
+  // Determine target directory based on file type
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const imageExts = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
+  const isImage = imageExts.includes(ext);
+
+  // Copy to /storage/emulated/0/Pictures/LanDrop/ for images, Downloads/ for others
+  const targetDir = isImage
+    ? "/storage/emulated/0/Pictures/LanDrop"
+    : "/storage/emulated/0/Download";
+
+  try {
+    const dirExists = await exists(targetDir);
+    if (!dirExists) await mkdir(targetDir, { recursive: true });
+  } catch { /* dir might already exist */ }
+
+  const targetPath = `${targetDir}/${name}`;
+  const data = await readFile(path);
+  await writeFile(targetPath, data);
+  return targetPath;
+}
+
+export async function getContentFileName(uri: string): Promise<{ name: string; mimeType: string } | null> {
+  try {
+    return await invoke<{ name: string; mimeType: string }>("plugin:file-helper|getFileName", { uri });
+  } catch {
+    return null;
+  }
+}
+
 export function isMobile(): boolean {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
 export async function getThumbnail(path: string): Promise<string | null> {
+  if (isMobile()) {
+    return mobileImageSrc(path);
+  }
   return invoke<string | null>("get_thumbnail", { path, maxPx: 120 });
 }
 
 export async function getFullImage(path: string, maxPx: number = 800): Promise<string | null> {
+  if (isMobile()) {
+    return mobileImageSrc(path);
+  }
   return invoke<string | null>("get_thumbnail", { path, maxPx });
+}
+
+async function mobileImageSrc(path: string): Promise<string | null> {
+  try {
+    const { readFile } = await import("@tauri-apps/plugin-fs");
+    const data = await readFile(path);
+    const ext = path.split(".").pop()?.toLowerCase() ?? "jpg";
+    const mime = ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg";
+    const blob = new Blob([data], { type: mime });
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
 }
 
 export async function getLocalIp(): Promise<string> {

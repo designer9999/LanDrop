@@ -4,7 +4,7 @@
 <script lang="ts">
   import Icon from "$lib/ui/Icon.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { showInExplorer, openFile, isMobile } from "$lib/api/bridge";
+  import { showInExplorer, openFile, downloadFile, isMobile } from "$lib/api/bridge";
   import type { MessageEntry } from "$lib/state/app-state.svelte";
 
   interface Props {
@@ -16,12 +16,28 @@
     oncopy: (id: string, text: string) => void;
     onlightbox: (path: string, name: string) => void;
     onfilepreview: (path: string) => void;
+    onsnackbar?: (msg: string) => void;
   }
 
-  let { msg, position, isCopied, viewAll, thumbCache, oncopy, onlightbox, onfilepreview }: Props = $props();
+  let { msg, position, isCopied, viewAll, thumbCache, oncopy, onlightbox, onfilepreview, onsnackbar }: Props = $props();
 
   const app = getAppState();
   const mobile = isMobile();
+
+  let downloading = $state<Record<string, boolean>>({});
+
+  async function handleDownload(path: string, name: string) {
+    if (downloading[path]) return;
+    downloading = { ...downloading, [path]: true };
+    try {
+      await downloadFile(path);
+      onsnackbar?.(`Saved ${name}`);
+    } catch (e: any) {
+      const detail = e?.message ?? String(e);
+      onsnackbar?.(`Save failed: ${detail}`);
+    }
+    downloading = { ...downloading, [path]: false };
+  }
 
   let isSent = $derived(msg.direction === "sent");
   let hasAttachments = $derived(msg.attachments && msg.attachments.length > 0);
@@ -74,8 +90,8 @@
               <div class="att-img-placeholder"><Icon name="image" size={24} /></div>
             {/if}
             {#if mobile && !isSent}
-              <button class="att-img-open" onclick={(e) => { e.stopPropagation(); openFile(img.path); }} title="Open">
-                <Icon name="open_in_new" size={16} />
+              <button class="att-img-download" onclick={(e) => { e.stopPropagation(); handleDownload(img.path, img.name); }} title="Save" disabled={downloading[img.path]}>
+                <Icon name={downloading[img.path] ? "hourglass_empty" : "download"} size={16} />
               </button>
             {/if}
           </div>
@@ -101,6 +117,11 @@
               <span class="att-file-name">{file.name}</span>
               {#if file.size}<span class="att-file-size">{file.size}</span>{/if}
               <span class="att-file-badge">{ext}</span>
+              {#if mobile && !isSent}
+                <button class="att-file-download" onclick={(e) => { e.stopPropagation(); handleDownload(file.path, file.name); }} title="Save" disabled={downloading[file.path]}>
+                  <Icon name={downloading[file.path] ? "hourglass_empty" : "download"} size={16} />
+                </button>
+              {/if}
             </div>
           {/if}
         {/each}
@@ -229,7 +250,7 @@
     animation: shimmer 1.5s cubic-bezier(0.2, 0.0, 0, 1.0) infinite alternate;
   }
   .att-grid .att-img { aspect-ratio: 1; max-height: none; }
-  .att-img-open {
+  .att-img-download {
     position: absolute;
     bottom: 6px;
     right: 6px;
@@ -246,10 +267,31 @@
     z-index: 2;
     backdrop-filter: blur(4px);
   }
-  .att-img-open:active { background: rgba(0, 0, 0, 0.75); }
+  .att-img-download:active { background: rgba(0, 0, 0, 0.75); }
+  .att-img-download:disabled { opacity: 0.5; }
+
+  .att-file-download {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: none;
+    background: color-mix(in srgb, var(--md-sys-color-primary) 15%, transparent);
+    color: var(--md-sys-color-primary);
+    cursor: pointer;
+    z-index: 2;
+  }
+  .att-file-download:active { background: color-mix(in srgb, var(--md-sys-color-primary) 30%, transparent); }
+  .att-file-download:disabled { opacity: 0.5; }
 
   .att-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
   .att-file-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 2px;

@@ -6,7 +6,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail, getFullImage, readFilePreview, onDragDrop } from "$lib/api/bridge";
+  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail, getFullImage, readFilePreview, onDragDrop, isMobile, getContentFileName } from "$lib/api/bridge";
   import type { FilePreview } from "$lib/api/bridge";
   import { isImage } from "$lib/utils/file-utils";
   import { onMount } from "svelte";
@@ -146,10 +146,37 @@
     onsnackbar?.("Copied to clipboard");
   }
 
+  const mobile = isMobile();
+
   async function addPaths(paths: string[]) {
     for (const path of paths) {
-      const info = await getFileInfo(path);
-      app.addFile(path, info);
+      if (mobile && path.startsWith("content://")) {
+        // On Android, Rust can't read content:// URIs — resolve name via Kotlin plugin
+        let name = "";
+        try {
+          const resolved = await getContentFileName(path);
+          if (resolved?.name) name = resolved.name;
+        } catch { /* plugin call failed */ }
+        // Fallback: extract something useful from the URI
+        if (!name) {
+          const decoded = decodeURIComponent(path);
+          const lastSegment = decoded.split("/").pop() ?? "";
+          if (lastSegment.includes(".")) {
+            name = lastSegment;
+          } else if (decoded.includes("image")) {
+            name = `IMG_${Date.now()}.jpg`;
+          } else if (decoded.includes("video")) {
+            name = `VID_${Date.now()}.mp4`;
+          } else {
+            name = `file_${Date.now()}`;
+          }
+        }
+        const ext = name.includes(".") ? "." + name.split(".").pop()!.toLowerCase() : "";
+        app.addFile(path, { name, size: "", type: ext, count: undefined });
+      } else {
+        const info = await getFileInfo(path);
+        app.addFile(path, info);
+      }
     }
   }
 
@@ -314,6 +341,7 @@
           oncopy={handleCopy}
           onlightbox={openLightbox}
           onfilepreview={openFilePreview}
+          {onsnackbar}
         />
       {/each}
     {:else if showStarredOnly || app.messageSearch}
@@ -356,6 +384,7 @@
       path={lightboxPath}
       loading={lightboxLoading}
       onclose={closeLightbox}
+      {onsnackbar}
     />
   {/if}
 

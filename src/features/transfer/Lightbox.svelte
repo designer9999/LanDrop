@@ -3,7 +3,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/ui/Icon.svelte";
-  import { showInExplorer, openFile, isMobile } from "$lib/api/bridge";
+  import { showInExplorer, openFile, downloadFile, isMobile } from "$lib/api/bridge";
 
   interface Props {
     src: string;
@@ -11,10 +11,24 @@
     path: string;
     loading: boolean;
     onclose: () => void;
+    onsnackbar?: (msg: string) => void;
   }
 
-  let { src, name, path, loading, onclose }: Props = $props();
+  let { src, name, path, loading, onclose, onsnackbar }: Props = $props();
   const mobile = isMobile();
+  let saving = $state(false);
+
+  async function handleDownload() {
+    if (saving) return;
+    saving = true;
+    try {
+      await downloadFile(path);
+      onsnackbar?.(`Saved ${name}`);
+    } catch {
+      onsnackbar?.(`Failed to save ${name}`);
+    }
+    saving = false;
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -24,7 +38,10 @@
     <span class="lightbox-name">{name}</span>
     <div class="lightbox-actions">
       {#if mobile}
-        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); openFile(path); }} title="Open / Share">
+        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); handleDownload(); }} title="Save" disabled={saving}>
+          <Icon name={saving ? "hourglass_empty" : "download"} size={18} />
+        </button>
+        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); openFile(path); }} title="Open">
           <Icon name="open_in_new" size={18} />
         </button>
       {:else}

@@ -27,7 +27,10 @@
     "core:window:allow-unminimize",
     "fs:default",
     "fs:allow-read",
+    "fs:allow-read-file",
     "fs:allow-write",
+    "fs:allow-write-file",
+    "fs:allow-write-text-file",
     "fs:allow-exists",
     "fs:allow-mkdir",
     "fs:allow-copy-file",
@@ -39,6 +42,7 @@
       "allow": [
         { "path": "$APPCACHE/**" },
         { "path": "$DOWNLOAD/**" },
+        { "path": "$PICTURE/**" },
         { "path": "$TEMP/**" },
         { "path": "content://**" },
         { "path": "/storage/**" }
