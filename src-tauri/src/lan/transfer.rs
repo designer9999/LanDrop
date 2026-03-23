@@ -300,27 +300,19 @@ pub async fn receive_file(conn: &Connection, name: &str, size: u64, out_folder: 
 
     let out_path = base_dir.join(&safe_name);
 
-    // Path traversal check: normalize both paths and verify out_path stays within base_dir.
-    // Use canonicalize for existing paths, lexical normalization for new files.
     let canonical_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
-    // For new files, canonicalize the deepest existing ancestor, then append the rest
-    let normalized_out = {
-        let mut existing = out_path.clone();
-        let mut tail = Vec::new();
-        while !existing.exists() {
-            if let Some(name) = existing.file_name() {
-                tail.push(name.to_os_string());
+    if let Ok(canonical_out) = out_path.canonicalize() {
+        if !canonical_out.starts_with(&canonical_base) {
+            return Err("Path traversal detected".into());
+        }
+    }
+    if let Some(parent) = out_path.parent() {
+        if parent.exists() {
+            let canonical_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+            if !canonical_parent.starts_with(&canonical_base) {
+                return Err("Path traversal detected".into());
             }
-            if !existing.pop() { break; }
         }
-        let mut base = existing.canonicalize().unwrap_or(existing);
-        for component in tail.into_iter().rev() {
-            base.push(component);
-        }
-        base
-    };
-    if !normalized_out.starts_with(&canonical_base) {
-        return Err("Path traversal detected".into());
     }
 
     check_disk_space(&out_path, size)?;

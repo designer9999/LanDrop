@@ -113,6 +113,10 @@ export async function downloadFile(path: string): Promise<string> {
   const targetPath = `${targetDir}/${name}`;
   const data = await readFile(path);
   await writeFile(targetPath, data);
+  // Tell Android to scan the file so it appears in Gallery / Files app
+  try {
+    await invoke("plugin:file-helper|saveToDownloads", { path: targetPath });
+  } catch { /* scan is best-effort */ }
   return targetPath;
 }
 

@@ -22,8 +22,9 @@
     if (saving) return;
     saving = true;
     try {
-      await downloadFile(path);
-      onsnackbar?.(`Saved ${name}`);
+      const savedTo = await downloadFile(path);
+      const folder = savedTo.includes("/Pictures/") ? "Pictures/LanDrop" : "Downloads";
+      onsnackbar?.(`Saved ${name} → ${folder}`);
     } catch {
       onsnackbar?.(`Failed to save ${name}`);
     }
