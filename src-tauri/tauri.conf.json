@@ -1,0 +1,31 @@
+{
+  "productName": "LanDrop",
+  "version": "1.0.0",
+  "identifier": "com.landrop.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LanDrop",
+        "width": 520,
+        "height": 720,
+        "minWidth": 420,
+        "minHeight": 550,
+        "decorations": false,
+        "transparent": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "plugins": {
+    "shell": { "open": true }
+  }
+}

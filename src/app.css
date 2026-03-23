@@ -1,0 +1,117 @@
+@import "tailwindcss";
+@import "@fontsource-variable/roboto-flex";
+@import "@fontsource-variable/roboto-mono";
+@import "@material-symbols/font-400/rounded.css";
+
+@theme {
+  --color-primary: var(--md-sys-color-primary);
+  --color-on-primary: var(--md-sys-color-on-primary);
+  --color-primary-container: var(--md-sys-color-primary-container);
+  --color-on-primary-container: var(--md-sys-color-on-primary-container);
+  --color-secondary: var(--md-sys-color-secondary);
+  --color-on-secondary: var(--md-sys-color-on-secondary);
+  --color-secondary-container: var(--md-sys-color-secondary-container);
+  --color-on-secondary-container: var(--md-sys-color-on-secondary-container);
+  --color-tertiary: var(--md-sys-color-tertiary);
+  --color-on-tertiary: var(--md-sys-color-on-tertiary);
+  --color-tertiary-container: var(--md-sys-color-tertiary-container);
+  --color-on-tertiary-container: var(--md-sys-color-on-tertiary-container);
+  --color-error: var(--md-sys-color-error);
+  --color-on-error: var(--md-sys-color-on-error);
+  --color-error-container: var(--md-sys-color-error-container);
+  --color-on-error-container: var(--md-sys-color-on-error-container);
+  --color-surface: var(--md-sys-color-surface);
+  --color-on-surface: var(--md-sys-color-on-surface);
+  --color-on-surface-variant: var(--md-sys-color-on-surface-variant);
+  --color-surface-dim: var(--md-sys-color-surface-dim);
+  --color-surface-bright: var(--md-sys-color-surface-bright);
+  --color-surface-container-lowest: var(--md-sys-color-surface-container-lowest);
+  --color-surface-container-low: var(--md-sys-color-surface-container-low);
+  --color-surface-container: var(--md-sys-color-surface-container);
+  --color-surface-container-high: var(--md-sys-color-surface-container-high);
+  --color-surface-container-highest: var(--md-sys-color-surface-container-highest);
+  --color-outline: var(--md-sys-color-outline);
+  --color-outline-variant: var(--md-sys-color-outline-variant);
+  --color-inverse-surface: var(--md-sys-color-inverse-surface);
+  --color-inverse-on-surface: var(--md-sys-color-inverse-on-surface);
+  --color-inverse-primary: var(--md-sys-color-inverse-primary);
+  --color-shadow: var(--md-sys-color-shadow);
+  --color-scrim: var(--md-sys-color-scrim);
+
+  --radius-none: 0px;
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 28px;
+  --radius-full: 9999px;
+
+  --shadow-level0: none;
+  --shadow-level1: 0 1px 1px 0 rgb(0 0 0 / 0.3), 0 1px 1px 0 rgb(0 0 0 / 0.15);
+  --shadow-level2: 0 1px 2px 0 rgb(0 0 0 / 0.3), 0 2px 6px 2px rgb(0 0 0 / 0.15);
+  --shadow-level3: 0 4px 8px 3px rgb(0 0 0 / 0.15), 0 1px 3px 0 rgb(0 0 0 / 0.3);
+
+  --font-plain: "Roboto Flex Variable", "Segoe UI", system-ui, sans-serif;
+  --font-brand: "Roboto Flex Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Roboto Mono Variable", "Cascadia Code", monospace;
+}
+
+:root {
+  --md-spring-fast-spatial: cubic-bezier(0.42, 1.67, 0.21, 0.9);
+  --md-spring-fast-spatial-dur: 350ms;
+  --md-spring-default-spatial: cubic-bezier(0.38, 1.21, 0.22, 1);
+  --md-spring-default-spatial-dur: 500ms;
+  --md-spring-slow-spatial: cubic-bezier(0.39, 1.29, 0.35, 0.98);
+  --md-spring-slow-spatial-dur: 650ms;
+
+  --md-spring-fast-effects: cubic-bezier(0.31, 0.94, 0.34, 1);
+  --md-spring-fast-effects-dur: 150ms;
+  --md-spring-default-effects: cubic-bezier(0.34, 0.8, 0.34, 1);
+  --md-spring-default-effects-dur: 200ms;
+  --md-spring-slow-effects: cubic-bezier(0.34, 0.88, 0.34, 1);
+  --md-spring-slow-effects-dur: 300ms;
+
+  --md-easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --md-easing-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-easing-emphasized-accel: cubic-bezier(0.3, 0, 0.8, 0.15);
+
+  --md-dur-short3: 150ms;
+  --md-dur-short4: 200ms;
+  --md-dur-medium1: 250ms;
+  --md-dur-medium2: 300ms;
+
+  --md-state-hover: 0.08;
+  --md-state-focus: 0.1;
+  --md-state-press: 0.1;
+  --md-state-drag: 0.16;
+  --md-state-disabled-container: 0.12;
+  --md-state-disabled-content: 0.38;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: var(--font-plain);
+  font-optical-sizing: auto;
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { height: 100%; }
+
+::selection {
+  background: color-mix(in srgb, var(--md-sys-color-primary) 30%, transparent);
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--md-sys-color-outline-variant); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--md-sys-color-outline); }
+
+.material-symbols-rounded {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  user-select: none;
+  transition: font-variation-settings 150ms cubic-bezier(0.31, 0.94, 0.34, 1);
+}

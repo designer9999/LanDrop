@@ -1,11 +1,4 @@
 node_modules/
 dist/
-__pycache__/
-*.pyc
-.ruff_cache/
-build/
-output/
-*.spec
+src-tauri/target/
 m3 Expressive/
-croc-marked-files.txt
-croc-stdin-*
