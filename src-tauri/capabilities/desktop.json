@@ -1,0 +1,12 @@
+{
+  "identifier": "desktop",
+  "description": "Desktop-only capabilities — global shortcuts",
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["main"],
+  "permissions": [
+    "global-shortcut:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered"
+  ]
+}

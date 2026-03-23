@@ -3,7 +3,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/ui/Icon.svelte";
-  import { showInExplorer } from "$lib/api/bridge";
+  import { showInExplorer, openFile, isMobile } from "$lib/api/bridge";
 
   interface Props {
     src: string;
@@ -14,6 +14,7 @@
   }
 
   let { src, name, path, loading, onclose }: Props = $props();
+  const mobile = isMobile();
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -22,9 +23,15 @@
   <div class="lightbox-header">
     <span class="lightbox-name">{name}</span>
     <div class="lightbox-actions">
-      <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); showInExplorer(path); }} title="Open in folder">
-        <Icon name="folder_open" size={18} />
-      </button>
+      {#if mobile}
+        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); openFile(path); }} title="Open / Share">
+          <Icon name="open_in_new" size={18} />
+        </button>
+      {:else}
+        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); showInExplorer(path); }} title="Open in folder">
+          <Icon name="folder_open" size={18} />
+        </button>
+      {/if}
       <button class="lightbox-close" onclick={onclose}>
         <Icon name="close" size={20} />
       </button>

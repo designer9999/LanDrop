@@ -8,7 +8,7 @@
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
   import { getAppState } from "$lib/state/app-state.svelte";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
-  import { getStatus, startLAN, stopLAN, setOutFolder, lanSendText, lanSendFiles, onLanPeerAvailable, onLanPeerUnavailable, onLanTextReceived, onLanFilesReceived, onTransferProgress, windowMinimize, windowToggleMaximize, windowClose, windowStartDrag, windowShow, setMica, registerShortcut, unregisterShortcut, getFileInfo, getExplorerSelection, getClipboardFiles } from "$lib/api/bridge";
+  import { getStatus, startLanService, lanSendText, lanSendFiles, onLanLog, onLanPeerDiscovered, onLanPeerLost, onLanTextReceived, onLanFilesReceived, onTransferProgress, windowMinimize, windowToggleMaximize, windowClose, windowStartDrag, windowShow, setMica, setDefaultOutFolder, registerShortcut, unregisterShortcut, getFileInfo, getExplorerSelection, getClipboardFiles } from "$lib/api/bridge";
   import type { TransferProgress } from "$lib/api/bridge";
   import { isImage as fileIsImage, fileSizeStr } from "$lib/utils/file-utils";
   import { playReceiveSound } from "$lib/utils/notification-sound";
@@ -17,7 +17,7 @@
   import IconButton from "$lib/ui/IconButton.svelte";
   import Snackbar from "$lib/ui/Snackbar.svelte";
   import PeerBar from "./features/peers/PeerBar.svelte";
-  import PeerDialog from "./features/peers/PeerDialog.svelte";
+  import DeviceSettingsDialog from "./features/peers/DeviceSettingsDialog.svelte";
   import TransferPage from "./features/transfer/TransferPage.svelte";
   import SettingsPage from "./features/settings/SettingsPage.svelte";
 
@@ -29,45 +29,27 @@
   let appVersion = $state("1.0.0");
   let transferProgress = $state<TransferProgress | null>(null);
 
-  let peerDialogOpen = $state(false);
-  let editingPeer = $state<import("$lib/state/app-state.svelte").Peer | null>(null);
+  let deviceDialogOpen = $state(false);
+  let editingDevice = $state<import("$lib/state/app-state.svelte").DiscoveredDevice | null>(null);
 
   function showSnackbar(msg: string) {
     snackbarMsg = msg;
     snackbarVisible = true;
   }
 
-  function openAddPeer() {
-    editingPeer = null;
-    peerDialogOpen = true;
-  }
-
-  function openEditPeer(id: string) {
-    editingPeer = app.peers.find(p => p.id === id) ?? null;
-    peerDialogOpen = true;
+  function openDeviceSettings(id: string) {
+    editingDevice = app.devices.find(d => d.id === id) ?? null;
+    deviceDialogOpen = true;
   }
 
   $effect(() => {
     applyThemeToDOM(theme.tokens);
   });
 
-  // LAN: start/stop based on active peer
+  // Sync default out folder to backend when settings change
   $effect(() => {
-    const peer = app.activePeer;
-    if (peer) {
-      const outFolder = peer.outFolder ?? app.receiveOptions.outFolder ?? "";
-      startLAN(peer.code, outFolder);
-    } else {
-      stopLAN();
-      app.lanConnected = false;
-      app.lanPeerIp = null;
-    }
-  });
-
-  // Sync out folder to backend when settings change (without restarting connection)
-  $effect(() => {
-    const folder = app.effectiveOutFolder;
-    setOutFolder(folder);
+    const folder = app.receiveOptions.outFolder ?? "";
+    setDefaultOutFolder(folder);
   });
 
   onMount(async () => {
@@ -82,67 +64,64 @@
       document.body.classList.add("mica-active");
     }
 
+    // Start mDNS discovery — zero config, no passwords
+    await startLanService();
+
     const unlisteners = await Promise.all([
-      onLanPeerAvailable((peerIp) => {
-        app.lanConnected = true;
-        app.lanPeerIp = peerIp;
-        app.addLog("success", `LAN peer available: ${peerIp}`);
+      onLanLog((level, text) => {
+        const mapped = level === "success" ? "success" : level === "error" ? "error" : level === "warn" ? "warn" : "info";
+        app.addLog(mapped as "info" | "warn" | "error" | "success", text);
       }),
-      onLanPeerUnavailable(() => {
-        app.lanConnected = false;
-        app.lanPeerIp = null;
-        app.addLog("warn", "LAN peer unavailable");
+      onLanPeerDiscovered((peer) => {
+        app.upsertDevice(peer);
+        app.addLog("success", `Device discovered: ${peer.alias} (${peer.ip})`);
       }),
-      onLanTextReceived((text) => {
-        const peer = app.activePeer;
-        if (peer) {
-          app.addMessage({ peerId: peer.id, direction: "received", text });
-          app.addActivity({ peerId: peer.id, direction: "received", type: "text", items: [], success: true });
-        }
+      onLanPeerLost((peerId) => {
+        app.markDeviceOffline(peerId);
+        const device = app.devices.find(d => d.id === peerId);
+        app.addLog("warn", `Device offline: ${device?.alias ?? peerId}`);
+      }),
+      onLanTextReceived((peerId, text) => {
+        // Auto-select device if we receive from it and have no active
+        if (!app.activeDeviceId) app.setActiveDevice(peerId);
+        app.addMessage({ peerId, direction: "received", text });
+        app.addActivity({ peerId, direction: "received", type: "text", items: [], success: true });
         if (app.notificationsEnabled) playReceiveSound();
       }),
-      onLanFilesReceived((files, details) => {
-        const peer = app.activePeer;
-        if (peer) {
-          app.addActivity({ peerId: peer.id, direction: "received", type: "files", items: files, success: true, outFolder: app.effectiveOutFolder });
-          if (details.length > 0) {
-            // Group files that came from a folder (names like "folder/file.txt")
-            const folderFiles = new Map<string, typeof details>();
-            const looseFiles: typeof details = [];
-            for (const f of details) {
-              const slashIdx = f.name.indexOf("/");
-              if (slashIdx > 0) {
-                const folder = f.name.substring(0, slashIdx);
-                if (!folderFiles.has(folder)) folderFiles.set(folder, []);
-                folderFiles.get(folder)!.push(f);
-              } else {
-                looseFiles.push(f);
-              }
+      onLanFilesReceived((peerId, files, details) => {
+        if (!app.activeDeviceId) app.setActiveDevice(peerId);
+        app.addActivity({ peerId, direction: "received", type: "files", items: files, success: true, outFolder: app.effectiveOutFolder });
+        if (details.length > 0) {
+          // Group files that came from a folder
+          const folderFiles = new Map<string, typeof details>();
+          const looseFiles: typeof details = [];
+          for (const f of details) {
+            const slashIdx = f.name.indexOf("/");
+            if (slashIdx > 0) {
+              const folder = f.name.substring(0, slashIdx);
+              if (!folderFiles.has(folder)) folderFiles.set(folder, []);
+              folderFiles.get(folder)!.push(f);
+            } else {
+              looseFiles.push(f);
             }
-
-            const attachments: MessageAttachment[] = [];
-            // Add folder attachments (single card per folder)
-            for (const [folder, folderDetails] of folderFiles) {
-              const totalSize = folderDetails.reduce((sum, f) => sum + f.size, 0);
-              // Use the parent directory path (strip the file name from the first file's path)
-              const folderPath = folderDetails[0].path.replace(/[\\/][^\\/]+$/, "");
-              attachments.push({
-                name: folder,
-                path: folderPath,
-                size: fileSizeStr(totalSize),
-                type: "folder" as const,
-                fileCount: folderDetails.length,
-              });
-            }
-            // Add loose files normally
-            for (const f of looseFiles) {
-              attachments.push({
-                name: f.name, path: f.path, size: fileSizeStr(f.size),
-                type: fileIsImage(f.name) ? "image" as const : "file" as const,
-              });
-            }
-            app.addMessage({ peerId: peer.id, direction: "received", text: "", attachments });
           }
+
+          const attachments: MessageAttachment[] = [];
+          for (const [folder, folderDetails] of folderFiles) {
+            const totalSize = folderDetails.reduce((sum, f) => sum + f.size, 0);
+            const folderPath = folderDetails[0].path.replace(/[\\/][^\\/]+$/, "");
+            attachments.push({
+              name: folder, path: folderPath, size: fileSizeStr(totalSize),
+              type: "folder" as const, fileCount: folderDetails.length,
+            });
+          }
+          for (const f of looseFiles) {
+            attachments.push({
+              name: f.name, path: f.path, size: fileSizeStr(f.size),
+              type: fileIsImage(f.name) ? "image" as const : "file" as const,
+            });
+          }
+          app.addMessage({ peerId, direction: "received", text: "", attachments });
         }
         if (app.notificationsEnabled) playReceiveSound();
       }),
@@ -150,10 +129,6 @@
         transferProgress = progress.phase === "done" ? null : progress;
       }),
     ]);
-
-    if (!app.activePeerId && app.peers.length > 0) {
-      app.setActivePeer(app.peers[0].id);
-    }
 
     // Register global hotkeys
     await setupHotkeys();
@@ -163,9 +138,7 @@
 
   // ── Global hotkeys ──
   async function quickSendHandler() {
-    // 1. Try selected files in the active Explorer window
     let paths = await getExplorerSelection().catch(() => [] as string[]);
-    // 2. Fall back to clipboard files (Ctrl+C'd files)
     if (paths.length === 0) {
       paths = await getClipboardFiles().catch(() => [] as string[]);
     }
@@ -186,7 +159,6 @@
     }
   }
 
-  // Re-register when hotkey settings change
   $effect(() => {
     const { quickSend, enabled } = app.hotkeys;
     if (enabled) {
@@ -198,27 +170,27 @@
 
   async function handleSendFiles() {
     if (!app.hasFiles || app.transferActive) return;
-    const peer = app.activePeer;
-    if (peer) app.touchPeer(peer.id);
-    if (!app.lanConnected) { showSnackbar("Not connected — waiting for LAN"); return; }
+    const device = app.activeDevice;
+    if (!device) { showSnackbar("No device selected"); return; }
+    if (!device.online) { showSnackbar("Device is offline"); return; }
 
     const filesCopy = [...app.files];
     app.transferActive = true;
     try {
-      const sent = await lanSendFiles(app.filePaths);
-      if (sent && peer) {
+      const sent = await lanSendFiles(device.id, app.filePaths);
+      if (sent) {
         const names = filesCopy.map(f => f.info?.name ?? f.path.split(/[\\/]/).pop() ?? "file");
-        app.addActivity({ peerId: peer.id, direction: "sent", type: "files", items: names, success: true });
+        app.addActivity({ peerId: device.id, direction: "sent", type: "files", items: names, success: true });
         const attachments: MessageAttachment[] = filesCopy.map(f => ({
           name: f.info?.name ?? f.path.split(/[\\/]/).pop() ?? "file",
           path: f.path, size: f.info?.size ?? "",
           type: fileIsImage(f.info?.name ?? f.path) ? "image" as const : "file" as const,
         }));
-        app.addMessage({ peerId: peer.id, direction: "sent", text: "", attachments });
+        app.addMessage({ peerId: device.id, direction: "sent", text: "", attachments });
         app.clearFiles();
       }
     } catch (e) {
-      showSnackbar("Send failed — connection lost");
+      showSnackbar("Send failed — " + e);
     } finally {
       app.transferActive = false;
     }
@@ -226,19 +198,26 @@
 
   async function handleSendText() {
     if (!app.sendTextContent.trim() || app.transferActive) return;
-    const peer = app.activePeer;
-    if (peer) app.touchPeer(peer.id);
+    const device = app.activeDevice;
+    if (!device) { showSnackbar("No device selected"); return; }
     const textToSend = app.sendTextContent.trim();
-    if (peer) app.addMessage({ peerId: peer.id, direction: "sent", text: textToSend });
     app.sendTextContent = "";
-    if (!app.lanConnected) { showSnackbar("Not connected — waiting for LAN"); return; }
-    const sent = await lanSendText(textToSend);
-    if (sent && peer) {
-      app.addActivity({ peerId: peer.id, direction: "sent", type: "text", items: [], success: true });
+    if (!device.online) {
+      app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
+      showSnackbar("Device is offline — message saved locally");
+      return;
+    }
+    try {
+      const sent = await lanSendText(device.id, textToSend);
+      if (sent) {
+        app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
+        app.addActivity({ peerId: device.id, direction: "sent", type: "text", items: [], success: true });
+      }
+    } catch {
+      showSnackbar("Text send failed — device unreachable");
     }
   }
 
-  // Computed progress percentage
   const progressPct = $derived.by(() => {
     if (!transferProgress?.total_bytes || transferProgress.total_bytes === 0) return null;
     const done = transferProgress.sent_bytes ?? transferProgress.received_bytes ?? 0;
@@ -264,7 +243,7 @@
     <div class="titlebar-content">
       {#if app.activeView === "transfer"}
         <div class="peer-strip">
-          <PeerBar onadd={openAddPeer} onedit={openEditPeer} />
+          <PeerBar onedit={openDeviceSettings} />
         </div>
       {:else}
         <div class="flex items-center gap-2 flex-1 min-w-0">
@@ -294,7 +273,7 @@
   <!-- Content area -->
   <main class="content-area">
     {#if app.activeView === "transfer"}
-      <TransferPage onsnackbar={showSnackbar} onaddpeer={openAddPeer} onsend={handleSendFiles} onsendtext={handleSendText} />
+      <TransferPage onsnackbar={showSnackbar} onsend={handleSendFiles} onsendtext={handleSendText} />
     {:else}
       <div class="settings-scroll">
         <SettingsPage {appVersion} onsnackbar={showSnackbar} />
@@ -323,10 +302,10 @@
 
 </div>
 
-<PeerDialog
-  bind:open={peerDialogOpen}
-  editPeer={editingPeer}
-  onclose={() => { peerDialogOpen = false; editingPeer = null; }}
+<DeviceSettingsDialog
+  bind:open={deviceDialogOpen}
+  device={editingDevice}
+  onclose={() => { deviceDialogOpen = false; editingDevice = null; }}
 />
 
 <Snackbar message={snackbarMsg} bind:visible={snackbarVisible} />
@@ -432,7 +411,6 @@
   .mica-on :global(.chat-toolbar) {
     background: transparent;
   }
-  /* Cards & settings become semi-transparent under mica */
   .mica-on .settings-scroll {
     background: transparent;
   }

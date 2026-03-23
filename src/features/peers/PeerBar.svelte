@@ -1,5 +1,5 @@
 <!--
-  Peer bar — horizontal scrollable chip row + Add button
+  Peer bar — horizontal scrollable chip row of auto-discovered devices
 -->
 <script lang="ts">
   import { getAppState } from "$lib/state/app-state.svelte";
@@ -8,11 +8,10 @@
   import PeerChip from "./PeerChip.svelte";
 
   interface Props {
-    onadd: () => void;
     onedit: (id: string) => void;
   }
 
-  let { onadd, onedit }: Props = $props();
+  let { onedit }: Props = $props();
 
   const app = getAppState();
 
@@ -31,7 +30,7 @@
   }
 
   $effect(() => {
-    app.peers.length;
+    app.devices.length;
     requestAnimationFrame(checkScroll);
   });
 </script>
@@ -48,23 +47,26 @@
     class="peer-bar"
     onscroll={checkScroll}
   >
-    {#each app.peers as peer (peer.id)}
+    {#each app.devices as device (device.id)}
       <PeerChip
-        {peer}
-        selected={peer.id === app.activePeerId}
+        {device}
+        selected={device.id === app.activeDeviceId}
         onclick={() => {
-          if (peer.id === app.activePeerId) {
-            onedit(peer.id);
+          if (device.id === app.activeDeviceId) {
+            onedit(device.id);
           } else {
-            app.setActivePeer(peer.id);
+            app.setActiveDevice(device.id);
           }
         }}
       />
     {/each}
 
-    <IconButton title="Add peer" onclick={onadd}>
-      <Icon name="person_add" size={20} />
-    </IconButton>
+    {#if app.devices.length === 0}
+      <div class="discovering">
+        <Icon name="radar" size={16} />
+        <span>Searching for devices...</span>
+      </div>
+    {/if}
   </div>
 
   {#if canScrollRight}
@@ -116,6 +118,16 @@
     right: 0;
     background: linear-gradient(to left, var(--md-sys-color-surface) 60%, transparent);
     padding-left: 8px;
+  }
+  .discovering {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--md-sys-color-on-surface-variant);
+    white-space: nowrap;
+    opacity: 0.7;
   }
   @keyframes fade-in {
     from { opacity: 0; }

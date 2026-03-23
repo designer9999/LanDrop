@@ -4,23 +4,21 @@
 <script lang="ts">
   import { getAppState } from "$lib/state/app-state.svelte";
   import Icon from "$lib/ui/Icon.svelte";
-  import Button from "$lib/ui/Button.svelte";
   import ChatArea from "./ChatArea.svelte";
 
   interface Props {
     onsnackbar?: (msg: string) => void;
-    onaddpeer?: () => void;
     onsend?: () => void;
     onsendtext?: () => void;
   }
 
-  let { onsnackbar, onaddpeer, onsend, onsendtext }: Props = $props();
+  let { onsnackbar, onsend, onsendtext }: Props = $props();
 
   const app = getAppState();
-  const peer = $derived(app.activePeer);
+  const device = $derived(app.activeDevice);
 </script>
 
-{#if !app.peers.length}
+{#if !app.devices.length}
   <div class="welcome-wrapper">
     <div class="welcome-card">
       <div class="welcome-icon-ring">
@@ -32,18 +30,18 @@
       <div class="welcome-text">
         <h2 class="welcome-title">Welcome to LanDrop</h2>
         <p class="welcome-desc">
-          Transfer files instantly between devices on your local network. No internet required.
+          Transfer files instantly between devices on your local network. No setup required.
         </p>
       </div>
 
       <div class="welcome-steps">
         <div class="step">
           <span class="step-num">1</span>
-          <span class="step-text">Add a peer with a shared code phrase</span>
+          <span class="step-text">Install LanDrop on your devices</span>
         </div>
         <div class="step">
           <span class="step-num">2</span>
-          <span class="step-text">Both devices auto-connect on the same network</span>
+          <span class="step-text">Devices on the same network appear automatically</span>
         </div>
         <div class="step">
           <span class="step-num">3</span>
@@ -51,15 +49,15 @@
         </div>
       </div>
 
-      <Button onclick={onaddpeer}>
-        <Icon name="person_add" size={18} />
-        Add your first peer
-      </Button>
+      <div class="searching-hint">
+        <Icon name="radar" size={18} />
+        <span>Searching for devices on your network...</span>
+      </div>
     </div>
   </div>
 {/if}
 
-<ChatArea peerName={peer?.name} {onsnackbar} {onsend} {onsendtext} />
+<ChatArea peerName={device?.alias} {onsnackbar} {onsend} {onsendtext} />
 
 <style>
   .welcome-wrapper {
@@ -153,5 +151,20 @@
     font-size: 13px;
     line-height: 18px;
     color: var(--md-sys-color-on-surface-variant);
+  }
+
+  .searching-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 0.7;
+    animation: pulse-opacity 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-opacity {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 0.4; }
   }
 </style>

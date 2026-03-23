@@ -31,39 +31,60 @@ pub async fn get_status() -> Result<StatusResponse, String> {
 }
 
 #[tauri::command]
-pub async fn start_lan(
-    code: String,
-    out_folder: String,
-    state: State<'_, LanState>,
-) -> Result<(), String> {
-    let peer = state.peer.lock().await;
-    peer.start(&code, &out_folder).await
+pub async fn start_lan_service(state: State<'_, LanState>) -> Result<(), String> {
+    let service = state.service.lock().await;
+    service.start().await
 }
 
 #[tauri::command]
-pub async fn set_out_folder(folder: String, state: State<'_, LanState>) -> Result<(), String> {
-    let peer = state.peer.lock().await;
-    peer.set_out_folder(&folder).await;
+pub async fn stop_lan_service(state: State<'_, LanState>) -> Result<(), String> {
+    let service = state.service.lock().await;
+    service.stop().await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_lan(state: State<'_, LanState>) -> Result<(), String> {
-    let peer = state.peer.lock().await;
-    peer.stop().await;
+pub async fn lan_send_text(peer_id: String, text: String, state: State<'_, LanState>) -> Result<bool, String> {
+    let service = state.service.lock().await;
+    service.send_text(&peer_id, &text).await
+}
+
+#[tauri::command]
+pub async fn lan_send_files(peer_id: String, paths: Vec<String>, state: State<'_, LanState>) -> Result<bool, String> {
+    let service = state.service.lock().await;
+    service.send_files(&peer_id, &paths).await
+}
+
+#[tauri::command]
+pub async fn set_default_out_folder(folder: String, state: State<'_, LanState>) -> Result<(), String> {
+    let service = state.service.lock().await;
+    service.set_default_folder(&folder).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn lan_send_text(text: String, state: State<'_, LanState>) -> Result<bool, String> {
-    let peer = state.peer.lock().await;
-    peer.send_text(&text).await
+pub async fn set_peer_out_folder(peer_id: String, folder: String, state: State<'_, LanState>) -> Result<(), String> {
+    let service = state.service.lock().await;
+    service.set_peer_folder(&peer_id, &folder).await;
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn lan_send_files(paths: Vec<String>, state: State<'_, LanState>) -> Result<bool, String> {
-    let peer = state.peer.lock().await;
-    peer.send_files(&paths).await
+pub async fn set_device_alias(alias: String, state: State<'_, LanState>) -> Result<(), String> {
+    let service = state.service.lock().await;
+    service.set_alias(&alias).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_device_identity(state: State<'_, LanState>) -> Result<serde_json::Value, String> {
+    let service = state.service.lock().await;
+    let id = service.get_identity();
+    Ok(serde_json::json!({
+        "id": id.id,
+        "alias": id.alias,
+        "device_type": id.device_type,
+    }))
 }
 
 #[tauri::command]
@@ -433,6 +454,39 @@ fn explorer_selection_com() -> Result<Vec<String>, String> {
         CoUninitialize();
         result
     }
+}
+
+/// Open a file with the system's default handler
+#[tauri::command]
+pub async fn open_file(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    // Use tauri-plugin-shell to open files cross-platform (handles Android intents safely)
+    use tauri_plugin_shell::ShellExt;
+    app.shell().open(&path, None).map_err(|e| format!("open_file: {e}"))
+}
+
+/// Save raw bytes (from frontend file read) to a temp file for sending.
+/// Used on Android where content:// URIs can't be read directly by Rust.
+#[tauri::command]
+pub async fn save_temp_for_send(name: String, data: Vec<u8>, app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let send_dir = cache_dir.join("send_cache");
+    tokio::fs::create_dir_all(&send_dir).await.map_err(|e| e.to_string())?;
+    let out_path = send_dir.join(&name);
+    tokio::fs::write(&out_path, &data).await.map_err(|e| e.to_string())?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// Clean up temp files from send cache
+#[tauri::command]
+pub async fn cleanup_send_cache(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let send_dir = cache_dir.join("send_cache");
+    if send_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&send_dir).await;
+    }
+    Ok(())
 }
 
 fn format_size(bytes: u64) -> String {

@@ -26,32 +26,32 @@ impl Connection {
         }
     }
 
-    pub async fn from_incoming(mut stream: TcpStream, expected_hash: &[u8]) -> Result<Arc<Self>, String> {
+    /// Accept incoming connection: read sender's UUID, send our UUID back.
+    /// Returns (connection, sender_uuid_string).
+    pub async fn from_incoming(mut stream: TcpStream, my_uuid: &[u8; 16]) -> Result<(Arc<Self>, String), String> {
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
 
-        let mut peer_hash = vec![0u8; 16];
-        stream.read_exact(&mut peer_hash).await.map_err(|e| e.to_string())?;
-        stream.write_all(expected_hash).await.map_err(|e| e.to_string())?;
+        // Read sender's UUID
+        let mut peer_uuid = [0u8; 16];
+        stream.read_exact(&mut peer_uuid).await.map_err(|e| e.to_string())?;
+        // Send our UUID back as ACK
+        stream.write_all(my_uuid).await.map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
 
-        if peer_hash != expected_hash {
-            return Err("Code mismatch".into());
-        }
-
-        Ok(Arc::new(Self::from_stream(stream)))
+        let sender_id = uuid::Uuid::from_bytes(peer_uuid).to_string();
+        Ok((Arc::new(Self::from_stream(stream)), sender_id))
     }
 
-    pub async fn from_outgoing(mut stream: TcpStream, hash: &[u8]) -> Result<Arc<Self>, String> {
+    /// Connect to a peer: send our UUID, read their UUID back.
+    pub async fn from_outgoing(mut stream: TcpStream, my_uuid: &[u8; 16]) -> Result<Arc<Self>, String> {
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
 
-        stream.write_all(hash).await.map_err(|e| e.to_string())?;
+        // Send our UUID
+        stream.write_all(my_uuid).await.map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
-        let mut peer_hash = vec![0u8; 16];
-        stream.read_exact(&mut peer_hash).await.map_err(|e| e.to_string())?;
-
-        if peer_hash != hash {
-            return Err("Code mismatch".into());
-        }
+        // Read peer's UUID (ACK)
+        let mut _peer_uuid = [0u8; 16];
+        stream.read_exact(&mut _peer_uuid).await.map_err(|e| e.to_string())?;
 
         Ok(Arc::new(Self::from_stream(stream)))
     }
@@ -102,27 +102,28 @@ async fn write_message(w: &mut tokio::net::tcp::OwnedWriteHalf, msg: &Message) -
 /// Open a TCP connection to peer, authenticate, send text, close.
 pub async fn send_text_to_peer(
     peer_ip: &str,
-    code_hash: &[u8],
+    my_uuid: &[u8; 16],
     text: &str,
 ) -> Result<(), String> {
     let addr: SocketAddr = format!("{}:{}", peer_ip, TCP_PORT)
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
 
-    let stream = time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+    let stream = time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
         .await
         .map_err(|_| "Connection timeout".to_string())?
         .map_err(|e| e.to_string())?;
 
-    let conn = Connection::from_outgoing(stream, code_hash).await?;
+    let conn = Connection::from_outgoing(stream, my_uuid).await?;
     conn.send_message(&Message::Text { text: text.to_string() }).await?;
+    conn.send_message(&Message::Done).await?;
     Ok(())
 }
 
 /// Open a TCP connection to peer, authenticate, send files, close.
 pub async fn send_files_to_peer(
     peer_ip: &str,
-    code_hash: &[u8],
+    my_uuid: &[u8; 16],
     paths: &[String],
     handle: Option<&AppHandle>,
 ) -> Result<(), String> {
@@ -162,11 +163,20 @@ pub async fn send_files_to_peer(
                 .unwrap_or("file")
                 .to_string();
             file_entries.push((name, path.to_path_buf()));
+        } else {
+            // File doesn't exist or can't be accessed — report error instead of silently skipping
+            if let Some(h) = handle {
+                let _ = h.emit("lan_log", serde_json::json!({
+                    "level": "error",
+                    "text": format!("File not accessible: {}", path.display()),
+                }));
+            }
+            return Err(format!("File not accessible: {}", path.display()));
         }
     }
 
     if file_entries.is_empty() {
-        return Ok(());
+        return Err("No files to send".into());
     }
 
     // Calculate total size for progress
@@ -191,7 +201,7 @@ pub async fn send_files_to_peer(
         .map_err(|_| "Connection timeout".to_string())?
         .map_err(|e| e.to_string())?;
 
-    let conn = Connection::from_outgoing(stream, code_hash).await?;
+    let conn = Connection::from_outgoing(stream, my_uuid).await?;
 
     if let Some(h) = handle {
         let _ = h.emit("lan_transfer_progress", serde_json::json!({
@@ -207,10 +217,8 @@ pub async fn send_files_to_peer(
     // Use writer lock for atomic sends (no interleaving with concurrent operations)
     let mut w = conn.writer.lock().await;
 
-    // Send batch header if multiple files
-    if file_entries.len() > 1 {
-        write_message(&mut w, &Message::Batch { count: file_entries.len() as u32 }).await?;
-    }
+    // Always send batch header so receiver knows what to expect
+    write_message(&mut w, &Message::Batch { count: file_entries.len() as u32 }).await?;
 
     let mut sent_bytes: u64 = 0;
     let mut sent_files: usize = 0;
@@ -259,11 +267,9 @@ pub async fn send_files_to_peer(
         sent_files += 1;
     }
 
-    // Send done marker for batch
-    if file_entries.len() > 1 {
-        write_message(&mut w, &Message::Done).await?;
-        w.flush().await.map_err(|e| e.to_string())?;
-    }
+    // Always send Done so receiver knows the transfer is complete
+    write_message(&mut w, &Message::Done).await?;
+    w.flush().await.map_err(|e| e.to_string())?;
 
     drop(w);
 
@@ -502,12 +508,23 @@ fn deduplicate_path(path: PathBuf) -> PathBuf {
 }
 
 fn dirs_next_downloads() -> String {
-    if let Some(user_dirs) = directories::UserDirs::new() {
-        if let Some(downloads) = user_dirs.download_dir() {
-            return downloads.to_string_lossy().to_string();
-        }
+    // On Android, directories crate doesn't work — use the standard shared Downloads path
+    #[cfg(target_os = "android")]
+    {
+        let android_dl = "/storage/emulated/0/Download/LanDrop";
+        let _ = std::fs::create_dir_all(android_dl);
+        return android_dl.to_string();
     }
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string())
+
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Some(user_dirs) = directories::UserDirs::new() {
+            if let Some(downloads) = user_dirs.download_dir() {
+                return downloads.to_string_lossy().to_string();
+            }
+        }
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string())
+    }
 }

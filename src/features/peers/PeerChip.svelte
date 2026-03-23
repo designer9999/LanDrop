@@ -1,29 +1,29 @@
 <!--
-  Peer chip — avatar only with availability dot
+  Peer chip — avatar with online/offline status dot
 -->
 <script lang="ts">
-  import type { Peer } from "$lib/state/app-state.svelte";
-  import { getAppState } from "$lib/state/app-state.svelte";
+  import type { DiscoveredDevice } from "$lib/state/app-state.svelte";
   import PeerAvatar from "./PeerAvatar.svelte";
 
   interface Props {
-    peer: Peer;
+    device: DiscoveredDevice;
     selected: boolean;
     onclick: () => void;
   }
 
-  let { peer, selected, onclick }: Props = $props();
-  const app = getAppState();
+  let { device, selected, onclick }: Props = $props();
 </script>
 
 <button
   class="peer-chip"
   {onclick}
-  title={peer.name}
+  title="{device.alias}{device.online ? '' : ' (offline)'}"
 >
-  <PeerAvatar name={peer.name} color={peer.color} size="sm" />
-  {#if selected && app.lanConnected}
-    <span class="status-dot"></span>
+  <PeerAvatar name={device.alias} color={device.color} size="sm" />
+  {#if device.online}
+    <span class="status-dot" class:selected></span>
+  {:else}
+    <span class="status-dot offline"></span>
   {/if}
 </button>
 
@@ -53,9 +53,15 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--md-sys-color-primary);
+    background: var(--md-sys-color-tertiary);
     border: 2px solid var(--md-sys-color-surface);
+  }
+  .status-dot.selected {
+    background: var(--md-sys-color-primary);
     animation: pulse-glow 2s cubic-bezier(0.2, 0.0, 0, 1.0) infinite;
+  }
+  .status-dot.offline {
+    background: var(--md-sys-color-outline);
   }
   @keyframes pulse-glow {
     0%, 100% { opacity: 1; }

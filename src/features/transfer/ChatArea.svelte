@@ -74,7 +74,7 @@
 
   // ── Derived messages ──
   const displayMessages = $derived.by(() => {
-    const peerId = app.messageViewAll ? undefined : app.activePeer?.id;
+    const peerId = app.messageViewAll ? undefined : app.activeDevice?.id;
     if (!peerId && !app.messageViewAll) return [];
 
     if (showStarredOnly) return app.getStarredMessages(peerId);
@@ -86,8 +86,8 @@
   const currentPeerMessages = $derived(
     app.messageViewAll
       ? app.messages
-      : app.activePeer
-        ? app.getPeerMessages(app.activePeer.id)
+      : app.activeDevice
+        ? app.getPeerMessages(app.activeDevice.id)
         : []
   );
   const showToolbar = $derived(currentPeerMessages.length > 0 || showStarredOnly || searchOpen);
@@ -269,10 +269,10 @@
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="clear-menu" onclick={() => showClearMenu = false}>
-            <button onclick={() => { app.activePeer && app.clearMessages(app.activePeer.id); }}>
+            <button onclick={() => { app.activeDevice && app.clearMessages(app.activeDevice.id); }}>
               Clear chat (keep saved)
             </button>
-            <button onclick={() => { app.activePeer && app.deleteAllMessages(app.activePeer.id); }}>
+            <button onclick={() => { app.activeDevice && app.deleteAllMessages(app.activeDevice.id); }}>
               Delete all for this peer
             </button>
             <button onclick={() => { app.deleteOldMessages(7); }}>

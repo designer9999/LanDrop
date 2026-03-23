@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub const BEACON_PORT: u16 = 29170;
 pub const TCP_PORT: u16 = 29171;
-pub const BEACON_MAGIC: &[u8; 8] = b"LANDROP1";
 pub const CHUNK_SIZE: usize = 262144; // 256KB
+pub const MDNS_SERVICE_TYPE: &str = "_landrop._tcp.local.";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]

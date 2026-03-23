@@ -9,7 +9,7 @@
   import Slider from "$lib/ui/Slider.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickSaveFolder, copyToClipboard, setMica } from "$lib/api/bridge";
+  import { pickSaveFolder, copyToClipboard, setMica, getDeviceIdentity, setDeviceAlias } from "$lib/api/bridge";
   import { playReceiveSound } from "$lib/utils/notification-sound";
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { VARIANT_INFO, PRESET_COLORS, type SchemeVariant } from "$lib/theme/m3-color";
@@ -24,11 +24,39 @@
   const app = getAppState();
   const theme = getThemeState();
 
+  let deviceOpen = $state(false);
   let themeOpen = $state(true);
   let receiveOpen = $state(false);
   let aboutOpen = $state(false);
   let debugOpen = $state(false);
   let debugEl: HTMLDivElement | undefined = $state();
+
+  // Device identity
+  let deviceAlias = $state("");
+  let deviceId = $state("");
+  let aliasEditing = $state(false);
+
+  import { onMount } from "svelte";
+  onMount(async () => {
+    try {
+      const identity = await getDeviceIdentity();
+      deviceAlias = identity.alias;
+      deviceId = identity.id;
+    } catch {}
+  });
+
+  async function saveAlias() {
+    const trimmed = deviceAlias.trim();
+    if (!trimmed) return;
+    try {
+      await setDeviceAlias(trimmed);
+      deviceAlias = trimmed;
+      aliasEditing = false;
+      onsnackbar?.("Device name updated — restart to broadcast new name");
+    } catch {
+      onsnackbar?.("Failed to update device name");
+    }
+  }
 
   // Hex input
   let hexInput = $state(theme.seedColor.replace("#", ""));
@@ -101,6 +129,65 @@
 </script>
 
 <div class="flex flex-col gap-4">
+
+  <!-- Device Identity -->
+  <Card variant="elevated">
+    <button
+      class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
+             cursor-pointer border-none bg-transparent p-0 -my-0.5"
+      onclick={() => deviceOpen = !deviceOpen}
+    >
+      <span class="text-primary"><Icon name="devices" size={20} /></span>
+      This Device
+      <span class="flex-1"></span>
+      <span class="text-on-surface-variant section-arrow" class:section-arrow-open={deviceOpen}>
+        <Icon name="expand_more" size={20} />
+      </span>
+    </button>
+
+    {#if deviceOpen}
+      <div class="flex flex-col gap-4 mt-4 section-enter">
+        <div class="flex items-center gap-3 p-4 rounded-xl bg-surface-container">
+          <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary text-on-primary">
+            <Icon name="computer" size={20} />
+          </div>
+          <div class="flex-1 min-w-0">
+            {#if aliasEditing}
+              <div class="flex items-center gap-2">
+                <input
+                  class="flex-1 bg-transparent border-b border-primary outline-none text-sm text-on-surface py-1"
+                  bind:value={deviceAlias}
+                  onkeydown={(e) => { if (e.key === "Enter") saveAlias(); if (e.key === "Escape") aliasEditing = false; }}
+                />
+                <button
+                  class="w-7 h-7 inline-flex items-center justify-center rounded-full
+                         text-primary cursor-pointer bg-transparent border-none"
+                  onclick={saveAlias}
+                >
+                  <Icon name="check" size={18} />
+                </button>
+              </div>
+            {:else}
+              <button
+                class="flex items-center gap-1 text-sm text-on-surface font-medium cursor-pointer
+                       bg-transparent border-none p-0 hover:text-primary"
+                onclick={() => aliasEditing = true}
+                title="Click to rename"
+              >
+                {deviceAlias || "Loading..."}
+                <Icon name="edit" size={14} />
+              </button>
+            {/if}
+            <div class="text-xs text-on-surface-variant font-mono mt-1 truncate opacity-50">{deviceId}</div>
+          </div>
+        </div>
+
+        <div class="text-xs text-on-surface-variant">
+          Other devices on your network will see this name. Changes take effect after restart.
+        </div>
+      </div>
+    {/if}
+  </Card>
 
   <!-- Theme -->
   <Card variant="elevated">
@@ -340,10 +427,10 @@
         <div class="text-sm text-on-surface-variant leading-relaxed">
           <p class="font-medium text-on-surface mb-1">How it works</p>
           <ol class="list-decimal list-inside flex flex-col gap-1">
-            <li>Add a peer with a shared code phrase</li>
-            <li>Both devices on the same network auto-connect</li>
+            <li>Install LanDrop on your devices</li>
+            <li>Devices on the same network are discovered automatically</li>
             <li>Drop files or type messages — transferred instantly</li>
-            <li>No internet needed — everything stays on your LAN</li>
+            <li>No internet, no passwords — everything stays on your LAN</li>
           </ol>
         </div>
       </div>

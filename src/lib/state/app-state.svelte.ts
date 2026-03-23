@@ -1,12 +1,15 @@
 import type { FileInfo } from "$lib/api/bridge";
 
-export interface Peer {
-  id: string;
-  name: string;
-  code: string;
-  color: number;
-  lastUsedAt: string;
-  outFolder?: string;
+// ── Device (auto-discovered via mDNS) ──
+
+export interface DiscoveredDevice {
+  id: string;          // UUID from remote device (persistent)
+  alias: string;       // display name from mDNS
+  deviceType: string;  // "desktop" or "mobile"
+  ip: string;          // current IP address
+  online: boolean;     // currently discovered on LAN
+  color: number;       // auto-assigned avatar color
+  outFolder?: string;  // user-configured per-device output folder
 }
 
 export interface LogEntry {
@@ -60,8 +63,8 @@ export const PEER_COLORS = [
   "#546E7A",
 ];
 
-const PEERS_KEY = "landrop-peers";
-const ACTIVE_PEER_KEY = "landrop-active-peer";
+const DEVICES_KEY = "landrop-devices";
+const ACTIVE_DEVICE_KEY = "landrop-active-device";
 const MESSAGES_KEY = "landrop-messages";
 const ACTIVITY_KEY = "landrop-activity";
 const SETTINGS_KEY = "landrop-settings";
@@ -122,9 +125,9 @@ export interface ReceiveOptions {
 class AppState {
   activeView = $state<"transfer" | "settings">("transfer");
 
-  // Peers
-  peers = $state<Peer[]>(loadArray<Peer>(PEERS_KEY));
-  activePeerId = $state<string | null>(loadString(ACTIVE_PEER_KEY));
+  // Devices (auto-discovered + persisted)
+  devices = $state<DiscoveredDevice[]>(loadArray<DiscoveredDevice>(DEVICES_KEY));
+  activeDeviceId = $state<string | null>(loadString(ACTIVE_DEVICE_KEY));
 
   // Files
   files = $state<SelectedFile[]>([]);
@@ -135,8 +138,6 @@ class AppState {
 
   // Network
   localIp = $state<string>("...");
-  lanConnected = $state(false);
-  lanPeerIp = $state<string | null>(null);
 
   // Logs, activity, messages
   logs = $state<LogEntry[]>([]);
@@ -153,13 +154,17 @@ class AppState {
   hotkeys = $state<HotkeySettings>(loadJson(HOTKEYS_KEY, DEFAULT_HOTKEYS));
 
   // Derived
-  get activePeer(): Peer | null {
-    return this.peers.find((p) => p.id === this.activePeerId) ?? null;
+  get activeDevice(): DiscoveredDevice | null {
+    return this.devices.find((d) => d.id === this.activeDeviceId) ?? null;
+  }
+
+  get activeDeviceOnline(): boolean {
+    return this.activeDevice?.online ?? false;
   }
 
   get effectiveOutFolder(): string {
-    const peer = this.activePeer;
-    return peer?.outFolder ?? this.receiveOptions.outFolder ?? "";
+    const device = this.activeDevice;
+    return device?.outFolder ?? this.receiveOptions.outFolder ?? "";
   }
 
   get hasFiles(): boolean {
@@ -170,40 +175,80 @@ class AppState {
     return this.files.map((f) => f.path);
   }
 
-  // Peer CRUD
-  addPeer(peer: Peer) {
-    this.peers = [...this.peers, peer];
-    this._savePeers();
+  get onlineDevices(): DiscoveredDevice[] {
+    return this.devices.filter((d) => d.online);
   }
 
-  updatePeer(id: string, updates: Partial<Peer>) {
-    this.peers = this.peers.map((p) => (p.id === id ? { ...p, ...updates } : p));
-    this._savePeers();
-  }
+  // ── Device management (auto-discovered) ──
 
-  removePeer(id: string) {
-    this.peers = this.peers.filter((p) => p.id !== id);
-    if (this.activePeerId === id) {
-      this.activePeerId = this.peers[0]?.id ?? null;
-      saveString(ACTIVE_PEER_KEY, this.activePeerId);
+  /** Called when mDNS discovers or updates a device */
+  upsertDevice(peer: { id: string; alias: string; device_type: string; ip: string }) {
+    const existing = this.devices.find((d) => d.id === peer.id);
+    if (existing) {
+      // Update existing — preserve user settings (color, outFolder)
+      this.devices = this.devices.map((d) =>
+        d.id === peer.id
+          ? { ...d, alias: peer.alias, deviceType: peer.device_type, ip: peer.ip, online: true }
+          : d
+      );
+    } else {
+      // New device — auto-assign color
+      const color = this.devices.length % PEER_COLORS.length;
+      this.devices = [
+        ...this.devices,
+        {
+          id: peer.id,
+          alias: peer.alias,
+          deviceType: peer.device_type,
+          ip: peer.ip,
+          online: true,
+          color,
+        },
+      ];
     }
-    this._savePeers();
+    this._saveDevices();
+
+    // Auto-select if no active device
+    if (!this.activeDeviceId) {
+      this.setActiveDevice(peer.id);
+    }
   }
 
-  setActivePeer(id: string | null) {
-    this.activePeerId = id;
-    saveString(ACTIVE_PEER_KEY, id);
+  /** Called when mDNS reports a device left */
+  markDeviceOffline(id: string) {
+    this.devices = this.devices.map((d) =>
+      d.id === id ? { ...d, online: false } : d
+    );
+    this._saveDevices();
   }
 
-  touchPeer(id: string) {
-    this.updatePeer(id, { lastUsedAt: new Date().toISOString() });
+  setActiveDevice(id: string | null) {
+    this.activeDeviceId = id;
+    saveString(ACTIVE_DEVICE_KEY, id);
   }
 
-  private _savePeers() {
-    saveJson(PEERS_KEY, this.peers);
+  updateDeviceSettings(id: string, updates: Partial<Pick<DiscoveredDevice, "color" | "outFolder">>) {
+    this.devices = this.devices.map((d) =>
+      d.id === id ? { ...d, ...updates } : d
+    );
+    this._saveDevices();
   }
 
-  // Files
+  removeDevice(id: string) {
+    this.devices = this.devices.filter((d) => d.id !== id);
+    if (this.activeDeviceId === id) {
+      this.activeDeviceId = this.devices[0]?.id ?? null;
+      saveString(ACTIVE_DEVICE_KEY, this.activeDeviceId);
+    }
+    this._saveDevices();
+  }
+
+  private _saveDevices() {
+    saveJson(DEVICES_KEY, this.devices);
+  }
+
+  // ── Files ──
+
   addFile(path: string, info: FileInfo | null) {
     if (this.files.some((f) => f.path === path)) return;
     this.files = [...this.files, { path, info }];
@@ -217,7 +262,8 @@ class AppState {
     this.files = [];
   }
 
-  // Logs
+  // ── Logs ──
+
   addLog(level: LogEntry["level"], text: string) {
     const time = new Date().toLocaleTimeString("en-GB", { hour12: false });
     this.logs = [...this.logs, { level, text, time }];
@@ -228,7 +274,8 @@ class AppState {
     this.logs = [];
   }
 
-  // Activity
+  // ── Activity ──
+
   addActivity(entry: Omit<ActivityEntry, "id" | "timestamp">) {
     this.activity = [
       ...this.activity,
@@ -247,7 +294,8 @@ class AppState {
     saveJson(ACTIVITY_KEY, this.activity);
   }
 
-  // Messages
+  // ── Messages ──
+
   addMessage(entry: Omit<MessageEntry, "id" | "timestamp">) {
     this.messages = [
       ...this.messages,
@@ -314,7 +362,8 @@ class AppState {
     saveJson(MESSAGES_KEY, this.messages);
   }
 
-  // Settings
+  // ── Settings ──
+
   setNotifications(enabled: boolean) {
     this.notificationsEnabled = enabled;
     saveJson(SETTINGS_KEY, { n: enabled });

@@ -4,7 +4,7 @@
 <script lang="ts">
   import Icon from "$lib/ui/Icon.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { showInExplorer } from "$lib/api/bridge";
+  import { showInExplorer, openFile, isMobile } from "$lib/api/bridge";
   import type { MessageEntry } from "$lib/state/app-state.svelte";
 
   interface Props {
@@ -21,6 +21,7 @@
   let { msg, position, isCopied, viewAll, thumbCache, oncopy, onlightbox, onfilepreview }: Props = $props();
 
   const app = getAppState();
+  const mobile = isMobile();
 
   let isSent = $derived(msg.direction === "sent");
   let hasAttachments = $derived(msg.attachments && msg.attachments.length > 0);
@@ -28,7 +29,7 @@
   let files = $derived(msg.attachments?.filter(a => a.type === "file" || a.type === "folder") ?? []);
 
   function getPeerName(peerId: string): string {
-    return app.peers.find(p => p.id === peerId)?.name ?? "Unknown";
+    return app.devices.find(d => d.id === peerId)?.alias ?? "Unknown";
   }
 
   function formatTime(ts: string): string {
@@ -72,6 +73,11 @@
             {:else}
               <div class="att-img-placeholder"><Icon name="image" size={24} /></div>
             {/if}
+            {#if mobile && !isSent}
+              <button class="att-img-open" onclick={(e) => { e.stopPropagation(); openFile(img.path); }} title="Open">
+                <Icon name="open_in_new" size={16} />
+              </button>
+            {/if}
           </div>
         {/each}
       </div>
@@ -83,7 +89,7 @@
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           {#if file.type === "folder"}
-            <div class="att-file-card" onclick={(e) => { e.stopPropagation(); showInExplorer(file.path); }} title="Open folder">
+            <div class="att-file-card" onclick={(e) => { e.stopPropagation(); mobile ? openFile(file.path) : showInExplorer(file.path); }} title={mobile ? "Open" : "Open folder"}>
               <Icon name="folder" size={18} />
               <span class="att-file-name">{file.name}</span>
               {#if file.size}<span class="att-file-size">{file.size}</span>{/if}
@@ -91,7 +97,7 @@
             </div>
           {:else}
             {@const ext = file.name.split('.').pop()?.toUpperCase() ?? 'FILE'}
-            <div class="att-file-card" onclick={(e) => { e.stopPropagation(); onfilepreview(file.path); }} title="Preview file">
+            <div class="att-file-card" onclick={(e) => { e.stopPropagation(); mobile ? openFile(file.path) : onfilepreview(file.path); }} title={mobile ? "Open" : "Preview file"}>
               <span class="att-file-name">{file.name}</span>
               {#if file.size}<span class="att-file-size">{file.size}</span>{/if}
               <span class="att-file-badge">{ext}</span>
@@ -223,6 +229,24 @@
     animation: shimmer 1.5s cubic-bezier(0.2, 0.0, 0, 1.0) infinite alternate;
   }
   .att-grid .att-img { aspect-ratio: 1; max-height: none; }
+  .att-img-open {
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    cursor: pointer;
+    z-index: 2;
+    backdrop-filter: blur(4px);
+  }
+  .att-img-open:active { background: rgba(0, 0, 0, 0.75); }
 
   .att-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
   .att-file-card {
