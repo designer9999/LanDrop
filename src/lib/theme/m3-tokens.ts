@@ -1,6 +1,6 @@
 import type { M3ColorTokens } from "./m3-color";
 
-function toKebab(key: string): string {
+export function toKebab(key: string): string {
   return key.replace(/([A-Z])/g, "-$1").toLowerCase();
 }
 

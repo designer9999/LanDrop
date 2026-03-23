@@ -1,10 +1,85 @@
+/**
+ * M3 Dynamic Color — HCT algorithm wrapper
+ *
+ * Uses @material/material-color-utilities to generate all 26+ color roles
+ * from a single seed color + scheme variant + dark/light mode.
+ */
 import {
   argbFromHex,
   hexFromArgb,
   Hct,
+  SchemeTonalSpot,
+  SchemeVibrant,
   SchemeExpressive,
+  SchemeFidelity,
+  SchemeContent,
+  SchemeMonochrome,
+  SchemeNeutral,
+  SchemeRainbow,
+  SchemeFruitSalad,
   type DynamicScheme,
 } from "@material/material-color-utilities";
+
+export type SchemeVariant =
+  | "tonalSpot"
+  | "vibrant"
+  | "expressive"
+  | "fidelity"
+  | "content"
+  | "monochrome"
+  | "neutral"
+  | "rainbow"
+  | "fruitSalad";
+
+const SCHEME_CONSTRUCTORS: Record<
+  SchemeVariant,
+  new (hct: Hct, isDark: boolean, contrast: number) => DynamicScheme
+> = {
+  tonalSpot: SchemeTonalSpot,
+  vibrant: SchemeVibrant,
+  expressive: SchemeExpressive,
+  fidelity: SchemeFidelity,
+  content: SchemeContent,
+  monochrome: SchemeMonochrome,
+  neutral: SchemeNeutral,
+  rainbow: SchemeRainbow,
+  fruitSalad: SchemeFruitSalad,
+};
+
+export const VARIANT_INFO: {
+  id: SchemeVariant;
+  name: string;
+  desc: string;
+}[] = [
+  { id: "tonalSpot", name: "Tonal Spot", desc: "Balanced, safe default" },
+  { id: "vibrant", name: "Vibrant", desc: "Bold and saturated" },
+  { id: "expressive", name: "Expressive", desc: "Creative hue shifts" },
+  { id: "fidelity", name: "Fidelity", desc: "Preserves seed color" },
+  { id: "content", name: "Content", desc: "Seed in containers" },
+  { id: "neutral", name: "Neutral", desc: "Whisper of color" },
+  { id: "monochrome", name: "Monochrome", desc: "Pure grayscale" },
+  { id: "rainbow", name: "Rainbow", desc: "Colorful surfaces" },
+  { id: "fruitSalad", name: "Fruit Salad", desc: "Playful shifted hues" },
+];
+
+export const PRESET_COLORS = [
+  "#6750A4",
+  "#B91C1C",
+  "#0D9488",
+  "#2563EB",
+  "#D97706",
+  "#7C3AED",
+  "#059669",
+  "#DC2626",
+  "#4F46E5",
+  "#EA580C",
+  "#0891B2",
+  "#C026D3",
+  "#65A30D",
+  "#E11D48",
+  "#0284C7",
+  "#FACC15",
+];
 
 export interface M3ColorTokens {
   primary: string;
@@ -42,14 +117,19 @@ export interface M3ColorTokens {
   scrim: string;
 }
 
+/**
+ * Generate all M3 color tokens from a seed color.
+ */
 export function generateColorTokens(
   seedHex: string,
+  variant: SchemeVariant = "expressive",
   isDark: boolean = true,
   contrastLevel: number = 0.0
 ): M3ColorTokens {
   const seedArgb = argbFromHex(seedHex);
   const seedHct = Hct.fromInt(seedArgb);
-  const scheme: DynamicScheme = new SchemeExpressive(seedHct, isDark, contrastLevel);
+  const SchemeClass = SCHEME_CONSTRUCTORS[variant];
+  const scheme = new SchemeClass(seedHct, isDark, contrastLevel);
 
   return {
     primary: hexFromArgb(scheme.primary),
