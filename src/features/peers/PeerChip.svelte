@@ -1,10 +1,9 @@
 <!--
-  Peer chip — avatar + name, selected state, LAN indicator
+  Peer chip — avatar only with availability dot
 -->
 <script lang="ts">
   import type { Peer } from "$lib/state/app-state.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import Icon from "$lib/ui/Icon.svelte";
   import PeerAvatar from "./PeerAvatar.svelte";
 
   interface Props {
@@ -18,36 +17,48 @@
 </script>
 
 <button
-  class="group relative inline-flex items-center gap-1.5 h-8 pl-1 pr-3 rounded-sm
-         text-xs font-medium cursor-pointer select-none overflow-hidden shrink-0"
-  style="
-    background-color: {selected ? 'var(--md-sys-color-secondary-container)' : 'transparent'};
-    border: {selected ? '1px solid transparent' : '1px solid var(--md-sys-color-outline-variant)'};
-    color: {selected ? 'var(--md-sys-color-on-secondary-container)' : 'var(--md-sys-color-on-surface-variant)'};
-    transition:
-      background-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
-      border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
-      color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
-  "
+  class="peer-chip"
   {onclick}
+  title={peer.name}
 >
-  <div
-    class="absolute inset-0 opacity-0
-           group-hover:opacity-8 group-focus-visible:opacity-10 group-active:opacity-10
-           {selected ? 'bg-on-secondary-container' : 'bg-on-surface-variant'}"
-    style="transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
-  ></div>
-
-  <span class="relative z-10">
-    <PeerAvatar name={peer.name} color={peer.color} size="sm" />
-  </span>
-  <span class="relative z-10 max-w-24 truncate">{peer.name}</span>
+  <PeerAvatar name={peer.name} color={peer.color} size="sm" />
   {#if selected && app.lanConnected}
-    <span class="relative z-10 w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
-  {:else if selected}
-    <span class="relative z-10 text-on-secondary-container opacity-50"
-          style="font-size: 14px; line-height: 1;">
-      <Icon name="edit" size={14} />
-    </span>
+    <span class="status-dot"></span>
   {/if}
 </button>
+
+<style>
+  .peer-chip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+  }
+  .peer-chip:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
+  }
+  .peer-chip:active {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent);
+  }
+  .status-dot {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--md-sys-color-primary);
+    border: 2px solid var(--md-sys-color-surface);
+    animation: pulse-glow 2s cubic-bezier(0.2, 0.0, 0, 1.0) infinite;
+  }
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+</style>

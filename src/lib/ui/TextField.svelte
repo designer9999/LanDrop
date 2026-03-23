@@ -114,7 +114,6 @@
                  pl-4
                  {trailingIcon || showErrorIcon ? 'pr-3' : 'pr-4'}"
           class:font-mono={mono}
-          style="padding-top: 8px;"
           {type}
           placeholder={isFloating ? placeholder : ""}
           {disabled}

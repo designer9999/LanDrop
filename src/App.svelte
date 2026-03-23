@@ -218,9 +218,6 @@
       <IconButton title="Minimize" onclick={windowMinimize}>
         <Icon name="remove" size={20} />
       </IconButton>
-      <IconButton title="Maximize" onclick={windowToggleMaximize}>
-        <Icon name="crop_square" size={18} />
-      </IconButton>
       <IconButton title="Close" onclick={windowClose}>
         <Icon name="close" size={20} />
       </IconButton>
