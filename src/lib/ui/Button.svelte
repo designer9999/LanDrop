@@ -2,7 +2,7 @@
   import type { Snippet } from "svelte";
 
   interface Props {
-    variant?: "filled" | "tonal" | "outlined" | "error";
+    variant?: "filled" | "tonal" | "outlined" | "error" | "elevated";
     disabled?: boolean;
     full?: boolean;
     onclick?: () => void;
@@ -22,7 +22,9 @@
              ? 'bg-secondary-container text-on-secondary-container shadow-level0 hover:shadow-level1'
              : variant === 'error'
                ? 'bg-error text-on-error shadow-level0 hover:shadow-level1'
-               : 'bg-transparent text-on-surface-variant border border-outline-variant hover:shadow-level1'}"
+               : variant === 'elevated'
+                 ? 'bg-surface-container-low text-on-surface shadow-level1 hover:shadow-level2'
+                 : 'bg-transparent text-on-surface-variant border border-outline-variant hover:shadow-level1'}"
   class:w-full={full}
   class:btn-disabled-container={disabled && variant !== 'outlined'}
   style="transition: box-shadow var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
@@ -38,7 +40,9 @@
                ? 'bg-on-secondary-container'
                : variant === 'error'
                  ? 'bg-on-error'
-                 : 'bg-on-surface-variant'}"
+                 : variant === 'elevated'
+                   ? 'bg-on-surface'
+                   : 'bg-on-surface-variant'}"
     style="transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
   ></div>
   <span class="relative z-10 inline-flex items-center gap-2" class:opacity-38={disabled}>

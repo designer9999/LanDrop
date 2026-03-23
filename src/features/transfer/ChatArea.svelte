@@ -6,7 +6,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail, getFullImage, readFilePreview, onDragDrop, isMobile, getContentFileName } from "$lib/api/bridge";
+  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail, getFullImage, readFilePreview, onDragDrop, isMobile, getContentFileName, revokeBlobUrl } from "$lib/api/bridge";
   import type { FilePreview } from "$lib/api/bridge";
   import { isImage } from "$lib/utils/file-utils";
   import { onMount } from "svelte";
@@ -42,7 +42,10 @@
       if (keys.length >= MAX_THUMB_CACHE) {
         const pruned = { ...thumbCache };
         const removeCount = keys.length - MAX_THUMB_CACHE + 1;
-        for (const k of keys.slice(0, removeCount)) delete pruned[k];
+        for (const k of keys.slice(0, removeCount)) {
+          revokeBlobUrl(pruned[k]);
+          delete pruned[k];
+        }
         thumbCache = pruned;
       }
       thumbCache = { ...thumbCache, [path]: uri ?? "" };
@@ -214,6 +217,10 @@
   }
 
   function closeLightbox() {
+    // Revoke full-res blob URL (not the thumbnail, which stays in cache)
+    if (lightboxSrc && lightboxSrc !== thumbCache[lightboxPath]) {
+      revokeBlobUrl(lightboxSrc);
+    }
     lightboxSrc = null;
     lightboxPath = "";
     lightboxName = "";

@@ -24,7 +24,7 @@ fn emit_log(handle: &AppHandle, level: &str, text: &str) {
 }
 
 /// Get the local LAN IPv4 address
-fn get_local_ipv4() -> Option<Ipv4Addr> {
+pub fn get_local_ipv4() -> Option<Ipv4Addr> {
     let interfaces = local_ip_address::list_afinet_netifas().unwrap_or_default();
     let vpn_keywords = ["tun", "tap", "wg", "vpn", "proton", "nord", "mullvad", "wireguard"];
 

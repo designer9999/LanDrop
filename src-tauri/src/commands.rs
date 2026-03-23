@@ -89,33 +89,35 @@ pub async fn get_device_identity(state: State<'_, LanState>) -> Result<serde_jso
 
 #[tauri::command]
 pub async fn get_file_info(path: String) -> Result<FileInfo, String> {
-    let p = Path::new(&path);
+    tokio::task::spawn_blocking(move || {
+        let p = Path::new(&path);
 
-    if p.is_dir() {
-        let mut count = 0usize;
-        let mut total_size = 0u64;
-        for entry in walkdir::WalkDir::new(p).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() {
-                count += 1;
-                total_size += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if p.is_dir() {
+            let mut count = 0usize;
+            let mut total_size = 0u64;
+            for entry in walkdir::WalkDir::new(p).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    count += 1;
+                    total_size += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
             }
+            Ok(FileInfo {
+                name: p.file_name().and_then(|n| n.to_str()).unwrap_or("folder").to_string(),
+                size: format_size(total_size),
+                file_type: "folder".to_string(),
+                count: Some(count),
+            })
+        } else {
+            let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            Ok(FileInfo {
+                name: p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string(),
+                size: format_size(meta.len()),
+                file_type: format!(".{}", ext),
+                count: None,
+            })
         }
-        Ok(FileInfo {
-            name: p.file_name().and_then(|n| n.to_str()).unwrap_or("folder").to_string(),
-            size: format_size(total_size),
-            file_type: "folder".to_string(),
-            count: Some(count),
-        })
-    } else {
-        let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        Ok(FileInfo {
-            name: p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string(),
-            size: format_size(meta.len()),
-            file_type: format!(".{}", ext),
-            count: None,
-        })
-    }
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -233,48 +235,49 @@ pub struct FilePreview {
 
 #[tauri::command]
 pub async fn read_file_preview(path: String, max_lines: Option<usize>) -> Result<FilePreview, String> {
-    let p = Path::new(&path);
-    if !p.exists() || !p.is_file() {
-        return Err("File not found".to_string());
-    }
-
-    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
-    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let size = format_size(meta.len());
-    let max = max_lines.unwrap_or(200);
-
-    // Try to read as text
-    let text_exts = [
-        "txt", "md", "html", "htm", "css", "js", "ts", "jsx", "tsx", "json",
-        "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "csv",
-        "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
-        "php", "sh", "bash", "zsh", "bat", "ps1", "sql", "svelte", "vue",
-        "env", "gitignore", "dockerfile", "makefile",
-    ];
-
-    let is_text = text_exts.contains(&ext.as_str()) || meta.len() < 64 * 1024;
-
-    if is_text {
-        match std::fs::read_to_string(p) {
-            Ok(content) => {
-                let lines: Vec<&str> = content.lines().collect();
-                let total = lines.len();
-                let truncated = total > max;
-                let preview: String = lines.into_iter().take(max).collect::<Vec<_>>().join("\n");
-                Ok(FilePreview {
-                    name, size, extension: ext, content: Some(preview), line_count: total, truncated,
-                })
-            }
-            Err(_) => Ok(FilePreview {
-                name, size, extension: ext, content: None, line_count: 0, truncated: false,
-            }),
+    tokio::task::spawn_blocking(move || {
+        let p = Path::new(&path);
+        if !p.exists() || !p.is_file() {
+            return Err("File not found".to_string());
         }
-    } else {
-        Ok(FilePreview {
-            name, size, extension: ext, content: None, line_count: 0, truncated: false,
-        })
-    }
+
+        let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let size = format_size(meta.len());
+        let max = max_lines.unwrap_or(200);
+
+        let text_exts = [
+            "txt", "md", "html", "htm", "css", "js", "ts", "jsx", "tsx", "json",
+            "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "csv",
+            "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
+            "php", "sh", "bash", "zsh", "bat", "ps1", "sql", "svelte", "vue",
+            "env", "gitignore", "dockerfile", "makefile",
+        ];
+
+        let is_text = text_exts.contains(&ext.as_str()) || meta.len() < 64 * 1024;
+
+        if is_text {
+            match std::fs::read_to_string(p) {
+                Ok(content) => {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let total = lines.len();
+                    let truncated = total > max;
+                    let preview: String = lines.into_iter().take(max).collect::<Vec<_>>().join("\n");
+                    Ok(FilePreview {
+                        name, size, extension: ext, content: Some(preview), line_count: total, truncated,
+                    })
+                }
+                Err(_) => Ok(FilePreview {
+                    name, size, extension: ext, content: None, line_count: 0, truncated: false,
+                }),
+            }
+        } else {
+            Ok(FilePreview {
+                name, size, extension: ext, content: None, line_count: 0, truncated: false,
+            })
+        }
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -307,41 +310,9 @@ pub async fn get_local_ip() -> Result<String, String> {
 }
 
 fn get_local_ip_inner() -> String {
-    // Prefer physical LAN IPv4, skip VPN/virtual adapters
-    let interfaces = local_ip_address::list_afinet_netifas().unwrap_or_default();
-
-    // First pass: find a common LAN IPv4 (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
-    // Skip typical VPN adapter names
-    let vpn_keywords = ["tun", "tap", "wg", "vpn", "proton", "nord", "mullvad", "wireguard"];
-
-    for (name, ip) in &interfaces {
-        if !ip.is_ipv4() { continue; }
-        let ip4 = match ip { std::net::IpAddr::V4(v4) => v4, _ => continue };
-        if ip4.is_loopback() { continue; }
-
-        let name_lower = name.to_lowercase();
-        if vpn_keywords.iter().any(|k| name_lower.contains(k)) { continue; }
-
-        let octets = ip4.octets();
-        let is_lan = octets[0] == 192 && octets[1] == 168
-            || octets[0] == 10
-            || (octets[0] == 172 && (16..=31).contains(&octets[1]));
-
-        if is_lan {
-            return ip.to_string();
-        }
-    }
-
-    // Fallback: any IPv4 that's not loopback
-    for (_, ip) in &interfaces {
-        if let std::net::IpAddr::V4(v4) = ip {
-            if !v4.is_loopback() {
-                return ip.to_string();
-            }
-        }
-    }
-
-    "unknown".to_string()
+    crate::lan::discovery::get_local_ipv4()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[tauri::command]
@@ -440,7 +411,10 @@ fn explorer_selection_com() -> Result<Vec<String>, String> {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    if let Ok(s) = name_ptr.to_string() {
+                    let result = name_ptr.to_string();
+                    // Free COM-allocated PWSTR to prevent memory leak
+                    windows::Win32::System::Com::CoTaskMemFree(Some(name_ptr.0 as *const _));
+                    if let Ok(s) = result {
                         if !s.is_empty() {
                             paths.push(s);
                         }
@@ -489,7 +463,7 @@ pub async fn cleanup_send_cache(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)
     } else if bytes < 1024 * 1024 {

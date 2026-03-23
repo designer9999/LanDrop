@@ -52,86 +52,87 @@
     setDefaultOutFolder(folder);
   });
 
-  onMount(async () => {
-    const status = await getStatus();
-    app.localIp = status.local_ip ?? "unknown";
-    if (status.app_version) appVersion = status.app_version;
+  onMount(() => {
+    let unlisteners: Array<() => void> = [];
 
-    // Restore mica if enabled
-    if (theme.mica) {
-      setMica(true, theme.micaOpacity);
-      document.documentElement.style.background = "transparent";
-      document.body.classList.add("mica-active");
-    }
+    (async () => {
+      const status = await getStatus();
+      app.localIp = status.local_ip ?? "unknown";
+      if (status.app_version) appVersion = status.app_version;
 
-    // Start mDNS discovery — zero config, no passwords
-    await startLanService();
+      // Restore mica if enabled
+      if (theme.mica) {
+        setMica(true, theme.micaOpacity);
+        document.documentElement.style.background = "transparent";
+        document.body.classList.add("mica-active");
+      }
 
-    const unlisteners = await Promise.all([
-      onLanLog((level, text) => {
-        const mapped = level === "success" ? "success" : level === "error" ? "error" : level === "warn" ? "warn" : "info";
-        app.addLog(mapped as "info" | "warn" | "error" | "success", text);
-      }),
-      onLanPeerDiscovered((peer) => {
-        app.upsertDevice(peer);
-        app.addLog("success", `Device discovered: ${peer.alias} (${peer.ip})`);
-      }),
-      onLanPeerLost((peerId) => {
-        app.markDeviceOffline(peerId);
-        const device = app.devices.find(d => d.id === peerId);
-        app.addLog("warn", `Device offline: ${device?.alias ?? peerId}`);
-      }),
-      onLanTextReceived((peerId, text) => {
-        // Auto-select device if we receive from it and have no active
-        if (!app.activeDeviceId) app.setActiveDevice(peerId);
-        app.addMessage({ peerId, direction: "received", text });
-        app.addActivity({ peerId, direction: "received", type: "text", items: [], success: true });
-        if (app.notificationsEnabled) playReceiveSound();
-      }),
-      onLanFilesReceived((peerId, files, details) => {
-        if (!app.activeDeviceId) app.setActiveDevice(peerId);
-        app.addActivity({ peerId, direction: "received", type: "files", items: files, success: true, outFolder: app.effectiveOutFolder });
-        if (details.length > 0) {
-          // Group files that came from a folder
-          const folderFiles = new Map<string, typeof details>();
-          const looseFiles: typeof details = [];
-          for (const f of details) {
-            const slashIdx = f.name.indexOf("/");
-            if (slashIdx > 0) {
-              const folder = f.name.substring(0, slashIdx);
-              if (!folderFiles.has(folder)) folderFiles.set(folder, []);
-              folderFiles.get(folder)!.push(f);
-            } else {
-              looseFiles.push(f);
+      // Start mDNS discovery — zero config, no passwords
+      await startLanService();
+
+      unlisteners = await Promise.all([
+        onLanLog((level, text) => {
+          const mapped = level === "success" ? "success" : level === "error" ? "error" : level === "warn" ? "warn" : "info";
+          app.addLog(mapped as "info" | "warn" | "error" | "success", text);
+        }),
+        onLanPeerDiscovered((peer) => {
+          app.upsertDevice(peer);
+          app.addLog("success", `Device discovered: ${peer.alias} (${peer.ip})`);
+        }),
+        onLanPeerLost((peerId) => {
+          app.markDeviceOffline(peerId);
+          const device = app.devices.find(d => d.id === peerId);
+          app.addLog("warn", `Device offline: ${device?.alias ?? peerId}`);
+        }),
+        onLanTextReceived((peerId, text) => {
+          if (!app.activeDeviceId) app.setActiveDevice(peerId);
+          app.addMessage({ peerId, direction: "received", text });
+          app.addActivity({ peerId, direction: "received", type: "text", items: [], success: true });
+          if (app.notificationsEnabled) playReceiveSound();
+        }),
+        onLanFilesReceived((peerId, files, details) => {
+          if (!app.activeDeviceId) app.setActiveDevice(peerId);
+          app.addActivity({ peerId, direction: "received", type: "files", items: files, success: true, outFolder: app.effectiveOutFolder });
+          if (details.length > 0) {
+            const folderFiles = new Map<string, typeof details>();
+            const looseFiles: typeof details = [];
+            for (const f of details) {
+              const slashIdx = f.name.indexOf("/");
+              if (slashIdx > 0) {
+                const folder = f.name.substring(0, slashIdx);
+                if (!folderFiles.has(folder)) folderFiles.set(folder, []);
+                folderFiles.get(folder)!.push(f);
+              } else {
+                looseFiles.push(f);
+              }
             }
-          }
 
-          const attachments: MessageAttachment[] = [];
-          for (const [folder, folderDetails] of folderFiles) {
-            const totalSize = folderDetails.reduce((sum, f) => sum + f.size, 0);
-            const folderPath = folderDetails[0].path.replace(/[\\/][^\\/]+$/, "");
-            attachments.push({
-              name: folder, path: folderPath, size: fileSizeStr(totalSize),
-              type: "folder" as const, fileCount: folderDetails.length,
-            });
+            const attachments: MessageAttachment[] = [];
+            for (const [folder, folderDetails] of folderFiles) {
+              const totalSize = folderDetails.reduce((sum, f) => sum + f.size, 0);
+              const folderPath = folderDetails[0].path.replace(/[\\/][^\\/]+$/, "");
+              attachments.push({
+                name: folder, path: folderPath, size: fileSizeStr(totalSize),
+                type: "folder" as const, fileCount: folderDetails.length,
+              });
+            }
+            for (const f of looseFiles) {
+              attachments.push({
+                name: f.name, path: f.path, size: fileSizeStr(f.size),
+                type: fileIsImage(f.name) ? "image" as const : "file" as const,
+              });
+            }
+            app.addMessage({ peerId, direction: "received", text: "", attachments });
           }
-          for (const f of looseFiles) {
-            attachments.push({
-              name: f.name, path: f.path, size: fileSizeStr(f.size),
-              type: fileIsImage(f.name) ? "image" as const : "file" as const,
-            });
-          }
-          app.addMessage({ peerId, direction: "received", text: "", attachments });
-        }
-        if (app.notificationsEnabled) playReceiveSound();
-      }),
-      onTransferProgress((progress) => {
-        transferProgress = progress.phase === "done" ? null : progress;
-      }),
-    ]);
+          if (app.notificationsEnabled) playReceiveSound();
+        }),
+        onTransferProgress((progress) => {
+          transferProgress = progress.phase === "done" ? null : progress;
+        }),
+      ]);
 
-    // Register global hotkeys
-    await setupHotkeys();
+      await setupHotkeys();
+    })();
 
     return () => { unlisteners.forEach(fn => fn()); };
   });
@@ -159,8 +160,17 @@
     }
   }
 
+  let _prevHotkeyKey = "";
   $effect(() => {
     const { quickSend, enabled } = app.hotkeys;
+    const key = `${enabled}:${quickSend}`;
+    if (key === _prevHotkeyKey) return;
+    // Unregister old shortcut if it was different
+    if (_prevHotkeyKey) {
+      const oldShortcut = _prevHotkeyKey.split(":").slice(1).join(":");
+      unregisterShortcut(oldShortcut).catch(() => {});
+    }
+    _prevHotkeyKey = key;
     if (enabled) {
       registerShortcut(quickSend, quickSendHandler).catch(() => {});
     } else {
@@ -175,9 +185,10 @@
     if (!device.online) { showSnackbar("Device is offline"); return; }
 
     const filesCopy = [...app.files];
+    const pathsCopy = [...app.filePaths];
     app.transferActive = true;
     try {
-      const sent = await lanSendFiles(device.id, app.filePaths);
+      const sent = await lanSendFiles(device.id, pathsCopy);
       if (sent) {
         const names = filesCopy.map(f => f.info?.name ?? f.path.split(/[\\/]/).pop() ?? "file");
         app.addActivity({ peerId: device.id, direction: "sent", type: "files", items: names, success: true });

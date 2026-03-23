@@ -77,11 +77,11 @@ pub fn run() {
                                 }
                             }
                             "quit" => {
+                                QUITTING.store(true, Ordering::SeqCst);
                                 if let Some(tray) = app.tray_by_id("main-tray") {
                                     let _ = tray.set_visible(false);
                                 }
-                                std::thread::sleep(std::time::Duration::from_millis(150));
-                                std::process::exit(0);
+                                app.exit(0);
                             }
                             _ => {}
                         }

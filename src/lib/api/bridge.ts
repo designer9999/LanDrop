@@ -42,10 +42,6 @@ export async function startLanService(): Promise<void> {
   return invoke("start_lan_service");
 }
 
-export async function stopLanService(): Promise<void> {
-  return invoke("stop_lan_service");
-}
-
 export async function lanSendText(peerId: string, text: string): Promise<boolean> {
   return invoke<boolean>("lan_send_text", { peerId, text });
 }
@@ -61,10 +57,6 @@ export async function lanSendFiles(peerId: string, paths: string[]): Promise<boo
 
 export async function setDefaultOutFolder(folder: string): Promise<void> {
   return invoke("set_default_out_folder", { folder });
-}
-
-export async function setPeerOutFolder(peerId: string, folder: string): Promise<void> {
-  return invoke("set_peer_out_folder", { peerId, folder });
 }
 
 export async function setDeviceAlias(alias: string): Promise<void> {
@@ -163,8 +155,11 @@ async function mobileImageSrc(path: string): Promise<string | null> {
   }
 }
 
-export async function getLocalIp(): Promise<string> {
-  return invoke<string>("get_local_ip");
+/** Revoke a blob URL to free memory. Safe to call on non-blob URLs (no-op). */
+export function revokeBlobUrl(url: string): void {
+  if (url && url.startsWith("blob:")) {
+    try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+  }
 }
 
 export async function pickFiles(): Promise<string[] | null> {
