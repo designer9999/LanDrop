@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -149,15 +149,62 @@ pub async fn run_discovery(
     };
 
     // ── Task 1: mDNS event processor ──
+    // Pending removals: peer_id → (scheduled_at, peer_ip, peer_port)
+    // mDNS ServiceRemoved is unreliable on Windows — spurious removals happen
+    // on network adapter changes, Wi-Fi blips, mDNS cache expiry, etc.
+    // We defer removal and verify with a TCP check before marking offline.
+    let pending_removals: Arc<Mutex<HashMap<String, (Instant, String, u16)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     let running_mdns = running.clone();
     let handle_mdns = handle.clone();
     let peers_mdns = discovered_peers.clone();
     let my_id_mdns = my_id.clone();
+    let pending_mdns = pending_removals.clone();
     let mdns_processor = tokio::spawn(async move {
+        let grace_period = Duration::from_secs(15);
+        let mut last_sweep = Instant::now();
+
         loop {
             if !running_mdns.load(Ordering::Relaxed) {
                 break;
             }
+
+            // ── Sweep pending removals every 5 seconds ──
+            if last_sweep.elapsed() >= Duration::from_secs(5) {
+                last_sweep = Instant::now();
+                let mut pending = pending_mdns.lock().await;
+                let expired: Vec<(String, String, u16)> = pending.iter()
+                    .filter(|(_, (at, _, _))| at.elapsed() >= grace_period)
+                    .map(|(id, (_, ip, port))| (id.clone(), ip.clone(), *port))
+                    .collect();
+                for (id, ip, port) in expired {
+                    pending.remove(&id);
+                    // TCP liveness check — try to connect before marking offline
+                    let addr = format!("{}:{}", ip, port);
+                    let alive = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        TcpStream::connect(&addr),
+                    ).await;
+                    if alive.is_ok() && alive.unwrap().is_ok() {
+                        // Peer is still alive — mDNS lied. Re-add to discovered.
+                        emit_log(&handle_mdns, "info",
+                            &format!("Peer {} still alive (mDNS removal was false)", &id[..8]));
+                    } else {
+                        // Peer is genuinely gone
+                        let mut peers = peers_mdns.lock().await;
+                        peers.remove(&id);
+                        drop(peers);
+                        let _ = handle_mdns.emit(
+                            "lan_peer_lost",
+                            serde_json::json!({"id": id}),
+                        );
+                        emit_log(&handle_mdns, "warn",
+                            &format!("Peer {} confirmed offline after TCP check", &id[..8]));
+                    }
+                }
+            }
+
             // Poll mDNS events with timeout so we can check `running`
             match tokio::time::timeout(Duration::from_secs(1), tokio::task::spawn_blocking({
                 let recv = browse_receiver.clone();
@@ -191,6 +238,15 @@ pub async fn run_discovery(
                                 continue;
                             }
 
+                            // Cancel any pending removal — peer is alive
+                            {
+                                let mut pending = pending_mdns.lock().await;
+                                if pending.remove(&peer_id).is_some() {
+                                    emit_log(&handle_mdns, "info",
+                                        &format!("Cancelled pending removal for {} (re-discovered)", &peer_id[..8]));
+                                }
+                            }
+
                             let peer = DiscoveredPeer {
                                 id: peer_id.clone(),
                                 alias: peer_alias,
@@ -206,18 +262,20 @@ pub async fn run_discovery(
                             let _ = handle_mdns.emit("lan_peer_discovered", &peer);
                         }
                         ServiceEvent::ServiceRemoved(_, fullname) => {
-                            // Try to find and remove the peer
-                            let mut peers = peers_mdns.lock().await;
-                            let removed_id = peers.iter()
+                            // DON'T immediately remove — schedule a pending removal.
+                            // mDNS ServiceRemoved is unreliable on Windows.
+                            let peers = peers_mdns.lock().await;
+                            let found = peers.iter()
                                 .find(|(_, p)| fullname.contains(&p.id[..8]))
-                                .map(|(id, _)| id.clone());
-                            if let Some(id) = removed_id {
-                                peers.remove(&id);
-                                drop(peers);
-                                let _ = handle_mdns.emit(
-                                    "lan_peer_lost",
-                                    serde_json::json!({"id": id}),
-                                );
+                                .map(|(id, p)| (id.clone(), p.ip.clone(), p.port));
+                            drop(peers);
+
+                            if let Some((id, ip, port)) = found {
+                                let mut pending = pending_mdns.lock().await;
+                                pending.insert(id.clone(), (Instant::now(), ip, port));
+                                emit_log(&handle_mdns, "info",
+                                    &format!("mDNS removal for {} — verifying in {}s...",
+                                        &id[..8], grace_period.as_secs()));
                             }
                         }
                         _ => {}

@@ -202,6 +202,9 @@
       }
     } catch (e) {
       showSnackbar("Send failed — " + e);
+      // Connection failed — restart LAN service to re-discover peers
+      app.addLog("warn", `Send failed, restarting discovery: ${e}`);
+      startLanService().catch(() => {});
     } finally {
       app.transferActive = false;
     }
