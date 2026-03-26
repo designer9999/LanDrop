@@ -14,6 +14,9 @@ m3 Expressive/
 *.swp
 *.swo
 
+# Signing keys (NEVER commit private keys)
+src-tauri/keys/landrop.key
+
 # OS
 .DS_Store
 Thumbs.db

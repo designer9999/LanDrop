@@ -9,7 +9,7 @@
   import Slider from "$lib/ui/Slider.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickSaveFolder, copyToClipboard, setMica, getDeviceIdentity, setDeviceAlias } from "$lib/api/bridge";
+  import { pickSaveFolder, copyToClipboard, setMica, getDeviceIdentity, setDeviceAlias, isMobile } from "$lib/api/bridge";
   import { playReceiveSound } from "$lib/utils/notification-sound";
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { VARIANT_INFO, PRESET_COLORS, type SchemeVariant } from "$lib/theme/m3-color";
@@ -30,6 +30,8 @@
   let aboutOpen = $state(false);
   let debugOpen = $state(false);
   let debugEl: HTMLDivElement | undefined = $state();
+  let updateStatus = $state<"idle" | "checking" | "available" | "downloading" | "uptodate" | "error">("idle");
+  let updateError = $state("");
 
   // Device identity
   let deviceAlias = $state("");
@@ -55,6 +57,37 @@
       onsnackbar?.("Device name updated — restart to broadcast new name");
     } catch {
       onsnackbar?.("Failed to update device name");
+    }
+  }
+
+  async function checkForUpdates() {
+    if (isMobile()) {
+      onsnackbar?.("Updates are not available on mobile");
+      return;
+    }
+    updateStatus = "checking";
+    updateError = "";
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (update) {
+        updateStatus = "available";
+        onsnackbar?.(`Update v${update.version} available — downloading...`);
+        updateStatus = "downloading";
+        await update.downloadAndInstall();
+        onsnackbar?.("Update installed — restart to apply");
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      } else {
+        updateStatus = "uptodate";
+        onsnackbar?.("You're on the latest version");
+        setTimeout(() => { updateStatus = "idle"; }, 3000);
+      }
+    } catch (e) {
+      updateStatus = "error";
+      updateError = String(e);
+      onsnackbar?.(`Update check failed: ${String(e)}`);
+      setTimeout(() => { updateStatus = "idle"; }, 5000);
     }
   }
 
@@ -423,6 +456,11 @@
             <div class="text-xs text-on-surface-variant font-mono">{app.localIp}</div>
           </div>
         </div>
+
+        <Button variant="elevated" full onclick={checkForUpdates} disabled={updateStatus === "checking" || updateStatus === "downloading"}>
+          <Icon name={updateStatus === "uptodate" ? "check_circle" : updateStatus === "error" ? "error" : "system_update"} size={18} />
+          {updateStatus === "checking" ? "Checking..." : updateStatus === "downloading" ? "Downloading..." : updateStatus === "uptodate" ? "Up to date!" : updateStatus === "error" ? "Check failed" : "Check for updates"}
+        </Button>
 
         <div class="text-sm text-on-surface-variant leading-relaxed">
           <p class="font-medium text-on-surface mb-1">How it works</p>
