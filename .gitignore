@@ -17,6 +17,10 @@ m3 Expressive/
 # Signing keys (NEVER commit private keys)
 src-tauri/keys/landrop.key
 
+# Android keystores
+*.keystore
+*.jks
+
 # OS
 .DS_Store
 Thumbs.db

@@ -177,8 +177,8 @@ Required for opening files with other apps (Android 7+ `FileUriExposedException`
 JAVA_HOME="C:/Program Files/Java/jdk-22" npx tauri android build --apk --target aarch64
 
 # Sign with apksigner (NOT jarsigner — Android requires v2 signing)
-apksigner sign --ks landrop-debug.keystore --ks-pass pass:landrop123 \
-    --ks-key-alias landrop --key-pass pass:landrop123 \
+apksigner sign --ks your-keystore.keystore --ks-pass pass:YOUR_PASSWORD \
+    --ks-key-alias YOUR_ALIAS \
     --out landrop-signed.apk app-universal-release-unsigned.apk
 ```
 
