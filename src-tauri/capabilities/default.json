@@ -26,8 +26,6 @@
     "core:window:allow-set-focus",
     "core:window:allow-unminimize",
     "updater:default",
-    "updater:allow-check",
-    "updater:allow-download-and-install",
     "fs:default",
     "fs:allow-read",
     "fs:allow-read-file",

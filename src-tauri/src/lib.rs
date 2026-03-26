@@ -17,7 +17,6 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
     // Android-only file helper plugin (FileProvider open, content URI name resolution)
@@ -41,6 +40,10 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Updater plugin — desktop only (not available on mobile)
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+
             // Load device identity and create LAN service
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir().expect("app data dir");
