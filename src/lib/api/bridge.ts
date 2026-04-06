@@ -42,14 +42,14 @@ export async function startLanService(): Promise<void> {
   return invoke("start_lan_service");
 }
 
-export async function lanSendText(peerId: string, text: string): Promise<boolean> {
-  return invoke<boolean>("lan_send_text", { peerId, text });
+export async function lanSendText(peerId: string, text: string, peerIp?: string): Promise<boolean> {
+  return invoke<boolean>("lan_send_text", { peerId, text, peerIp });
 }
 
-export async function lanSendFiles(peerId: string, paths: string[]): Promise<boolean> {
+export async function lanSendFiles(peerId: string, paths: string[], peerIp?: string): Promise<boolean> {
   // On Android, resolve content:// URIs to real files before sending
   const resolved = isMobile() ? await resolveContentUris(paths) : paths;
-  const result = await invoke<boolean>("lan_send_files", { peerId, paths: resolved });
+  const result = await invoke<boolean>("lan_send_files", { peerId, paths: resolved, peerIp });
   // Clean up temp files after send
   if (isMobile()) invoke("cleanup_send_cache").catch(() => {});
   return result;

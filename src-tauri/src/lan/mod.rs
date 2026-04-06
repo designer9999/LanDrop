@@ -5,13 +5,14 @@ pub mod transfer;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
-use tauri::AppHandle;
 
-use identity::DeviceIdentity;
 use discovery::DiscoveredPeer;
+use identity::normalize_uuid;
+use identity::DeviceIdentity;
 
 pub struct LanService {
     pub handle: AppHandle,
@@ -59,8 +60,15 @@ impl LanService {
 
         tokio::spawn(async move {
             discovery::run_discovery(
-                handle, running, identity, discovered, folders, default_folder, alias,
-            ).await;
+                handle,
+                running,
+                identity,
+                discovered,
+                folders,
+                default_folder,
+                alias,
+            )
+            .await;
         });
 
         Ok(())
@@ -71,8 +79,13 @@ impl LanService {
         self.discovered_peers.lock().await.clear();
     }
 
-    pub async fn send_text(&self, peer_id: &str, text: &str) -> Result<bool, String> {
-        let peer_ip = self.get_peer_ip(peer_id).await;
+    pub async fn send_text(
+        &self,
+        peer_id: &str,
+        peer_ip_hint: Option<&str>,
+        text: &str,
+    ) -> Result<bool, String> {
+        let peer_ip = self.resolve_peer_ip(peer_id, peer_ip_hint).await;
         if let Some(ip) = peer_ip {
             let uuid = self.identity.id_bytes();
             // Retry once on failure (TCP listener may have recovered)
@@ -89,8 +102,13 @@ impl LanService {
         }
     }
 
-    pub async fn send_files(&self, peer_id: &str, paths: &[String]) -> Result<bool, String> {
-        let peer_ip = self.get_peer_ip(peer_id).await;
+    pub async fn send_files(
+        &self,
+        peer_id: &str,
+        peer_ip_hint: Option<&str>,
+        paths: &[String],
+    ) -> Result<bool, String> {
+        let peer_ip = self.resolve_peer_ip(peer_id, peer_ip_hint).await;
         if let Some(ip) = peer_ip {
             let uuid = self.identity.id_bytes();
             match transfer::send_files_to_peer(&ip, &uuid, paths, Some(&self.handle)).await {
@@ -107,11 +125,13 @@ impl LanService {
     }
 
     pub async fn set_peer_folder(&self, peer_id: &str, folder: &str) {
+        let normalized = normalize_uuid(peer_id).unwrap_or_else(|| peer_id.trim().to_string());
         let mut folders = self.peer_folders.lock().await;
         if folder.is_empty() {
             folders.remove(peer_id);
+            folders.remove(&normalized);
         } else {
-            folders.insert(peer_id.to_string(), folder.to_string());
+            folders.insert(normalized, folder.to_string());
         }
     }
 
@@ -131,8 +151,38 @@ impl LanService {
     }
 
     async fn get_peer_ip(&self, peer_id: &str) -> Option<String> {
+        let normalized = normalize_uuid(peer_id);
         let peers = self.discovered_peers.lock().await;
-        peers.get(peer_id).map(|p| p.ip.clone())
+        peers
+            .get(peer_id)
+            .or_else(|| normalized.as_ref().and_then(|id| peers.get(id)))
+            .map(|p| p.ip.clone())
+    }
+
+    async fn resolve_peer_ip(&self, peer_id: &str, peer_ip_hint: Option<&str>) -> Option<String> {
+        if let Some(ip) = self.get_peer_ip(peer_id).await {
+            return Some(ip);
+        }
+
+        let hinted_ip = peer_ip_hint
+            .map(str::trim)
+            .filter(|ip| !ip.is_empty())
+            .map(str::to_string);
+
+        if hinted_ip.is_some() {
+            let _ = self.handle.emit(
+                "lan_log",
+                serde_json::json!({
+                    "level": "warn",
+                    "text": format!(
+                        "Peer {} missing from backend discovery, using UI IP hint",
+                        peer_id
+                    ),
+                }),
+            );
+        }
+
+        hinted_ip
     }
 }
 

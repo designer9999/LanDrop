@@ -44,26 +44,45 @@ pub async fn stop_lan_service(state: State<'_, LanState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn lan_send_text(peer_id: String, text: String, state: State<'_, LanState>) -> Result<bool, String> {
+pub async fn lan_send_text(
+    peer_id: String,
+    text: String,
+    peer_ip: Option<String>,
+    state: State<'_, LanState>,
+) -> Result<bool, String> {
     let service = state.service.lock().await;
-    service.send_text(&peer_id, &text).await
+    service.send_text(&peer_id, peer_ip.as_deref(), &text).await
 }
 
 #[tauri::command]
-pub async fn lan_send_files(peer_id: String, paths: Vec<String>, state: State<'_, LanState>) -> Result<bool, String> {
+pub async fn lan_send_files(
+    peer_id: String,
+    paths: Vec<String>,
+    peer_ip: Option<String>,
+    state: State<'_, LanState>,
+) -> Result<bool, String> {
     let service = state.service.lock().await;
-    service.send_files(&peer_id, &paths).await
+    service
+        .send_files(&peer_id, peer_ip.as_deref(), &paths)
+        .await
 }
 
 #[tauri::command]
-pub async fn set_default_out_folder(folder: String, state: State<'_, LanState>) -> Result<(), String> {
+pub async fn set_default_out_folder(
+    folder: String,
+    state: State<'_, LanState>,
+) -> Result<(), String> {
     let service = state.service.lock().await;
     service.set_default_folder(&folder).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_peer_out_folder(peer_id: String, folder: String, state: State<'_, LanState>) -> Result<(), String> {
+pub async fn set_peer_out_folder(
+    peer_id: String,
+    folder: String,
+    state: State<'_, LanState>,
+) -> Result<(), String> {
     let service = state.service.lock().await;
     service.set_peer_folder(&peer_id, &folder).await;
     Ok(())
@@ -102,22 +121,36 @@ pub async fn get_file_info(path: String) -> Result<FileInfo, String> {
                 }
             }
             Ok(FileInfo {
-                name: p.file_name().and_then(|n| n.to_str()).unwrap_or("folder").to_string(),
+                name: p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("folder")
+                    .to_string(),
                 size: format_size(total_size),
                 file_type: "folder".to_string(),
                 count: Some(count),
             })
         } else {
             let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
-            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             Ok(FileInfo {
-                name: p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string(),
+                name: p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string(),
                 size: format_size(meta.len()),
                 file_type: format!(".{}", ext),
                 count: None,
             })
         }
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -166,7 +199,8 @@ pub async fn get_thumbnail(path: String, max_px: Option<u32>) -> Result<Option<S
             return Ok(None);
         }
 
-        let ext = p.extension()
+        let ext = p
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
@@ -235,7 +269,10 @@ pub struct FilePreview {
 }
 
 #[tauri::command]
-pub async fn read_file_preview(path: String, max_lines: Option<usize>) -> Result<FilePreview, String> {
+pub async fn read_file_preview(
+    path: String,
+    max_lines: Option<usize>,
+) -> Result<FilePreview, String> {
     tokio::task::spawn_blocking(move || {
         let p = Path::new(&path);
         if !p.exists() || !p.is_file() {
@@ -243,17 +280,62 @@ pub async fn read_file_preview(path: String, max_lines: Option<usize>) -> Result
         }
 
         let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         let size = format_size(meta.len());
         let max = max_lines.unwrap_or(200);
 
         let text_exts = [
-            "txt", "md", "html", "htm", "css", "js", "ts", "jsx", "tsx", "json",
-            "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "csv",
-            "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
-            "php", "sh", "bash", "zsh", "bat", "ps1", "sql", "svelte", "vue",
-            "env", "gitignore", "dockerfile", "makefile",
+            "txt",
+            "md",
+            "html",
+            "htm",
+            "css",
+            "js",
+            "ts",
+            "jsx",
+            "tsx",
+            "json",
+            "xml",
+            "yaml",
+            "yml",
+            "toml",
+            "ini",
+            "cfg",
+            "conf",
+            "log",
+            "csv",
+            "py",
+            "rs",
+            "go",
+            "java",
+            "c",
+            "cpp",
+            "h",
+            "hpp",
+            "cs",
+            "rb",
+            "php",
+            "sh",
+            "bash",
+            "zsh",
+            "bat",
+            "ps1",
+            "sql",
+            "svelte",
+            "vue",
+            "env",
+            "gitignore",
+            "dockerfile",
+            "makefile",
         ];
 
         let is_text = text_exts.contains(&ext.as_str()) || meta.len() < 64 * 1024;
@@ -264,28 +346,46 @@ pub async fn read_file_preview(path: String, max_lines: Option<usize>) -> Result
                     let lines: Vec<&str> = content.lines().collect();
                     let total = lines.len();
                     let truncated = total > max;
-                    let preview: String = lines.into_iter().take(max).collect::<Vec<_>>().join("\n");
+                    let preview: String =
+                        lines.into_iter().take(max).collect::<Vec<_>>().join("\n");
                     Ok(FilePreview {
-                        name, size, extension: ext, content: Some(preview), line_count: total, truncated,
+                        name,
+                        size,
+                        extension: ext,
+                        content: Some(preview),
+                        line_count: total,
+                        truncated,
                     })
                 }
                 Err(_) => Ok(FilePreview {
-                    name, size, extension: ext, content: None, line_count: 0, truncated: false,
+                    name,
+                    size,
+                    extension: ext,
+                    content: None,
+                    line_count: 0,
+                    truncated: false,
                 }),
             }
         } else {
             Ok(FilePreview {
-                name, size, extension: ext, content: None, line_count: 0, truncated: false,
+                name,
+                size,
+                extension: ext,
+                content: None,
+                line_count: 0,
+                truncated: false,
             })
         }
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn get_clipboard_files() -> Result<Vec<String>, String> {
     #[cfg(target_os = "windows")]
     {
-        use clipboard_win::{Clipboard, formats};
+        use clipboard_win::{formats, Clipboard};
         let _clip = Clipboard::new_attempts(10).map_err(|e| e.to_string())?;
         let file_list = formats::FileList;
         let mut output = Vec::new();
@@ -334,7 +434,9 @@ pub async fn set_mica(handle: tauri::AppHandle, enabled: bool) -> Result<(), Str
         }
     }
     #[cfg(not(target_os = "windows"))]
-    { let _ = (handle, enabled); }
+    {
+        let _ = (handle, enabled);
+    }
     Ok(())
 }
 
@@ -363,13 +465,12 @@ fn explorer_selection_com() -> Result<Vec<String>, String> {
     use windows::core::Interface as _;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize,
-        IServiceProvider, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IServiceProvider, CLSCTX_ALL,
+        COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{
-        IFolderView2, IShellBrowser, IShellItem, IShellItemArray,
-        IShellView, IShellWindows, IWebBrowser2, SID_STopLevelBrowser,
-        ShellWindows, SIGDN_FILESYSPATH,
+        IFolderView2, IShellBrowser, IShellItem, IShellItemArray, IShellView, IShellWindows,
+        IWebBrowser2, SID_STopLevelBrowser, ShellWindows, SIGDN_FILESYSPATH,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
@@ -387,18 +488,27 @@ fn explorer_selection_com() -> Result<Vec<String>, String> {
                 // Build VARIANT with VT_I4 for the index
                 let v = windows::Win32::System::Variant::VARIANT::from(i);
 
-                let Ok(disp) = shell_windows.Item(&v) else { continue };
-                let Ok(wb) = disp.cast::<IWebBrowser2>() else { continue };
+                let Ok(disp) = shell_windows.Item(&v) else {
+                    continue;
+                };
+                let Ok(wb) = disp.cast::<IWebBrowser2>() else {
+                    continue;
+                };
                 let Ok(hwnd_val) = wb.HWND() else { continue };
 
                 let wnd = HWND(hwnd_val.0 as *mut _);
-                if wnd != fg_hwnd { continue; }
+                if wnd != fg_hwnd {
+                    continue;
+                }
 
                 let sp: IServiceProvider = wb.cast().map_err(|e| format!("{e}"))?;
-                let sb: IShellBrowser = sp.QueryService(&SID_STopLevelBrowser).map_err(|e| format!("{e}"))?;
+                let sb: IShellBrowser = sp
+                    .QueryService(&SID_STopLevelBrowser)
+                    .map_err(|e| format!("{e}"))?;
                 let sv: IShellView = sb.QueryActiveShellView().map_err(|e| format!("{e}"))?;
                 let fv: IFolderView2 = sv.cast().map_err(|e| format!("{e}"))?;
-                let selection: IShellItemArray = fv.GetSelection(false).map_err(|e| format!("{e}"))?;
+                let selection: IShellItemArray =
+                    fv.GetSelection(false).map_err(|e| format!("{e}"))?;
                 let n = selection.GetCount().map_err(|e| format!("{e}"))?;
 
                 let mut paths = Vec::with_capacity(n as usize);
@@ -407,10 +517,11 @@ fn explorer_selection_com() -> Result<Vec<String>, String> {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    let name_ptr: windows::core::PWSTR = match item.GetDisplayName(SIGDN_FILESYSPATH) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
+                    let name_ptr: windows::core::PWSTR =
+                        match item.GetDisplayName(SIGDN_FILESYSPATH) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                     let result = name_ptr.to_string();
                     // Free COM-allocated PWSTR to prevent memory leak
                     windows::Win32::System::Com::CoTaskMemFree(Some(name_ptr.0 as *const _));
@@ -434,19 +545,29 @@ fn explorer_selection_com() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn open_file(path: String, app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    app.opener().open_path(&path, None::<&str>).map_err(|e| format!("open_file: {e}"))
+    app.opener()
+        .open_path(&path, None::<&str>)
+        .map_err(|e| format!("open_file: {e}"))
 }
 
 /// Save raw bytes (from frontend file read) to a temp file for sending.
 /// Used on Android where content:// URIs can't be read directly by Rust.
 #[tauri::command]
-pub async fn save_temp_for_send(name: String, data: Vec<u8>, app: tauri::AppHandle) -> Result<String, String> {
+pub async fn save_temp_for_send(
+    name: String,
+    data: Vec<u8>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
     use tauri::Manager;
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
     let send_dir = cache_dir.join("send_cache");
-    tokio::fs::create_dir_all(&send_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&send_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     let out_path = send_dir.join(&name);
-    tokio::fs::write(&out_path, &data).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&out_path, &data)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(out_path.to_string_lossy().to_string())
 }
 

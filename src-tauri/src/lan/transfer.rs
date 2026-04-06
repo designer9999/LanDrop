@@ -1,13 +1,13 @@
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::Mutex;
-use tokio::time;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::time;
 use walkdir::WalkDir;
 
 use super::protocol::{Message, CHUNK_SIZE, TCP_PORT};
@@ -29,12 +29,18 @@ impl Connection {
 
     /// Accept incoming connection: read sender's UUID, send our UUID back.
     /// Returns (connection, sender_uuid_string).
-    pub async fn from_incoming(mut stream: TcpStream, my_uuid: &[u8; 16]) -> Result<(Arc<Self>, String), String> {
+    pub async fn from_incoming(
+        mut stream: TcpStream,
+        my_uuid: &[u8; 16],
+    ) -> Result<(Arc<Self>, String), String> {
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
 
         // Read sender's UUID
         let mut peer_uuid = [0u8; 16];
-        stream.read_exact(&mut peer_uuid).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut peer_uuid)
+            .await
+            .map_err(|e| e.to_string())?;
         // Send our UUID back as ACK
         stream.write_all(my_uuid).await.map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
@@ -44,7 +50,10 @@ impl Connection {
     }
 
     /// Connect to a peer: send our UUID, read their UUID back.
-    pub async fn from_outgoing(mut stream: TcpStream, my_uuid: &[u8; 16]) -> Result<Arc<Self>, String> {
+    pub async fn from_outgoing(
+        mut stream: TcpStream,
+        my_uuid: &[u8; 16],
+    ) -> Result<Arc<Self>, String> {
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
 
         // Send our UUID
@@ -52,7 +61,10 @@ impl Connection {
         stream.flush().await.map_err(|e| e.to_string())?;
         // Read peer's UUID (ACK)
         let mut _peer_uuid = [0u8; 16];
-        stream.read_exact(&mut _peer_uuid).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut _peer_uuid)
+            .await
+            .map_err(|e| e.to_string())?;
 
         Ok(Arc::new(Self::from_stream(stream)))
     }
@@ -70,7 +82,9 @@ impl Connection {
     pub async fn recv_message(&self) -> Result<Message, String> {
         let mut r = self.reader.lock().await;
         let mut len_buf = [0u8; 4];
-        r.read_exact(&mut len_buf).await.map_err(|e| e.to_string())?;
+        r.read_exact(&mut len_buf)
+            .await
+            .map_err(|e| e.to_string())?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
         if len > 10_000_000 {
@@ -90,7 +104,10 @@ impl Connection {
 }
 
 /// Write a framed message directly to a writer (caller already holds the lock)
-async fn write_message(w: &mut tokio::net::tcp::OwnedWriteHalf, msg: &Message) -> Result<(), String> {
+async fn write_message(
+    w: &mut tokio::net::tcp::OwnedWriteHalf,
+    msg: &Message,
+) -> Result<(), String> {
     let json = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
     let len = (json.len() as u32).to_be_bytes();
     w.write_all(&len).await.map_err(|e| e.to_string())?;
@@ -112,11 +129,14 @@ pub async fn send_text_to_peer(
 
     let stream = time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
         .await
-        .map_err(|_| "Connection timeout".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| format!("Connection timeout to {}", addr))?
+        .map_err(|e| format!("Cannot connect to {}: {}", addr, e))?;
 
     let conn = Connection::from_outgoing(stream, my_uuid).await?;
-    conn.send_message(&Message::Text { text: text.to_string() }).await?;
+    conn.send_message(&Message::Text {
+        text: text.to_string(),
+    })
+    .await?;
     conn.send_message(&Message::Done).await?;
     Ok(())
 }
@@ -134,7 +154,8 @@ pub async fn send_files_to_peer(
     for path_str in paths {
         let path = Path::new(path_str);
 
-        if path.symlink_metadata()
+        if path
+            .symlink_metadata()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
         {
@@ -142,7 +163,8 @@ pub async fn send_files_to_peer(
         }
 
         if path.is_dir() {
-            let dir_name = path.file_name()
+            let dir_name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("folder")
                 .to_string();
@@ -159,7 +181,8 @@ pub async fn send_files_to_peer(
                 }
             }
         } else if path.is_file() {
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("file")
                 .to_string();
@@ -167,10 +190,13 @@ pub async fn send_files_to_peer(
         } else {
             // File doesn't exist or can't be accessed — report error instead of silently skipping
             if let Some(h) = handle {
-                let _ = h.emit("lan_log", serde_json::json!({
-                    "level": "error",
-                    "text": format!("File not accessible: {}", path.display()),
-                }));
+                let _ = h.emit(
+                    "lan_log",
+                    serde_json::json!({
+                        "level": "error",
+                        "text": format!("File not accessible: {}", path.display()),
+                    }),
+                );
             }
             return Err(format!("File not accessible: {}", path.display()));
         }
@@ -205,45 +231,74 @@ pub async fn send_files_to_peer(
     let conn = Connection::from_outgoing(stream, my_uuid).await?;
 
     if let Some(h) = handle {
-        let _ = h.emit("lan_transfer_progress", serde_json::json!({
-            "direction": "send",
-            "phase": "start",
-            "total_bytes": total_size,
-            "total_files": total_files,
-            "sent_bytes": 0,
-            "sent_files": 0,
-        }));
+        let _ = h.emit(
+            "lan_transfer_progress",
+            serde_json::json!({
+                "direction": "send",
+                "phase": "start",
+                "total_bytes": total_size,
+                "total_files": total_files,
+                "sent_bytes": 0,
+                "sent_files": 0,
+            }),
+        );
     }
 
     // Use writer lock for atomic sends (no interleaving with concurrent operations)
     let mut w = conn.writer.lock().await;
 
     // Always send batch header so receiver knows what to expect
-    write_message(&mut w, &Message::Batch { count: file_entries.len() as u32 }).await?;
+    write_message(
+        &mut w,
+        &Message::Batch {
+            count: file_entries.len() as u32,
+        },
+    )
+    .await?;
 
     let mut sent_bytes: u64 = 0;
     let mut sent_files: usize = 0;
 
     for (name, file_path) in &file_entries {
-        let metadata = tokio::fs::metadata(file_path).await.map_err(|e| e.to_string())?;
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .map_err(|e| e.to_string())?;
         let size = metadata.len();
 
         // Send dir marker
         if name.contains('/') {
             let dir_part = &name[..name.rfind('/').unwrap()];
-            write_message(&mut w, &Message::Dir { name: dir_part.to_string() }).await?;
+            write_message(
+                &mut w,
+                &Message::Dir {
+                    name: dir_part.to_string(),
+                },
+            )
+            .await?;
         }
 
         // Send file header + raw data
-        write_message(&mut w, &Message::File { name: name.clone(), size }).await?;
+        write_message(
+            &mut w,
+            &Message::File {
+                name: name.clone(),
+                size,
+            },
+        )
+        .await?;
 
-        let mut file = tokio::fs::File::open(file_path).await.map_err(|e| e.to_string())?;
+        let mut file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; CHUNK_SIZE];
         let mut remaining = size;
 
         while remaining > 0 {
             let to_read = std::cmp::min(remaining as usize, CHUNK_SIZE);
-            let n = file.read(&mut buf[..to_read]).await.map_err(|e| e.to_string())?;
+            let n = file
+                .read(&mut buf[..to_read])
+                .await
+                .map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
@@ -252,15 +307,18 @@ pub async fn send_files_to_peer(
             sent_bytes += n as u64;
 
             if let Some(h) = handle {
-                let _ = h.emit("lan_transfer_progress", serde_json::json!({
-                    "direction": "send",
-                    "phase": "transferring",
-                    "total_bytes": total_size,
-                    "total_files": total_files,
-                    "sent_bytes": sent_bytes,
-                    "sent_files": sent_files,
-                    "current_file": name,
-                }));
+                let _ = h.emit(
+                    "lan_transfer_progress",
+                    serde_json::json!({
+                        "direction": "send",
+                        "phase": "transferring",
+                        "total_bytes": total_size,
+                        "total_files": total_files,
+                        "sent_bytes": sent_bytes,
+                        "sent_files": sent_files,
+                        "current_file": name,
+                    }),
+                );
             }
         }
 
@@ -275,14 +333,17 @@ pub async fn send_files_to_peer(
     drop(w);
 
     if let Some(h) = handle {
-        let _ = h.emit("lan_transfer_progress", serde_json::json!({
-            "direction": "send",
-            "phase": "done",
-            "total_bytes": total_size,
-            "total_files": total_files,
-            "sent_bytes": sent_bytes,
-            "sent_files": sent_files,
-        }));
+        let _ = h.emit(
+            "lan_transfer_progress",
+            serde_json::json!({
+                "direction": "send",
+                "phase": "done",
+                "total_bytes": total_size,
+                "total_files": total_files,
+                "sent_bytes": sent_bytes,
+                "sent_files": sent_files,
+            }),
+        );
     }
 
     Ok(())
@@ -290,7 +351,13 @@ pub async fn send_files_to_peer(
 
 // ─── Receive functions (called by incoming TCP handler) ───
 
-pub async fn receive_file(conn: &Connection, name: &str, size: u64, out_folder: &str, handle: Option<&AppHandle>) -> Result<String, String> {
+pub async fn receive_file(
+    conn: &Connection,
+    name: &str,
+    size: u64,
+    out_folder: &str,
+    handle: Option<&AppHandle>,
+) -> Result<String, String> {
     let safe_name = sanitize_path(name);
     let base_dir = if out_folder.is_empty() {
         PathBuf::from(dirs_next_downloads())
@@ -308,7 +375,9 @@ pub async fn receive_file(conn: &Connection, name: &str, size: u64, out_folder: 
     }
     if let Some(parent) = out_path.parent() {
         if parent.exists() {
-            let canonical_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+            let canonical_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
             if !canonical_parent.starts_with(&canonical_base) {
                 return Err("Path traversal detected".into());
             }
@@ -318,13 +387,17 @@ pub async fn receive_file(conn: &Connection, name: &str, size: u64, out_folder: 
     check_disk_space(&out_path, size)?;
 
     if let Some(parent) = out_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     // Auto-rename to avoid overwriting: file.txt → file (1).txt → file (2).txt
     let out_path = deduplicate_path(out_path);
 
-    let mut file = tokio::fs::File::create(&out_path).await.map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::create(&out_path)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut remaining = size;
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut received_bytes: u64 = 0;
@@ -332,18 +405,23 @@ pub async fn receive_file(conn: &Connection, name: &str, size: u64, out_folder: 
     while remaining > 0 {
         let to_read = std::cmp::min(remaining as usize, CHUNK_SIZE);
         conn.recv_raw(&mut buf[..to_read]).await?;
-        file.write_all(&buf[..to_read]).await.map_err(|e| e.to_string())?;
+        file.write_all(&buf[..to_read])
+            .await
+            .map_err(|e| e.to_string())?;
         remaining -= to_read as u64;
         received_bytes += to_read as u64;
 
         if let Some(h) = handle {
-            let _ = h.emit("lan_transfer_progress", serde_json::json!({
-                "direction": "receive",
-                "phase": "transferring",
-                "total_bytes": size,
-                "received_bytes": received_bytes,
-                "current_file": name,
-            }));
+            let _ = h.emit(
+                "lan_transfer_progress",
+                serde_json::json!({
+                    "direction": "receive",
+                    "phase": "transferring",
+                    "total_bytes": size,
+                    "received_bytes": received_bytes,
+                    "current_file": name,
+                }),
+            );
         }
     }
 
@@ -351,16 +429,24 @@ pub async fn receive_file(conn: &Connection, name: &str, size: u64, out_folder: 
     Ok(out_path.to_string_lossy().to_string())
 }
 
-pub async fn receive_batch(conn: &Connection, count: u32, out_folder: &str, handle: Option<&AppHandle>) -> Result<Vec<(String, String, u64)>, String> {
+pub async fn receive_batch(
+    conn: &Connection,
+    count: u32,
+    out_folder: &str,
+    handle: Option<&AppHandle>,
+) -> Result<Vec<(String, String, u64)>, String> {
     let mut files = Vec::new();
 
     if let Some(h) = handle {
-        let _ = h.emit("lan_transfer_progress", serde_json::json!({
-            "direction": "receive",
-            "phase": "start",
-            "total_files": count,
-            "received_files": 0,
-        }));
+        let _ = h.emit(
+            "lan_transfer_progress",
+            serde_json::json!({
+                "direction": "receive",
+                "phase": "start",
+                "total_files": count,
+                "received_files": 0,
+            }),
+        );
     }
 
     for _ in 0..count {
@@ -382,12 +468,15 @@ pub async fn receive_batch(conn: &Connection, count: u32, out_folder: &str, hand
         }
 
         if let Some(h) = handle {
-            let _ = h.emit("lan_transfer_progress", serde_json::json!({
-                "direction": "receive",
-                "phase": "transferring",
-                "total_files": count,
-                "received_files": files.len(),
-            }));
+            let _ = h.emit(
+                "lan_transfer_progress",
+                serde_json::json!({
+                    "direction": "receive",
+                    "phase": "transferring",
+                    "total_files": count,
+                    "received_files": files.len(),
+                }),
+            );
         }
     }
 
@@ -396,12 +485,15 @@ pub async fn receive_batch(conn: &Connection, count: u32, out_folder: &str, hand
     }
 
     if let Some(h) = handle {
-        let _ = h.emit("lan_transfer_progress", serde_json::json!({
-            "direction": "receive",
-            "phase": "done",
-            "total_files": count,
-            "received_files": files.len(),
-        }));
+        let _ = h.emit(
+            "lan_transfer_progress",
+            serde_json::json!({
+                "direction": "receive",
+                "phase": "done",
+                "total_files": count,
+                "received_files": files.len(),
+            }),
+        );
     }
 
     Ok(files)
@@ -410,10 +502,7 @@ pub async fn receive_batch(conn: &Connection, count: u32, out_folder: &str, hand
 // ─── Utility functions ───
 
 fn sanitize_path(name: &str) -> String {
-    let cleaned = name
-        .replace('\\', "/")
-        .trim_start_matches('/')
-        .to_string();
+    let cleaned = name.replace('\\', "/").trim_start_matches('/').to_string();
 
     let parts: Vec<&str> = cleaned
         .split('/')
@@ -425,7 +514,9 @@ fn sanitize_path(name: &str) -> String {
         .map(|p| {
             p.chars()
                 .map(|c| {
-                    if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')' | '[' | ']') {
+                    if c.is_alphanumeric()
+                        || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')' | '[' | ']')
+                    {
                         c
                     } else {
                         '_'
@@ -445,7 +536,10 @@ fn check_disk_space(path: &Path, needed: u64) -> Result<(), String> {
 
         let dir = path.parent().unwrap_or(path);
         let dir_str = dir.to_string_lossy().to_string();
-        let wide: Vec<u16> = OsStr::new(&dir_str).encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = OsStr::new(&dir_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         let mut free_bytes: u64 = 0;
         let result = unsafe {

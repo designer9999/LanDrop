@@ -194,7 +194,7 @@
     const pathsCopy = [...app.filePaths];
     app.transferActive = true;
     try {
-      const sent = await lanSendFiles(device.id, pathsCopy);
+      const sent = await lanSendFiles(device.id, pathsCopy, device.ip);
       if (sent) {
         const names = filesCopy.map(f => f.info?.name ?? f.path.split(/[\\/]/).pop() ?? "file");
         app.addActivity({ peerId: device.id, direction: "sent", type: "files", items: names, success: true });
@@ -228,13 +228,13 @@
       return;
     }
     try {
-      const sent = await lanSendText(device.id, textToSend);
+      const sent = await lanSendText(device.id, textToSend, device.ip);
       if (sent) {
         app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
         app.addActivity({ peerId: device.id, direction: "sent", type: "text", items: [], success: true });
       }
-    } catch {
-      showSnackbar("Text send failed — device unreachable");
+    } catch (e: any) {
+      showSnackbar(`Send failed — ${e?.message ?? e ?? "device unreachable"}`);
     }
   }
 

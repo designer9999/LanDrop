@@ -52,7 +52,49 @@ pub fn run() {
         .setup(|app| {
             // Updater plugin — desktop only (not available on mobile)
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
+            // Auto-add Windows Firewall rule so other devices can connect to us
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                if let Ok(exe) = std::env::current_exe() {
+                    let exe_path = exe.to_string_lossy().to_string();
+                    let _ = std::process::Command::new("netsh")
+                        .args([
+                            "advfirewall",
+                            "firewall",
+                            "add",
+                            "rule",
+                            "name=LanDrop",
+                            "dir=in",
+                            "action=allow",
+                            &format!("program={}", exe_path),
+                            "protocol=TCP",
+                            "profile=private,public",
+                            "enable=yes",
+                        ])
+                        .creation_flags(0x08000000)
+                        .output();
+                    let _ = std::process::Command::new("netsh")
+                        .args([
+                            "advfirewall",
+                            "firewall",
+                            "add",
+                            "rule",
+                            "name=LanDrop",
+                            "dir=in",
+                            "action=allow",
+                            &format!("program={}", exe_path),
+                            "protocol=UDP",
+                            "profile=private,public",
+                            "enable=yes",
+                        ])
+                        .creation_flags(0x08000000)
+                        .output();
+                }
+            }
 
             // Load device identity and create LAN service
             let handle = app.handle().clone();
@@ -63,9 +105,9 @@ pub fn run() {
             // ── System Tray (desktop only) ──
             #[cfg(desktop)]
             {
+                use tauri::image::Image;
                 use tauri::menu::{MenuBuilder, MenuItemBuilder};
                 use tauri::tray::TrayIconBuilder;
-                use tauri::image::Image;
 
                 let show = MenuItemBuilder::with_id("show", "Show LanDrop").build(app)?;
                 let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -75,31 +117,31 @@ pub fn run() {
                     .item(&quit)
                     .build()?;
 
-                let icon = app.default_window_icon().cloned()
+                let icon = app
+                    .default_window_icon()
+                    .cloned()
                     .unwrap_or_else(|| Image::from_path("icons/32x32.png").expect("tray icon"));
 
                 let _tray = TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .tooltip("LanDrop")
                     .menu(&menu)
-                    .on_menu_event(|app, event| {
-                        match event.id().as_ref() {
-                            "show" => {
-                                if let Some(win) = app.get_webview_window("main") {
-                                    let _ = win.show();
-                                    let _ = win.unminimize();
-                                    let _ = win.set_focus();
-                                }
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.show();
+                                let _ = win.unminimize();
+                                let _ = win.set_focus();
                             }
-                            "quit" => {
-                                QUITTING.store(true, Ordering::SeqCst);
-                                if let Some(tray) = app.tray_by_id("main-tray") {
-                                    let _ = tray.set_visible(false);
-                                }
-                                app.exit(0);
-                            }
-                            _ => {}
                         }
+                        "quit" => {
+                            QUITTING.store(true, Ordering::SeqCst);
+                            if let Some(tray) = app.tray_by_id("main-tray") {
+                                let _ = tray.set_visible(false);
+                            }
+                            app.exit(0);
+                        }
+                        _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
                         if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
