@@ -26,14 +26,14 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
 walkdir = "2"
 local-ip-address = "0.6"
-directories = "5"
-mdns-sd = "0.18"
+directories = "6"
+mdns-sd = "0.19"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
-tauri-plugin-updater = "2.10.0"
+tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2.5.3"
-tauri-plugin-single-instance = "2.4.0"
+tauri-plugin-single-instance = "2.4.1"
 tauri-plugin-store = "2"
 tauri-plugin-notification = "2"
 
@@ -43,7 +43,7 @@ tauri-plugin-window-state = "2"
 
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -54,4 +54,4 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 clipboard-win = "5"
-window-vibrancy = "0.5"
+window-vibrancy = "0.7"
