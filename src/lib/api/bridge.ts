@@ -27,6 +27,7 @@ export interface DeviceIdentity {
 export interface ReceiveFolderSettings {
   default_out_folder: string;
   peer_folders: Record<string, string>;
+  sort_by_date: boolean;
 }
 
 export interface DiscoveredPeer {
@@ -70,6 +71,10 @@ export async function setPeerOutFolder(peerId: string, folder: string): Promise<
 
 export async function getReceiveFolderSettings(): Promise<ReceiveFolderSettings> {
   return invoke<ReceiveFolderSettings>("get_receive_folder_settings");
+}
+
+export async function setReceiveSortByDate(enabled: boolean): Promise<void> {
+  return invoke("set_receive_sort_by_date", { enabled });
 }
 
 export async function setDeviceAlias(alias: string): Promise<void> {

@@ -8,7 +8,7 @@
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
   import { getAppState } from "$lib/state/app-state.svelte";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
-  import { getStatus, startLanService, lanSendText, lanSendFiles, onLanLog, onLanPeerDiscovered, onLanPeerLost, onLanTextReceived, onLanFilesReceived, onTransferProgress, windowMinimize, windowToggleMaximize, windowClose, windowStartDrag, windowShow, setMica, setDefaultOutFolder, setPeerOutFolder, getReceiveFolderSettings, registerShortcut, unregisterShortcut, getFileInfo, getExplorerSelection, getClipboardFiles } from "$lib/api/bridge";
+  import { getStatus, startLanService, lanSendText, lanSendFiles, onLanLog, onLanPeerDiscovered, onLanPeerLost, onLanTextReceived, onLanFilesReceived, onTransferProgress, windowMinimize, windowToggleMaximize, windowClose, windowStartDrag, windowShow, setMica, setDefaultOutFolder, setPeerOutFolder, setReceiveSortByDate, getReceiveFolderSettings, registerShortcut, unregisterShortcut, getFileInfo, getExplorerSelection, getClipboardFiles } from "$lib/api/bridge";
   import type { TransferProgress } from "$lib/api/bridge";
   import { loadPersistedAppState, savePersistedAppState } from "$lib/persistence/app-store";
   import { isImage as fileIsImage, isVideo as fileIsVideo, fileSizeStr } from "$lib/utils/file-utils";
@@ -136,6 +136,12 @@
     setDefaultOutFolder(folder);
   });
 
+  $effect(() => {
+    if (!receiveSettingsReady) return;
+    const sortByDate = app.receiveOptions.sortByDate ?? false;
+    setReceiveSortByDate(sortByDate);
+  });
+
   let previousPeerFolderState = "";
   $effect(() => {
     if (!receiveSettingsReady) return;
@@ -181,6 +187,9 @@
         const savedDefaultFolder = savedFolders.default_out_folder?.trim() ?? "";
         if (savedDefaultFolder && savedDefaultFolder !== (app.receiveOptions.outFolder?.trim() ?? "")) {
           app.updateReceiveOption("outFolder", savedDefaultFolder || undefined);
+        }
+        if ((savedFolders.sort_by_date ?? false) !== (app.receiveOptions.sortByDate ?? false)) {
+          app.updateReceiveOption("sortByDate", savedFolders.sort_by_date ?? false);
         }
 
         for (const [peerId, folder] of Object.entries(persistedPeerFolders)) {
@@ -365,7 +374,7 @@
     if (!app.hasFiles || app.transferActive) return;
     const device = app.activeDevice;
     if (!device) { showSnackbar("No device selected"); return; }
-    if (!device.online) { showSnackbar("Device is offline"); return; }
+    if (!device.online && !device.ip.trim()) { showSnackbar("Device is offline"); return; }
 
     const filesCopy = [...app.files];
     const pathsCopy = [...app.filePaths];
@@ -385,8 +394,8 @@
       }
     } catch (e) {
       showSnackbar("Send failed — " + e);
-      // Connection failed — restart LAN service to re-discover peers
-      app.addLog("warn", `Send failed, restarting discovery: ${e}`);
+      app.markDeviceOffline(device.id);
+      app.addLog("warn", `Send failed for ${device.alias} (${device.ip || "unknown ip"}) — restarting discovery: ${e}`);
       startLanService().catch(() => {});
     } finally {
       app.transferActive = false;
@@ -399,7 +408,7 @@
     if (!device) { showSnackbar("No device selected"); return; }
     const textToSend = app.sendTextContent.trim();
     app.sendTextContent = "";
-    if (!device.online) {
+    if (!device.online && !device.ip.trim()) {
       app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
       showSnackbar("Device is offline — message saved locally");
       return;
@@ -411,6 +420,7 @@
         app.addActivity({ peerId: device.id, direction: "sent", type: "text", items: [], success: true });
       }
     } catch (e: any) {
+      app.markDeviceOffline(device.id);
       showSnackbar(`Send failed — ${e?.message ?? e ?? "device unreachable"}`);
     }
   }

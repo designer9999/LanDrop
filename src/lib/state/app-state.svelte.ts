@@ -120,6 +120,7 @@ function loadString(key: string): string | null {
 export interface ReceiveOptions {
   outFolder?: string;
   overwrite?: boolean;
+  sortByDate?: boolean;
 }
 
 class AppState {

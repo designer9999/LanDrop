@@ -356,14 +356,11 @@ pub async fn receive_file(
     name: &str,
     size: u64,
     out_folder: &str,
+    sort_by_date: bool,
     handle: Option<&AppHandle>,
 ) -> Result<String, String> {
     let safe_name = sanitize_path(name);
-    let base_dir = if out_folder.is_empty() {
-        PathBuf::from(dirs_next_downloads())
-    } else {
-        PathBuf::from(out_folder)
-    };
+    let base_dir = resolve_receive_base_dir(out_folder, sort_by_date);
 
     let out_path = base_dir.join(&safe_name);
 
@@ -433,6 +430,7 @@ pub async fn receive_batch(
     conn: &Connection,
     count: u32,
     out_folder: &str,
+    sort_by_date: bool,
     handle: Option<&AppHandle>,
 ) -> Result<Vec<(String, String, u64)>, String> {
     let mut files = Vec::new();
@@ -455,12 +453,14 @@ pub async fn receive_batch(
             Message::Dir { .. } => {
                 let file_msg = conn.recv_message().await?;
                 if let Message::File { name, size } = file_msg {
-                    let path = receive_file(conn, &name, size, out_folder, handle).await?;
+                    let path =
+                        receive_file(conn, &name, size, out_folder, sort_by_date, handle).await?;
                     files.push((name, path, size));
                 }
             }
             Message::File { name, size } => {
-                let path = receive_file(conn, &name, size, out_folder, handle).await?;
+                let path =
+                    receive_file(conn, &name, size, out_folder, sort_by_date, handle).await?;
                 files.push((name, path, size));
             }
             Message::Done => break,
@@ -610,4 +610,19 @@ fn dirs_next_downloads() -> String {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string())
     }
+}
+
+fn resolve_receive_base_dir(out_folder: &str, sort_by_date: bool) -> PathBuf {
+    let mut base_dir = if out_folder.is_empty() {
+        PathBuf::from(dirs_next_downloads())
+    } else {
+        PathBuf::from(out_folder)
+    };
+
+    if sort_by_date {
+        let date_folder = chrono::Local::now().format("%d.%m.%Y").to_string();
+        base_dir = base_dir.join(date_folder);
+    }
+
+    base_dir
 }

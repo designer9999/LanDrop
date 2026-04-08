@@ -78,14 +78,27 @@ pub struct DiscoveredPeer {
     pub port: u16,
 }
 
+#[derive(Clone)]
+pub struct ReceiveRoutingState {
+    pub peer_folders: Arc<Mutex<HashMap<String, String>>>,
+    pub default_out_folder: Arc<Mutex<String>>,
+    pub sort_by_date: Arc<Mutex<bool>>,
+}
+
+struct IncomingSessionContext<'a> {
+    handle: &'a AppHandle,
+    receive_routing: &'a ReceiveRoutingState,
+    discovered_peers: &'a Mutex<HashMap<String, DiscoveredPeer>>,
+    pending_removals: &'a Mutex<HashMap<String, (Instant, String, u16)>>,
+}
+
 /// Run mDNS-based discovery: register this device, browse for others, accept TCP transfers.
 pub async fn run_discovery(
     handle: AppHandle,
     running: Arc<AtomicBool>,
     identity: DeviceIdentity,
     discovered_peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
-    peer_folders: Arc<Mutex<HashMap<String, String>>>,
-    default_out_folder: Arc<Mutex<String>>,
+    receive_routing: ReceiveRoutingState,
     alias: Arc<Mutex<String>>,
 ) {
     // Get our local LAN IP
@@ -414,23 +427,18 @@ pub async fn run_discovery(
                 Ok(Ok((stream, _addr))) => {
                     consecutive_errors = 0;
                     let handle_session = handle_tcp.clone();
-                    let folder_map = peer_folders.clone();
-                    let default_folder = default_out_folder.clone();
+                    let receive_routing = receive_routing.clone();
                     let peers_ref = peers_tcp.clone();
                     let pending_ref = pending_tcp.clone();
 
                     tokio::spawn(async move {
-                        match handle_incoming_session(
-                            stream,
-                            &my_uuid,
-                            &handle_session,
-                            &folder_map,
-                            &default_folder,
-                            &peers_ref,
-                            &pending_ref,
-                        )
-                        .await
-                        {
+                        let context = IncomingSessionContext {
+                            handle: &handle_session,
+                            receive_routing: &receive_routing,
+                            discovered_peers: &peers_ref,
+                            pending_removals: &pending_ref,
+                        };
+                        match handle_incoming_session(stream, &my_uuid, &context).await {
                             Ok(_) => {}
                             Err(e) => {
                                 let _ = handle_session.emit(
@@ -463,11 +471,7 @@ pub async fn run_discovery(
 async fn handle_incoming_session(
     stream: TcpStream,
     my_uuid: &[u8; 16],
-    handle: &AppHandle,
-    peer_folders: &Mutex<HashMap<String, String>>,
-    default_folder: &Mutex<String>,
-    discovered_peers: &Mutex<HashMap<String, DiscoveredPeer>>,
-    pending_removals: &Mutex<HashMap<String, (Instant, String, u16)>>,
+    context: &IncomingSessionContext<'_>,
 ) -> Result<(), String> {
     // Extract sender IP before moving stream into Connection
     let sender_ip = stream
@@ -478,17 +482,17 @@ async fn handle_incoming_session(
     let (conn, sender_id) = Connection::from_incoming(stream, my_uuid).await?;
 
     {
-        let mut pending = pending_removals.lock().await;
+        let mut pending = context.pending_removals.lock().await;
         pending.remove(&sender_id);
     }
 
     // Look up output folder: per-peer override → global default → Downloads
     let out_folder = {
-        let folders = peer_folders.lock().await;
+        let folders = context.receive_routing.peer_folders.lock().await;
         match folders.get(&sender_id) {
             Some(f) if !f.is_empty() => f.clone(),
             _ => {
-                let default = default_folder.lock().await;
+                let default = context.receive_routing.default_out_folder.lock().await;
                 if default.is_empty() {
                     String::new()
                 } else {
@@ -497,11 +501,12 @@ async fn handle_incoming_session(
             }
         }
     };
+    let sort_into_date_folder = *context.receive_routing.sort_by_date.lock().await;
 
     // Register sender in discovered_peers (ensures we can send back to them).
     // Always update the IP — mDNS might have stale data or never discovered them.
     {
-        let mut peers = discovered_peers.lock().await;
+        let mut peers = context.discovered_peers.lock().await;
         let is_new = !peers.contains_key(&sender_id);
         let peer = DiscoveredPeer {
             id: sender_id.clone(),
@@ -519,7 +524,7 @@ async fn handle_incoming_session(
         peers.insert(sender_id.clone(), peer.clone());
         drop(peers);
         if is_new {
-            let _ = handle.emit("lan_peer_discovered", &peer);
+            let _ = context.handle.emit("lan_peer_discovered", &peer);
         }
     }
 
@@ -532,17 +537,24 @@ async fn handle_incoming_session(
 
         match msg {
             super::protocol::Message::Text { text } => {
-                let _ = handle.emit(
+                let _ = context.handle.emit(
                     "lan_text_received",
                     serde_json::json!({"peer_id": sender_id, "text": text}),
                 );
             }
             super::protocol::Message::File { name, size } => {
-                match super::transfer::receive_file(&conn, &name, size, &out_folder, Some(handle))
-                    .await
+                match super::transfer::receive_file(
+                    &conn,
+                    &name,
+                    size,
+                    &out_folder,
+                    sort_into_date_folder,
+                    Some(context.handle),
+                )
+                .await
                 {
                     Ok(path) => {
-                        let _ = handle.emit(
+                        let _ = context.handle.emit(
                             "lan_files_received",
                             serde_json::json!({
                                 "peer_id": sender_id,
@@ -551,18 +563,29 @@ async fn handle_incoming_session(
                             }),
                         );
                     }
-                    Err(e) => emit_log(handle, "error", &format!("File receive error: {}", e)),
+                    Err(e) => emit_log(
+                        context.handle,
+                        "error",
+                        &format!("File receive error: {}", e),
+                    ),
                 }
             }
             super::protocol::Message::Batch { count } => {
-                match super::transfer::receive_batch(&conn, count, &out_folder, Some(handle)).await
+                match super::transfer::receive_batch(
+                    &conn,
+                    count,
+                    &out_folder,
+                    sort_into_date_folder,
+                    Some(context.handle),
+                )
+                .await
                 {
                     Ok(files) => {
                         let names: Vec<&str> = files.iter().map(|(n, _, _)| n.as_str()).collect();
                         let details: Vec<serde_json::Value> = files.iter()
                             .map(|(name, path, size)| serde_json::json!({"name": name, "path": path, "size": size}))
                             .collect();
-                        let _ = handle.emit(
+                        let _ = context.handle.emit(
                             "lan_files_received",
                             serde_json::json!({
                                 "peer_id": sender_id,
@@ -571,7 +594,11 @@ async fn handle_incoming_session(
                             }),
                         );
                     }
-                    Err(e) => emit_log(handle, "error", &format!("Batch receive error: {}", e)),
+                    Err(e) => emit_log(
+                        context.handle,
+                        "error",
+                        &format!("Batch receive error: {}", e),
+                    ),
                 }
             }
             super::protocol::Message::Done => break,

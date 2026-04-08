@@ -185,6 +185,7 @@ pub fn run() {
             commands::lan_send_files,
             commands::set_default_out_folder,
             commands::set_peer_out_folder,
+            commands::set_receive_sort_by_date,
             commands::get_receive_folder_settings,
             commands::set_device_alias,
             commands::get_device_identity,

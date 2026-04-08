@@ -20,6 +20,7 @@ use identity::DeviceIdentity;
 struct PersistedFolderSettings {
     default_out_folder: String,
     peer_folders: HashMap<String, String>,
+    sort_by_date: bool,
 }
 
 fn folder_settings_path(data_dir: &Path) -> PathBuf {
@@ -38,12 +39,14 @@ fn save_folder_settings(
     data_dir: &Path,
     default_out_folder: &str,
     peer_folders: &HashMap<String, String>,
+    sort_by_date: bool,
 ) {
     let _ = fs::create_dir_all(data_dir);
     let settings_path = folder_settings_path(data_dir);
     let payload = PersistedFolderSettings {
         default_out_folder: default_out_folder.to_string(),
         peer_folders: peer_folders.clone(),
+        sort_by_date,
     };
 
     if let Ok(json) = serde_json::to_string_pretty(&payload) {
@@ -62,6 +65,8 @@ pub struct LanService {
     peer_folders: Arc<Mutex<HashMap<String, String>>>,
     /// Global default output folder
     default_out_folder: Arc<Mutex<String>>,
+    /// Whether incoming files should be placed into a date-based subfolder
+    sort_by_date: Arc<Mutex<bool>>,
     /// Current alias (mutable, synced to mDNS)
     alias: Arc<Mutex<String>>,
 }
@@ -78,6 +83,7 @@ impl LanService {
             discovered_peers: Arc::new(Mutex::new(HashMap::new())),
             peer_folders: Arc::new(Mutex::new(folder_settings.peer_folders)),
             default_out_folder: Arc::new(Mutex::new(folder_settings.default_out_folder)),
+            sort_by_date: Arc::new(Mutex::new(folder_settings.sort_by_date)),
             alias: Arc::new(Mutex::new(alias)),
         }
     }
@@ -92,8 +98,11 @@ impl LanService {
         let running = self.running.clone();
         let identity = self.identity.clone();
         let discovered = self.discovered_peers.clone();
-        let folders = self.peer_folders.clone();
-        let default_folder = self.default_out_folder.clone();
+        let receive_routing = discovery::ReceiveRoutingState {
+            peer_folders: self.peer_folders.clone(),
+            default_out_folder: self.default_out_folder.clone(),
+            sort_by_date: self.sort_by_date.clone(),
+        };
         let alias = self.alias.clone();
 
         tokio::spawn(async move {
@@ -102,8 +111,7 @@ impl LanService {
                 running,
                 identity,
                 discovered,
-                folders,
-                default_folder,
+                receive_routing,
                 alias,
             )
             .await;
@@ -180,10 +188,16 @@ impl LanService {
         self.persist_folder_settings().await;
     }
 
-    pub async fn get_folder_settings(&self) -> (String, HashMap<String, String>) {
+    pub async fn set_sort_by_date(&self, enabled: bool) {
+        *self.sort_by_date.lock().await = enabled;
+        self.persist_folder_settings().await;
+    }
+
+    pub async fn get_folder_settings(&self) -> (String, HashMap<String, String>, bool) {
         let default_out_folder = self.default_out_folder.lock().await.clone();
         let peer_folders = self.peer_folders.lock().await.clone();
-        (default_out_folder, peer_folders)
+        let sort_by_date = *self.sort_by_date.lock().await;
+        (default_out_folder, peer_folders, sort_by_date)
     }
 
     pub async fn set_alias(&self, new_alias: &str) {
@@ -236,7 +250,13 @@ impl LanService {
     async fn persist_folder_settings(&self) {
         let default_out_folder = self.default_out_folder.lock().await.clone();
         let peer_folders = self.peer_folders.lock().await.clone();
-        save_folder_settings(&self.data_dir, &default_out_folder, &peer_folders);
+        let sort_by_date = *self.sort_by_date.lock().await;
+        save_folder_settings(
+            &self.data_dir,
+            &default_out_folder,
+            &peer_folders,
+            sort_by_date,
+        );
     }
 }
 
@@ -266,11 +286,12 @@ mod tests {
         peer_folders.insert("peer-a".to_string(), "C:\\Transfers\\PeerA".to_string());
         peer_folders.insert("peer-b".to_string(), "D:\\Inbox\\PeerB".to_string());
 
-        save_folder_settings(&temp_dir, "C:\\Transfers", &peer_folders);
+        save_folder_settings(&temp_dir, "C:\\Transfers", &peer_folders, true);
         let loaded = load_folder_settings(&temp_dir);
 
         assert_eq!(loaded.default_out_folder, "C:\\Transfers");
         assert_eq!(loaded.peer_folders, peer_folders);
+        assert!(loaded.sort_by_date);
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

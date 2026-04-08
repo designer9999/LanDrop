@@ -25,6 +25,7 @@ pub struct FileInfo {
 pub struct ReceiveFolderSettingsResponse {
     pub default_out_folder: String,
     pub peer_folders: HashMap<String, String>,
+    pub sort_by_date: bool,
 }
 
 #[tauri::command]
@@ -97,11 +98,22 @@ pub async fn set_peer_out_folder(
 pub async fn get_receive_folder_settings(
     state: State<'_, LanState>,
 ) -> Result<ReceiveFolderSettingsResponse, String> {
-    let (default_out_folder, peer_folders) = state.service.get_folder_settings().await;
+    let (default_out_folder, peer_folders, sort_by_date) =
+        state.service.get_folder_settings().await;
     Ok(ReceiveFolderSettingsResponse {
         default_out_folder,
         peer_folders,
+        sort_by_date,
     })
+}
+
+#[tauri::command]
+pub async fn set_receive_sort_by_date(
+    enabled: bool,
+    state: State<'_, LanState>,
+) -> Result<(), String> {
+    state.service.set_sort_by_date(enabled).await;
+    Ok(())
 }
 
 #[tauri::command]

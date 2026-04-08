@@ -29,6 +29,7 @@
   let receiveOpen = $state(false);
   let aboutOpen = $state(false);
   let debugOpen = $state(false);
+  let sortingOpen = $state(false);
   let debugEl: HTMLDivElement | undefined = $state();
   let updateStatus = $state<"idle" | "checking" | "available" | "downloading" | "uptodate" | "error">("idle");
   let updateError = $state("");
@@ -438,6 +439,44 @@
     {/if}
   </Card>
 
+  <!-- Sorting -->
+  <Card variant="elevated">
+    <button
+      class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
+             cursor-pointer border-none bg-transparent p-0 -my-0.5"
+      onclick={() => sortingOpen = !sortingOpen}
+    >
+      <span class="text-primary"><Icon name="folder_copy" size={20} /></span>
+      Sorting
+      <span class="flex-1"></span>
+      <span class="text-on-surface-variant section-arrow" class:section-arrow-open={sortingOpen}>
+        <Icon name="expand_more" size={20} />
+      </span>
+    </button>
+
+    {#if sortingOpen}
+      <div class="flex flex-col gap-4 mt-4 section-enter">
+        <div class="flex items-center justify-between py-1">
+          <div>
+            <div class="text-sm text-on-surface">Date folders</div>
+            <div class="text-xs text-on-surface-variant">Create a new daily folder like <span class="font-mono">08.04.2026</span> inside your receive folder</div>
+          </div>
+          <Switch checked={app.receiveOptions.sortByDate ?? false} onchange={(v) => app.updateReceiveOption("sortByDate", v)} />
+        </div>
+
+        <div class="sorting-preview">
+          <div class="sorting-preview-title">Example</div>
+          <div class="sorting-preview-path">
+            {(app.receiveOptions.outFolder ?? "Your default save folder") + ((app.receiveOptions.sortByDate ?? false) ? "\\08.04.2026" : "")}
+          </div>
+          <div class="sorting-preview-note">
+            Incoming files will go to the selected receive folder first, then into the date folder when enabled.
+          </div>
+        </div>
+      </div>
+    {/if}
+  </Card>
+
   <!-- About -->
   <Card variant="elevated">
     <button
@@ -685,6 +724,35 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .sorting-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px;
+    border-radius: 12px;
+    background: var(--md-sys-color-surface-container-low);
+    border: 1px solid var(--md-sys-color-outline-variant);
+  }
+  .sorting-preview-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+  .sorting-preview-path {
+    font-size: 12px;
+    color: var(--md-sys-color-on-surface);
+    font-family: "Roboto Mono", monospace;
+    word-break: break-all;
+  }
+  .sorting-preview-note {
+    font-size: 11px;
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 0.8;
+    line-height: 1.4;
   }
   .opacity-labels {
     display: flex;
