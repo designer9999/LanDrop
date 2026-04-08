@@ -507,7 +507,6 @@ async fn handle_incoming_session(
     // Always update the IP — mDNS might have stale data or never discovered them.
     {
         let mut peers = context.discovered_peers.lock().await;
-        let is_new = !peers.contains_key(&sender_id);
         let peer = DiscoveredPeer {
             id: sender_id.clone(),
             alias: peers
@@ -523,9 +522,9 @@ async fn handle_incoming_session(
         };
         peers.insert(sender_id.clone(), peer.clone());
         drop(peers);
-        if is_new {
-            let _ = context.handle.emit("lan_peer_discovered", &peer);
-        }
+        // Always emit the peer to the frontend on inbound traffic.
+        // This rehydrates the UI if discovery is stale or the user removed the chip locally.
+        let _ = context.handle.emit("lan_peer_discovered", &peer);
     }
 
     // Read messages until connection closes

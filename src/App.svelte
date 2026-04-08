@@ -50,6 +50,17 @@
     deviceDialogOpen = true;
   }
 
+  function ensurePeerVisible(peerId: string) {
+    if (app.devices.some((device) => device.id === peerId)) return;
+    app.upsertDevice({
+      id: peerId,
+      alias: `Device-${peerId.slice(0, 8)}`,
+      device_type: "desktop",
+      ip: "",
+    });
+    app.addLog("warn", `Recovered hidden peer ${peerId.slice(0, 8)} from inbound traffic`);
+  }
+
   function getReceivedFolderPath(filePath: string, relativeName: string): string {
     let folderPath = filePath;
     const segmentCount = relativeName.split("/").filter(Boolean).length;
@@ -231,6 +242,7 @@
           app.addLog("warn", `Device offline: ${device?.alias ?? peerId}`);
         }),
         onLanTextReceived((peerId, text) => {
+          ensurePeerVisible(peerId);
           if (!app.activeDeviceId) app.setActiveDevice(peerId);
           app.addMessage({ peerId, direction: "received", text });
           app.addActivity({ peerId, direction: "received", type: "text", items: [], success: true });
@@ -244,6 +256,7 @@
           if (app.popOnReceive) windowShow();
         }),
         onLanFilesReceived((peerId, files, details) => {
+          ensurePeerVisible(peerId);
           if (!app.activeDeviceId) app.setActiveDevice(peerId);
           app.addActivity({ peerId, direction: "received", type: "files", items: files, success: true, outFolder: app.effectiveOutFolder });
           if (details.length > 0) {
