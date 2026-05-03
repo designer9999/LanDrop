@@ -110,6 +110,7 @@ pub async fn run_discovery(
                 "error",
                 "No LAN IPv4 address found — cannot start discovery",
             );
+            running.store(false, Ordering::SeqCst);
             return;
         }
     };
@@ -127,6 +128,7 @@ pub async fn run_discovery(
                 "error",
                 &format!("Failed to create mDNS daemon: {}", e),
             );
+            running.store(false, Ordering::SeqCst);
             return;
         }
     };
@@ -188,30 +190,46 @@ pub async fn run_discovery(
         }
         Err(e) => {
             emit_log(&handle, "error", &format!("Failed to browse mDNS: {}", e));
+            running.store(false, Ordering::SeqCst);
             return;
         }
     };
 
-    // Bind TCP listener
-    let tcp_listener =
-        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TCP_PORT)).await {
-            Ok(l) => {
-                emit_log(
-                    &handle,
-                    "success",
-                    &format!("TCP listener on port {}", TCP_PORT),
-                );
-                Arc::new(l)
+    // Bind TCP listener — retry up to 5 times if port is held by previous instance
+    let tcp_listener = {
+        let mut listener_opt = None;
+        for attempt in 0..5 {
+            match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TCP_PORT)).await {
+                Ok(l) => {
+                    emit_log(
+                        &handle,
+                        "success",
+                        &format!("TCP listener on port {}", TCP_PORT),
+                    );
+                    listener_opt = Some(Arc::new(l));
+                    break;
+                }
+                Err(e) if attempt < 4 => {
+                    emit_log(
+                        &handle,
+                        "warn",
+                        &format!("TCP bind retry {}/5: {}", attempt + 1, e),
+                    );
+                    time::sleep(Duration::from_millis(800)).await;
+                }
+                Err(e) => {
+                    emit_log(
+                        &handle,
+                        "error",
+                        &format!("Failed to bind TCP port {} after 5 retries: {}", TCP_PORT, e),
+                    );
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
             }
-            Err(e) => {
-                emit_log(
-                    &handle,
-                    "error",
-                    &format!("Failed to bind TCP port {}: {}", TCP_PORT, e),
-                );
-                return;
-            }
-        };
+        }
+        listener_opt.unwrap()
+    };
 
     // ── Task 1: mDNS event processor ──
     // Pending removals: peer_id → (scheduled_at, peer_ip, peer_port)
@@ -465,6 +483,9 @@ pub async fn run_discovery(
 
     // Graceful shutdown — send mDNS goodbye
     let _ = mdns.shutdown();
+
+    // Always reset running flag on exit so start() can succeed next time
+    running.store(false, Ordering::SeqCst);
 }
 
 /// Handle a single incoming TCP session: authenticate, receive messages, close.

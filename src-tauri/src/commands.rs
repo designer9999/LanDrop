@@ -54,7 +54,9 @@ pub async fn stop_lan_service(state: State<'_, LanState>) -> Result<(), String> 
 #[tauri::command]
 pub async fn refresh_lan_discovery(state: State<'_, LanState>) -> Result<(), String> {
     state.service.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Wait for the old discovery loop to exit (loops poll every 1s) and the
+    // TCP listener socket to fully release. The TCP bind has its own retry too.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     state.service.start().await
 }
 
