@@ -129,7 +129,7 @@
       aria-modal="true"
       aria-labelledby={headline ? headlineId : undefined}
     >
-      <div class="p-6 space-y-4">
+      <div class="p-6 space-y-4 dialog-content-area">
         {#if headline}
           <h2 id={headlineId} class="text-2xl font-normal">
             {headline}
@@ -170,4 +170,17 @@
   @keyframes dialog-fade-in { from { opacity: 0; } to { opacity: 1; } }
   @keyframes dialog-scale-out { from { transform: scale(1); } to { transform: scale(0.85); } }
   @keyframes dialog-fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+  .dialog-content-area {
+    max-height: 60vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--md-sys-color-on-surface) 20%, transparent) transparent;
+  }
+  .dialog-content-area::-webkit-scrollbar { width: 6px; }
+  .dialog-content-area::-webkit-scrollbar-track { background: transparent; }
+  .dialog-content-area::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 20%, transparent);
+    border-radius: 3px;
+  }
 </style>

@@ -601,6 +601,8 @@
     flex: 1;
     overflow-y: auto;
     padding: 16px;
+    /* Hint compositor for smoother scrolling on WebKitGTK (Linux) */
+    contain: layout paint;
   }
 
   /* ── Progress Bar ── */

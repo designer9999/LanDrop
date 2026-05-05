@@ -115,6 +115,18 @@
   function getFolderPreviewItems(file: MessageAttachment) {
     return (file.children ?? []).slice(0, 3);
   }
+
+  // Right-click toggles text-selection mode on this bubble
+  let selectMode = $state(false);
+  function handleContextMenu(e: MouseEvent) {
+    if (!msg.text) return;
+    e.preventDefault();
+    selectMode = !selectMode;
+  }
+  function handleBubbleClick() {
+    if (selectMode) return; // don't copy-all in select mode — let user select text
+    if (msg.text) oncopy(msg.id, msg.text);
+  }
 </script>
 
 <div
@@ -135,8 +147,10 @@
     class:bubble-last={position === "last"}
     class:bubble-copied={isCopied}
     class:bubble-media={hasAttachments && !msg.text}
-    onclick={() => msg.text && oncopy(msg.id, msg.text)}
-    title={msg.text ? "Click to copy" : ""}
+    class:bubble-select-mode={selectMode}
+    onclick={handleBubbleClick}
+    oncontextmenu={handleContextMenu}
+    title={msg.text ? (selectMode ? "Selection mode — drag to select text, right-click to exit" : "Click to copy · Right-click to select text") : ""}
   >
     {#if viewAll}
       <div class="bubble-contact">{getPeerName(msg.peerId)}</div>
@@ -332,6 +346,13 @@
 
   .bubble-copied { animation: bubble-flash var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects); }
   @keyframes bubble-flash { from { opacity: 0.7; } to { opacity: 1; } }
+
+  .bubble-select-mode {
+    cursor: text !important;
+    outline: 2px solid var(--md-sys-color-primary);
+    outline-offset: 1px;
+  }
+  .bubble-select-mode .bubble-text { cursor: text; }
 
   .bubble-contact { font-size: 10px; font-weight: 500; color: var(--md-sys-color-primary); margin-bottom: 1px; }
   .bubble-text {

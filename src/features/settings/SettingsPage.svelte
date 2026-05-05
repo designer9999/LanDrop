@@ -418,20 +418,16 @@
     <div class="flex items-center justify-between py-1 mt-3">
       <div>
         <div class="text-sm text-on-surface">Enable hotkeys</div>
-        <div class="text-xs text-on-surface-variant">
-          {#if platform && !platform.supports_global_hotkeys}
-            Not supported on Wayland (compositor security blocks global shortcuts)
-          {:else}
-            System-wide shortcuts even when minimized
-          {/if}
-        </div>
+        <div class="text-xs text-on-surface-variant">System-wide shortcuts even when minimized</div>
       </div>
-      <Switch
-        checked={app.hotkeys.enabled && (platform?.supports_global_hotkeys ?? true)}
-        disabled={platform ? !platform.supports_global_hotkeys : false}
-        onchange={(v) => app.updateHotkeys({ enabled: v })}
-      />
+      <Switch checked={app.hotkeys.enabled} onchange={(v) => app.updateHotkeys({ enabled: v })} />
     </div>
+    {#if platform && !platform.supports_global_hotkeys && app.hotkeys.enabled}
+      <div class="mt-2 p-2 rounded text-xs" style="background: color-mix(in srgb, var(--md-sys-color-tertiary) 15%, transparent); color: var(--md-sys-color-on-tertiary-container);">
+        <strong>Wayland note:</strong> global hotkeys are blocked by Wayland's security model. On Hyprland, add to <code>~/.config/hypr/hyprland.conf</code>:<br/>
+        <code style="font-size: 10px;">bind = , F3, exec, hyprctl dispatch focuswindow class:com.landrop.app</code>
+      </div>
+    {/if}
     {#if app.hotkeys.enabled}
       <div class="mt-3 flex items-center gap-3">
         <div class="flex-1">
