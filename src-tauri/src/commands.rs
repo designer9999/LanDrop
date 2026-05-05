@@ -247,31 +247,69 @@ pub async fn show_in_explorer(path: String) -> Result<bool, String> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
 
-        let try_spawn = |cmd: &str, args: &[&str]| -> bool {
-            std::process::Command::new(cmd)
-                .args(args)
-                .spawn()
-                .is_ok()
+        // Build proper file:// URI with URL encoding for spaces/special chars
+        let to_uri = |path: &str| -> String {
+            let encoded = path
+                .split('/')
+                .map(|seg| urlencoding::encode(seg).into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("file://{}", encoded)
         };
 
+        let try_spawn = |cmd: &str, args: &[&str]| -> bool {
+            std::process::Command::new(cmd).args(args).spawn().is_ok()
+        };
+
+        // Strategy: try multiple approaches in order of reliability.
+        // Use file:// URI form which all modern file managers accept.
         if target.is_file() {
-            // Strategy 1: known file managers with native --select flag.
-            // We use spawn (don't wait) — fastest and works without DBus.
-            let opened = try_spawn("dolphin", &["--select", &path_str])
-                || try_spawn("nautilus", &["--select", &path_str])
+            let file_uri = to_uri(&path_str);
+
+            // 1. DBus FileManager1 ShowItems — properly selects the file
+            //    (works with Nautilus, Dolphin, Nemo, Caja when running)
+            let dbus_arg = format!("array:string:{}", file_uri);
+            let dbus_ok = std::process::Command::new("dbus-send")
+                .args([
+                    "--session",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    &dbus_arg,
+                    "string:",
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if dbus_ok {
+                return Ok(true);
+            }
+
+            // 2. Try file managers directly with the FILE path so most show parent
+            //    folder. nautilus 43+ accepts URI; older accepts path.
+            let opened = try_spawn("nautilus", &[&file_uri])
+                || try_spawn("dolphin", &["--select", &path_str])
                 || try_spawn("nemo", &[&path_str])
-                || try_spawn("caja", &["--select", &path_str])
                 || try_spawn("thunar", &[&parent])
                 || try_spawn("pcmanfm", &[&parent])
+                // 3. Final: gio open (modern GLib utility, included with glib2)
+                || try_spawn("gio", &["open", &parent])
+                // 4. Last resort: xdg-open on parent folder
                 || try_spawn("xdg-open", &[&parent]);
 
             if !opened {
-                return Err("No file manager found. Install one of: \
-                    dolphin, nautilus, nemo, thunar, pcmanfm, or xdg-utils."
-                    .to_string());
+                return Err(
+                    "No file manager available. Install one: nautilus, dolphin, \
+                     nemo, thunar, pcmanfm, glib2 (gio), or xdg-utils."
+                        .to_string(),
+                );
             }
-        } else if !try_spawn("xdg-open", &[&path_str]) {
-            return Err("xdg-open not found. Install xdg-utils.".to_string());
+        } else if !try_spawn("xdg-open", &[&path_str])
+            && !try_spawn("gio", &["open", &path_str])
+        {
+            return Err("xdg-open or gio not found. Install xdg-utils or glib2.".to_string());
         }
     }
 
