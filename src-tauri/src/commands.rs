@@ -247,7 +247,6 @@ pub async fn show_in_explorer(path: String) -> Result<bool, String> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
 
-        // Build proper file:// URI with URL encoding for spaces/special chars
         let to_uri = |path: &str| -> String {
             let encoded = path
                 .split('/')
@@ -257,54 +256,85 @@ pub async fn show_in_explorer(path: String) -> Result<bool, String> {
             format!("file://{}", encoded)
         };
 
-        let try_spawn = |cmd: &str, args: &[&str]| -> bool {
-            std::process::Command::new(cmd).args(args).spawn().is_ok()
+        // Build a clean Command — strip AppImage's LD_LIBRARY_PATH and
+        // similar vars that break native file managers when spawned from
+        // inside an AppImage (loads incompatible bundled libs).
+        let clean_cmd = |bin: &str| -> std::process::Command {
+            let mut c = std::process::Command::new(bin);
+            for var in [
+                "LD_LIBRARY_PATH",
+                "LD_PRELOAD",
+                "GST_PLUGIN_PATH",
+                "GST_PLUGIN_SYSTEM_PATH",
+                "GST_PLUGIN_SCANNER",
+                "GTK_PATH",
+                "GIO_MODULE_DIR",
+                "GIO_EXTRA_MODULES",
+                "GDK_PIXBUF_MODULE_FILE",
+                "GDK_PIXBUF_MODULEDIR",
+                "QT_PLUGIN_PATH",
+                "PYTHONHOME",
+                "PYTHONPATH",
+            ] {
+                // Restore from original if AppRun saved it; else just remove it
+                if let Ok(orig) = std::env::var(format!("APPIMAGE_ORIG_{}", var)) {
+                    c.env(var, orig);
+                } else {
+                    c.env_remove(var);
+                }
+            }
+            c
         };
 
-        // Strategy: try multiple approaches in order of reliability.
-        // Use file:// URI form which all modern file managers accept.
+        let try_spawn = |bin: &str, args: &[&str]| -> bool {
+            clean_cmd(bin).args(args).spawn().is_ok()
+        };
+
+        let mut tried: Vec<String> = Vec::new();
+        let mut record = |bin: &str, ok: bool| {
+            tried.push(format!("{}={}", bin, if ok { "ok" } else { "fail" }));
+            ok
+        };
+
         if target.is_file() {
             let file_uri = to_uri(&path_str);
-
-            // 1. DBus FileManager1 ShowItems — properly selects the file
-            //    (works with Nautilus, Dolphin, Nemo, Caja when running)
             let dbus_arg = format!("array:string:{}", file_uri);
-            let dbus_ok = std::process::Command::new("dbus-send")
+
+            // 1. DBus FileManager1 ShowItems — wait for reply with --print-reply
+            //    so we know if a file manager actually responded
+            let dbus_ok = clean_cmd("dbus-send")
                 .args([
                     "--session",
+                    "--print-reply",
+                    "--reply-timeout=2000",
                     "--dest=org.freedesktop.FileManager1",
-                    "--type=method_call",
                     "/org/freedesktop/FileManager1",
                     "org.freedesktop.FileManager1.ShowItems",
                     &dbus_arg,
                     "string:",
                 ])
-                .status()
-                .map(|s| s.success())
+                .output()
+                .map(|o| o.status.success())
                 .unwrap_or(false);
 
-            if dbus_ok {
+            if record("dbus-FileManager1", dbus_ok) {
                 return Ok(true);
             }
 
-            // 2. Try file managers directly with the FILE path so most show parent
-            //    folder. nautilus 43+ accepts URI; older accepts path.
-            let opened = try_spawn("nautilus", &[&file_uri])
-                || try_spawn("dolphin", &["--select", &path_str])
-                || try_spawn("nemo", &[&path_str])
-                || try_spawn("thunar", &[&parent])
-                || try_spawn("pcmanfm", &[&parent])
-                // 3. Final: gio open (modern GLib utility, included with glib2)
-                || try_spawn("gio", &["open", &parent])
-                // 4. Last resort: xdg-open on parent folder
-                || try_spawn("xdg-open", &[&parent]);
+            let opened = record("nautilus", try_spawn("nautilus", &[&file_uri]))
+                || record("dolphin", try_spawn("dolphin", &["--select", &path_str]))
+                || record("nemo", try_spawn("nemo", &[&path_str]))
+                || record("thunar", try_spawn("thunar", &[&parent]))
+                || record("pcmanfm", try_spawn("pcmanfm", &[&parent]))
+                || record("gio", try_spawn("gio", &["open", &parent]))
+                || record("xdg-open", try_spawn("xdg-open", &[&parent]));
 
             if !opened {
-                return Err(
-                    "No file manager available. Install one: nautilus, dolphin, \
-                     nemo, thunar, pcmanfm, glib2 (gio), or xdg-utils."
-                        .to_string(),
-                );
+                return Err(format!(
+                    "No file manager succeeded. Tried: [{}]. \
+                     Install nautilus, dolphin, nemo, thunar, pcmanfm, glib2 (gio), or xdg-utils.",
+                    tried.join(", ")
+                ));
             }
         } else if !try_spawn("xdg-open", &[&path_str])
             && !try_spawn("gio", &["open", &path_str])
