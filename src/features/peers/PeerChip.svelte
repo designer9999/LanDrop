@@ -20,7 +20,7 @@
   {onclick}
   title="{device.alias}{device.online ? '' : ' (offline)'}"
 >
-  <PeerAvatar name={device.alias} color={device.color} size="sm" {selected} />
+  <PeerAvatar name={device.alias} color={device.color} icon={device.avatarIcon} size="sm" {selected} />
   {#if device.online}
     <span class="status-dot" class:selected></span>
   {:else}

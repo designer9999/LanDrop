@@ -9,6 +9,7 @@ export interface DiscoveredDevice {
   ip: string;          // current IP address
   online: boolean;     // currently discovered on LAN
   color: number;       // auto-assigned avatar color
+  avatarIcon?: string; // optional user-selected avatar icon
   outFolder?: string;  // user-configured per-device output folder
 }
 
@@ -240,13 +241,14 @@ function normalizeHydratedDevices(
   rawDevices: unknown,
   messages: MessageEntry[],
 ): DiscoveredDevice[] {
-  const devices = Array.isArray(rawDevices) ? rawDevices.filter(isRecord).map((device, index) => ({
+  const devices: DiscoveredDevice[] = Array.isArray(rawDevices) ? rawDevices.filter(isRecord).map((device, index) => ({
     id: stringValue(device.id),
     alias: stringValue(device.alias, stringValue(device.id).slice(0, 8) || "Device"),
     deviceType: stringValue(device.deviceType, stringValue(device.device_type, "desktop")),
     ip: stringValue(device.ip),
-    online: device.online === true,
+    online: false,
     color: numberValue(device.color) ?? index % PEER_COLORS.length,
+    avatarIcon: stringValue(device.avatarIcon) || undefined,
     outFolder: stringValue(device.outFolder) || undefined,
   })).filter((device) => device.id) : [];
 
@@ -258,6 +260,13 @@ function normalizeHydratedDevices(
   }
 
   return devices;
+}
+
+function devicesForPersistence(devices: DiscoveredDevice[]): DiscoveredDevice[] {
+  return devices.map((device) => ({
+    ...device,
+    online: false,
+  }));
 }
 
 export interface ReceiveOptions {
@@ -351,8 +360,6 @@ class AppState {
         },
       ];
     }
-    this._saveDevices();
-
     // Auto-select if no active device
     if (!this.activeDeviceId) {
       this.setActiveDevice(peer.id);
@@ -364,18 +371,29 @@ class AppState {
     this.devices = this.devices.map((d) =>
       d.id === id ? { ...d, online: false } : d
     );
+    if (this.activeDeviceId === id) {
+      this.activeDeviceId = this.onlineDevices[0]?.id ?? null;
+    }
   }
 
   /** Clear all offline devices (used by refresh button) */
   clearOfflineDevices() {
     this.devices = this.devices.filter((d) => d.online);
+    if (this.activeDeviceId && !this.devices.some((device) => device.id === this.activeDeviceId)) {
+      this.activeDeviceId = this.onlineDevices[0]?.id ?? null;
+    }
+  }
+
+  markAllDevicesOffline() {
+    this.devices = this.devices.map((device) => ({ ...device, online: false }));
+    this.activeDeviceId = null;
   }
 
   setActiveDevice(id: string | null) {
     this.activeDeviceId = id;
   }
 
-  updateDeviceSettings(id: string, updates: Partial<Pick<DiscoveredDevice, "color" | "outFolder">>) {
+  updateDeviceSettings(id: string, updates: Partial<Pick<DiscoveredDevice, "color" | "avatarIcon" | "outFolder">>) {
     this.devices = this.devices.map((d) =>
       d.id === id ? { ...d, ...updates } : d
     );
@@ -384,7 +402,7 @@ class AppState {
   removeDevice(id: string) {
     this.devices = this.devices.filter((d) => d.id !== id);
     if (this.activeDeviceId === id) {
-      this.activeDeviceId = this.devices[0]?.id ?? null;
+      this.activeDeviceId = this.onlineDevices[0]?.id ?? null;
     }
   }
 
@@ -543,9 +561,9 @@ class AppState {
     const activeDeviceId = snapshot.activeDeviceId ?? null;
 
     this.devices = devices;
-    this.activeDeviceId = activeDeviceId && devices.some((device) => device.id === activeDeviceId)
+    this.activeDeviceId = activeDeviceId && devices.some((device) => device.id === activeDeviceId && device.online)
       ? activeDeviceId
-      : messages[messages.length - 1]?.peerId ?? devices[0]?.id ?? null;
+      : null;
     this.activity = Array.isArray(snapshot.activity) ? snapshot.activity : [];
     this.messages = messages;
     this.notificationsEnabled = snapshot.notificationsEnabled ?? true;
@@ -557,8 +575,8 @@ class AppState {
   exportPersistedState(): PersistedAppState {
     return {
       version: 1,
-      devices: this.devices,
-      activeDeviceId: this.activeDeviceId,
+      devices: devicesForPersistence(this.devices),
+      activeDeviceId: this.activeDevice?.online ? this.activeDeviceId : null,
       activity: this.activity,
       messages: sanitizeMessages(this.messages),
       notificationsEnabled: this.notificationsEnabled,

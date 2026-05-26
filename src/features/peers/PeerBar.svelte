@@ -15,6 +15,7 @@
   let { onedit }: Props = $props();
 
   const app = getAppState();
+  const visibleDevices = $derived(app.onlineDevices);
 
   let scrollEl: HTMLDivElement | undefined = $state();
   let canScrollLeft = $state(false);
@@ -31,7 +32,7 @@
   }
 
   $effect(() => {
-    app.devices.length;
+    visibleDevices.length;
     requestAnimationFrame(checkScroll);
   });
 
@@ -40,8 +41,7 @@
     if (refreshing) return;
     refreshing = true;
     try {
-      // Clear stale devices so users see fresh state
-      app.clearOfflineDevices?.();
+      app.markAllDevicesOffline();
       await refreshLanDiscovery();
     } catch {}
     setTimeout(() => { refreshing = false; }, 1500);
@@ -60,7 +60,7 @@
     class="peer-bar"
     onscroll={checkScroll}
   >
-    {#each app.devices as device (device.id)}
+    {#each visibleDevices as device (device.id)}
       <PeerChip
         {device}
         selected={device.id === app.activeDeviceId}
@@ -74,7 +74,7 @@
       />
     {/each}
 
-    {#if app.devices.length === 0}
+    {#if visibleDevices.length === 0}
       <div class="discovering">
         <Icon name="radar" size={16} />
         <span>Searching for devices...</span>

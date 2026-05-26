@@ -19,13 +19,36 @@
 
   const app = getAppState();
 
+  const AVATAR_ICONS = [
+    "person",
+    "computer",
+    "phone_android",
+    "home",
+    "work",
+    "school",
+    "sports_esports",
+    "headphones",
+    "photo_camera",
+    "movie",
+    "brush",
+    "code",
+  ];
+
+  function nextAvatarIcon(current: string | undefined): string | undefined {
+    if (!current) return AVATAR_ICONS[0];
+    const nextIndex = AVATAR_ICONS.indexOf(current) + 1;
+    return AVATAR_ICONS[nextIndex] ?? undefined;
+  }
+
   let color = $state(0);
+  let avatarIcon = $state<string | undefined>(undefined);
   let outFolder = $state("");
   let showDelete = $state(false);
 
   $effect(() => {
     if (open && device) {
       color = device.color;
+      avatarIcon = device.avatarIcon;
       outFolder = device.outFolder ?? "";
       showDelete = false;
     }
@@ -35,6 +58,7 @@
     if (!device) return;
     app.updateDeviceSettings(device.id, {
       color,
+      avatarIcon,
       outFolder: outFolder || undefined,
     });
     open = false;
@@ -61,7 +85,9 @@
 
       <!-- Device info -->
       <div class="device-info">
-        <PeerAvatar name={device.alias} {color} size="lg" />
+        <button class="avatar-edit" onclick={() => avatarIcon = nextAvatarIcon(avatarIcon)} title="Change avatar icon">
+          <PeerAvatar name={device.alias} {color} icon={avatarIcon} size="lg" />
+        </button>
         <div class="device-details">
           <div class="device-name">{device.alias}</div>
           <div class="device-meta">
@@ -75,6 +101,33 @@
             <span class="status-indicator"></span>
             {device.online ? "Online" : "Offline"}
           </div>
+        </div>
+      </div>
+
+      <!-- Avatar icon picker -->
+      <div>
+        <div class="text-xs text-on-surface-variant mb-2">Avatar icon</div>
+        <div class="avatar-grid">
+          <button
+            class="avatar-option"
+            class:avatar-option-active={!avatarIcon}
+            aria-label="Use first letter"
+            title="First letter"
+            onclick={() => avatarIcon = undefined}
+          >
+            <span class="avatar-letter">D</span>
+          </button>
+          {#each AVATAR_ICONS as iconName}
+            <button
+              class="avatar-option"
+              class:avatar-option-active={avatarIcon === iconName}
+              aria-label="Use {iconName} icon"
+              title={iconName.replaceAll("_", " ")}
+              onclick={() => avatarIcon = iconName}
+            >
+              <Icon name={iconName} size={19} />
+            </button>
+          {/each}
         </div>
       </div>
 
@@ -157,6 +210,19 @@
     border-radius: 16px;
     background: var(--md-sys-color-surface-container);
   }
+  .avatar-edit {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+  }
+  .avatar-edit:hover {
+    filter: brightness(1.08);
+  }
   .device-details {
     display: flex;
     flex-direction: column;
@@ -206,5 +272,43 @@
   }
   .device-status.online .status-indicator {
     background: var(--md-sys-color-tertiary);
+  }
+  .avatar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .avatar-option {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    background: var(--md-sys-color-surface-container-low);
+    color: var(--md-sys-color-on-surface-variant);
+    cursor: pointer;
+    transition:
+      background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
+      border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
+      color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
+      transform var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial);
+  }
+  .avatar-option:hover {
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
+  }
+  .avatar-option:active {
+    transform: scale(0.94);
+  }
+  .avatar-option-active {
+    border-color: var(--md-sys-color-primary);
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+  .avatar-letter {
+    font-size: 15px;
+    font-weight: 600;
   }
 </style>

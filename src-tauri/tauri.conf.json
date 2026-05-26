@@ -1,6 +1,6 @@
 {
   "productName": "LanDrop",
-  "version": "1.6.10",
+  "version": "1.6.11",
   "identifier": "com.landrop.app",
   "build": {
     "frontendDist": "../dist",
