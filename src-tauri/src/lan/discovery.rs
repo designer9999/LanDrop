@@ -379,7 +379,11 @@ pub async fn run_discovery(
                 }
             }
         }
-        listener_opt.unwrap()
+        let Some(listener) = listener_opt else {
+            running.store(false, Ordering::SeqCst);
+            return;
+        };
+        listener
     };
 
     // ── Task 1: mDNS event processor ──
@@ -418,10 +422,12 @@ pub async fn run_discovery(
                     pending.remove(&id);
                     // TCP liveness check — try to connect before marking offline
                     let addr = format!("{}:{}", ip, port);
-                    let alive =
+                    let alive = matches!(
                         tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
-                            .await;
-                    if alive.is_ok() && alive.unwrap().is_ok() {
+                            .await,
+                        Ok(Ok(_))
+                    );
+                    if alive {
                         // Peer is still alive — mDNS lied. Re-add to discovered.
                         emit_log(
                             &handle_mdns,

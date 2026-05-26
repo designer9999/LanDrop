@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { fileNameFromPath, imageMimeFromName, isImage, videoMimeFromName } from "$lib/utils/file-utils";
 
 export interface StatusResponse {
   ok: boolean;
@@ -145,15 +146,10 @@ export async function downloadFile(path: string): Promise<string> {
   // Files received from LAN are already at /storage/emulated/0/Download/LanDrop/
   // Copy to standard Downloads so it shows in gallery and file manager
   const { readFile, writeFile, mkdir, exists } = await import("@tauri-apps/plugin-fs");
-  const name = path.split("/").pop() ?? "file";
-
-  // Determine target directory based on file type
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  const imageExts = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
-  const isImage = imageExts.includes(ext);
+  const name = fileNameFromPath(path, "file");
 
   // Copy to /storage/emulated/0/Pictures/LanDrop/ for images, Downloads/ for others
-  const targetDir = isImage
+  const targetDir = isImage(name)
     ? "/storage/emulated/0/Pictures/LanDrop"
     : "/storage/emulated/0/Download";
 
@@ -211,6 +207,12 @@ export async function getFullImage(path: string, maxPx: number = 800): Promise<s
 const videoSrcCache = new Map<string, Promise<string | null>>();
 const cachedVideoBlobUrls = new Set<string>();
 
+function toBlobPart(data: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buffer).set(data);
+  return buffer;
+}
+
 export async function getVideoSrc(path: string): Promise<string | null> {
   const cached = videoSrcCache.get(path);
   if (cached) return cached;
@@ -223,9 +225,7 @@ export async function getVideoSrc(path: string): Promise<string | null> {
 async function loadVideoSrc(path: string): Promise<string | null> {
   try {
     const data = await readFileBytes(path);
-    const ext = path.split(".").pop()?.toLowerCase() ?? "mp4";
-    const mime = ext === "webm" ? "video/webm" : ext === "mov" ? "video/quicktime" : ext === "mkv" ? "video/x-matroska" : "video/mp4";
-    const blob = new Blob([data], { type: mime });
+    const blob = new Blob([toBlobPart(data)], { type: videoMimeFromName(path) });
     const url = URL.createObjectURL(blob);
     cachedVideoBlobUrls.add(url);
     return url;
@@ -249,9 +249,7 @@ async function mobileImageSrc(path: string): Promise<string | null> {
   try {
     const { readFile } = await import("@tauri-apps/plugin-fs");
     const data = await readFile(path);
-    const ext = path.split(".").pop()?.toLowerCase() ?? "jpg";
-    const mime = ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg";
-    const blob = new Blob([data], { type: mime });
+    const blob = new Blob([toBlobPart(data)], { type: imageMimeFromName(path) });
     return URL.createObjectURL(blob);
   } catch {
     return null;

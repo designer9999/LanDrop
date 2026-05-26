@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 use super::protocol::{Message, CHUNK_SIZE, TCP_PORT};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use crate::commands::format_size;
+use crate::path_utils::sanitize_relative_path;
 
 pub struct Connection {
     reader: Mutex<OwnedReadHalf>,
@@ -292,8 +293,8 @@ pub async fn send_files_to_peer(
         let size = metadata.len();
 
         // Send dir marker
-        if name.contains('/') {
-            let dir_part = &name[..name.rfind('/').unwrap()];
+        if let Some(last_sep) = name.rfind('/') {
+            let dir_part = &name[..last_sep];
             write_message(
                 &mut w,
                 &Message::Dir {
@@ -385,7 +386,7 @@ pub async fn receive_file(
     sort_by_date: bool,
     handle: Option<&AppHandle>,
 ) -> Result<String, String> {
-    let safe_name = sanitize_path(name);
+    let safe_name = sanitize_relative_path(name);
     let base_dir = resolve_receive_base_dir(out_folder, sort_by_date);
 
     let out_path = base_dir.join(&safe_name);
@@ -554,44 +555,6 @@ pub async fn receive_batch(
 }
 
 // ─── Utility functions ───
-
-fn sanitize_path(name: &str) -> String {
-    // Strip Windows drive letters (C:\...), UNC prefixes (\\server\), and
-    // leading slashes/tildes so path is always relative to the receive dir.
-    let mut cleaned = name.replace('\\', "/");
-    // Drive letter or UNC: strip everything up to the first useful component
-    if cleaned.len() > 1 && cleaned.chars().nth(1) == Some(':') {
-        cleaned = cleaned[2..].to_string(); // C:/foo → /foo
-    }
-    let cleaned = cleaned
-        .trim_start_matches('/')
-        .trim_start_matches('~')
-        .trim_start_matches('/')
-        .to_string();
-
-    let parts: Vec<&str> = cleaned
-        .split('/')
-        .filter(|p| !p.is_empty() && *p != ".." && *p != ".")
-        .collect();
-
-    parts
-        .iter()
-        .map(|p| {
-            p.chars()
-                .map(|c| {
-                    if c.is_alphanumeric()
-                        || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')' | '[' | ']')
-                    {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
 
 fn check_disk_space(path: &Path, needed: u64) -> Result<(), String> {
     #[cfg(target_os = "windows")]

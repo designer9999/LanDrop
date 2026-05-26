@@ -264,10 +264,8 @@
   }
 
   function deleteMessagesOlderThan(daysOld: number) {
-    const cutoff = new Date(Date.now() - daysOld * 86400000).toISOString();
-    const deletedMessages = app.messages.filter((message) => !message.starred && message.timestamp < cutoff);
+    const deletedMessages = app.deleteOldMessages(daysOld);
     deleteHistoryFiles(collectAttachmentPaths(deletedMessages));
-    app.deleteOldMessages(daysOld);
   }
 
   async function openLightbox(path: string, name: string) {

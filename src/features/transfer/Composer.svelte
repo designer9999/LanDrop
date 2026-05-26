@@ -5,7 +5,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
   import { saveClipboardImage, getFileInfo, getClipboardFiles, getVideoSrc } from "$lib/api/bridge";
-  import { isImage, isVideo } from "$lib/utils/file-utils";
+  import { fileExtensionLabel, fileNameFromPath, isImage, isVideo } from "$lib/utils/file-utils";
   import { onMount } from "svelte";
 
   interface Props {
@@ -134,8 +134,8 @@
           </div>
         {/each}
         {#each otherFiles as file (file.path)}
-          {@const name = file.info?.name ?? file.path.split(/[\\/]/).pop() ?? 'file'}
-          {@const ext = name.split('.').pop()?.toUpperCase() ?? 'FILE'}
+          {@const name = file.info?.name ?? fileNameFromPath(file.path, "file")}
+          {@const ext = fileExtensionLabel(name)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="composer-file-card" onclick={() => onfilepreview(file.path)}>

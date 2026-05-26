@@ -6,6 +6,7 @@
   import { getAppState } from "$lib/state/app-state.svelte";
   import { showInExplorer, openFile, downloadFile, isMobile, getVideoSrc, revokeBlobUrl } from "$lib/api/bridge";
   import type { MessageAttachment, MessageEntry } from "$lib/state/app-state.svelte";
+  import { fileExtensionLabel } from "$lib/utils/file-utils";
   import { onDestroy } from "svelte";
 
   interface Props {
@@ -255,7 +256,7 @@
               {/if}
             </div>
           {:else}
-            {@const ext = file.name.split('.').pop()?.toUpperCase() ?? 'FILE'}
+            {@const ext = fileExtensionLabel(file.name)}
             <div class="att-file-card" onclick={(e) => { e.stopPropagation(); mobile ? openFile(file.path) : onfilepreview(file.path); }} title={mobile ? "Open" : "Preview file"}>
               <span class="att-file-name">{file.name}</span>
               {#if file.size}<span class="att-file-size">{file.size}</span>{/if}

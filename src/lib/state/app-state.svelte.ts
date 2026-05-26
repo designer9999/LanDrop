@@ -1,4 +1,5 @@
 import type { FileInfo } from "$lib/api/bridge";
+import { fileNameFromPath } from "$lib/utils/file-utils";
 
 // ── Device (auto-discovered via mDNS) ──
 
@@ -139,15 +140,11 @@ function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function basename(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).pop() ?? "";
-}
-
 function sanitizeAttachment(raw: unknown, depth = 0): MessageAttachment | null {
   if (!isRecord(raw)) return null;
 
   const path = stringValue(raw.path);
-  const name = stringValue(raw.name, basename(path) || "item");
+  const name = stringValue(raw.name, fileNameFromPath(path, "item"));
   let type: MessageAttachment["type"] = isAttachmentType(raw.type) ? raw.type : "file";
   const rawChildren = Array.isArray(raw.children)
     ? raw.children
@@ -522,9 +519,11 @@ class AppState {
     this.messages = this.messages.filter((m) => m.peerId !== peerId);
   }
 
-  deleteOldMessages(daysOld: number) {
+  deleteOldMessages(daysOld: number): MessageEntry[] {
     const cutoff = new Date(Date.now() - daysOld * 86400000).toISOString();
+    const deletedMessages = this.messages.filter((m) => !m.starred && m.timestamp < cutoff);
     this.messages = this.messages.filter((m) => m.starred || m.timestamp >= cutoff);
+    return deletedMessages;
   }
 
   private _pruneMessages() {

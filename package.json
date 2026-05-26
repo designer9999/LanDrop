@@ -1,7 +1,7 @@
 {
   "name": "landrop",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.6.12",
   "type": "module",
   "scripts": {
     "dev": "vite",

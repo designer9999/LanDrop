@@ -4,7 +4,6 @@ let permissionResolved = false;
 let permissionGranted = false;
 
 const INCOMING_NOTIFICATION_ID = 1001;
-const INCOMING_NOTIFICATION_TAG = "landrop-incoming";
 const INCOMING_NOTIFICATION_GROUP = "landrop";
 
 async function ensurePermission(): Promise<boolean> {
@@ -26,7 +25,6 @@ export async function sendNativeNotification(title: string, body: string): Promi
   if (!await ensurePermission()) return;
   await sendNotification({
     id: INCOMING_NOTIFICATION_ID,
-    tag: INCOMING_NOTIFICATION_TAG,
     group: INCOMING_NOTIFICATION_GROUP,
     title,
     body,

@@ -1,5 +1,6 @@
 mod commands;
 mod lan;
+mod path_utils;
 
 use tauri::Manager;
 

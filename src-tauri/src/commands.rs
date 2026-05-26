@@ -1,4 +1,5 @@
 use crate::lan::LanState;
+use crate::path_utils::sanitize_file_name;
 use base64::Engine;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -906,7 +907,7 @@ pub async fn save_temp_for_send(
     tokio::fs::create_dir_all(&send_dir)
         .await
         .map_err(|e| e.to_string())?;
-    let out_path = send_dir.join(safe_file_name(&name));
+    let out_path = send_dir.join(sanitize_file_name(&name));
     tokio::fs::write(&out_path, &data)
         .await
         .map_err(|e| e.to_string())?;
@@ -932,7 +933,7 @@ pub async fn save_history_file(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let out_path = history_dir.join(format!("{}_{}", ts, safe_file_name(&name)));
+    let out_path = history_dir.join(format!("{}_{}", ts, sanitize_file_name(&name)));
     tokio::fs::write(&out_path, &data)
         .await
         .map_err(|e| e.to_string())?;
@@ -972,26 +973,6 @@ pub async fn cleanup_send_cache(app: tauri::AppHandle) -> Result<(), String> {
         let _ = tokio::fs::remove_dir_all(&send_dir).await;
     }
     Ok(())
-}
-
-fn safe_file_name(name: &str) -> String {
-    let file_name = Path::new(name)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("file");
-    let cleaned: String = file_name
-        .chars()
-        .map(|ch| match ch {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
-            _ => ch,
-        })
-        .collect();
-    let trimmed = cleaned.trim_matches(&['.', ' ', '_'][..]);
-    if trimmed.is_empty() {
-        "file".to_string()
-    } else {
-        trimmed.to_string()
-    }
 }
 
 pub(crate) fn format_size(bytes: u64) -> String {
