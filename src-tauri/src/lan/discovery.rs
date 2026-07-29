@@ -9,13 +9,15 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time;
 
 use super::identity::{normalize_uuid, DeviceIdentity};
 use super::protocol::{MDNS_SERVICE_TYPE, TCP_PORT};
 use super::transfer::{probe_peer_id, Connection};
+
+const MAX_INCOMING_SESSIONS: usize = 32;
 
 /// Emit a log event to the frontend debug panel
 fn emit_log(handle: &AppHandle, level: &str, text: &str) {
@@ -27,6 +29,16 @@ fn emit_log(handle: &AppHandle, level: &str, text: &str) {
         }),
     );
     eprintln!("[LAN {}] {}", level, text);
+}
+
+fn emit_transfer_error(handle: &AppHandle, direction: &str) {
+    let _ = handle.emit(
+        "lan_transfer_progress",
+        serde_json::json!({
+            "direction": direction,
+            "phase": "error",
+        }),
+    );
 }
 
 #[cfg(target_os = "android")]
@@ -44,7 +56,7 @@ fn emit_android_receive_notification(handle: &AppHandle, title: &str, body: &str
     let _ = handle
         .notification()
         .builder()
-        .channel_id("landrop-incoming")
+        .channel_id("landrop-incoming-v2")
         .title(title)
         .body(body)
         .group("landrop")
@@ -600,9 +612,11 @@ pub async fn run_discovery(
     let my_uuid = identity.id_bytes();
     let peers_tcp = discovered_peers.clone();
     let pending_tcp = pending_removals.clone();
+    let incoming_session_slots = Arc::new(Semaphore::new(MAX_INCOMING_SESSIONS));
     let tcp_acceptor = tokio::spawn(async move {
         let mut listener: Arc<TcpListener> = tcp_listener;
         let mut consecutive_errors: u32 = 0;
+        let mut last_capacity_warning: Option<Instant> = None;
 
         loop {
             if !running_tcp.load(Ordering::Relaxed) {
@@ -631,12 +645,33 @@ pub async fn run_discovery(
             match accept {
                 Ok(Ok((stream, _addr))) => {
                     consecutive_errors = 0;
+                    let permit = match incoming_session_slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            if last_capacity_warning
+                                .map(|at| at.elapsed() >= Duration::from_secs(5))
+                                .unwrap_or(true)
+                            {
+                                emit_log(
+                                    &handle_tcp,
+                                    "warn",
+                                    &format!(
+                                        "Incoming connection limit reached ({MAX_INCOMING_SESSIONS})"
+                                    ),
+                                );
+                                last_capacity_warning = Some(Instant::now());
+                            }
+                            drop(stream);
+                            continue;
+                        }
+                    };
                     let handle_session = handle_tcp.clone();
                     let receive_routing = receive_routing.clone();
                     let peers_ref = peers_tcp.clone();
                     let pending_ref = pending_tcp.clone();
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let context = IncomingSessionContext {
                             handle: &handle_session,
                             receive_routing: &receive_routing,
@@ -668,7 +703,7 @@ pub async fn run_discovery(
 
     // ── Task 3: same-LAN TCP healer scan ──
     // mDNS can be lost or polluted by VPN/virtual interfaces. Probe only this
-    // machine's /24 LAN and recover peers by their authenticated UUID handshake.
+    // machine's /24 LAN and recover peers by their UUID handshake.
     let running_scan = running.clone();
     let handle_scan = handle.clone();
     let peers_scan = discovered_peers.clone();
@@ -752,7 +787,7 @@ pub async fn run_discovery(
     running.store(false, Ordering::SeqCst);
 }
 
-/// Handle a single incoming TCP session: authenticate, receive messages, close.
+/// Handle a single incoming TCP session: identify the peer, receive messages, close.
 async fn handle_incoming_session(
     stream: TcpStream,
     my_uuid: &[u8; 16],
@@ -831,15 +866,24 @@ async fn handle_incoming_session(
         alias
     };
 
-    // Read messages until connection closes
+    // A clean close before the first control frame is a discovery probe. Once a
+    // file transfer begins, the sender must finish it with Done. LanDrop 1.6.12
+    // and older text senders close immediately after Text, so retain that one
+    // legacy clean-EOF case during the protocol-v1 compatibility window.
+    let mut received_control_message = false;
+    let mut allow_legacy_text_eof = false;
     loop {
-        let msg = match conn.recv_message().await {
-            Ok(msg) => msg,
-            Err(_) => break,
+        let msg = match conn.recv_message().await? {
+            Some(msg) => msg,
+            None if !received_control_message => return Ok(()),
+            None if allow_legacy_text_eof => return Ok(()),
+            None => return Err("Peer closed the session before sending Done".into()),
         };
+        received_control_message = true;
 
         match msg {
             super::protocol::Message::Text { text } => {
+                allow_legacy_text_eof = true;
                 emit_android_receive_notification(
                     context.handle,
                     &sender_alias,
@@ -851,7 +895,8 @@ async fn handle_incoming_session(
                 );
             }
             super::protocol::Message::File { name, size } => {
-                match super::transfer::receive_file(
+                allow_legacy_text_eof = false;
+                let path = match super::transfer::receive_file(
                     &conn,
                     &name,
                     size,
@@ -861,30 +906,39 @@ async fn handle_incoming_session(
                 )
                 .await
                 {
-                    Ok(path) => {
-                        emit_android_receive_notification(
-                            context.handle,
-                            &sender_alias,
-                            &format!("Received {}", name),
-                        );
-                        let _ = context.handle.emit(
-                            "lan_files_received",
-                            serde_json::json!({
-                                "peer_id": sender_id,
-                                "files": [&name],
-                                "file_details": [{"name": &name, "path": &path, "size": size}]
-                            }),
-                        );
+                    Ok(path) => path,
+                    Err(error) => {
+                        emit_transfer_error(context.handle, "receive");
+                        return Err(format!("File receive error: {error}"));
                     }
-                    Err(e) => emit_log(
-                        context.handle,
-                        "error",
-                        &format!("File receive error: {}", e),
-                    ),
-                }
+                };
+                emit_android_receive_notification(
+                    context.handle,
+                    &sender_alias,
+                    &format!("Received {}", name),
+                );
+                let _ = context.handle.emit(
+                    "lan_files_received",
+                    serde_json::json!({
+                        "peer_id": sender_id,
+                        "files": [&name],
+                        "file_details": [{"name": &name, "path": &path, "size": size}]
+                    }),
+                );
+                let _ = context.handle.emit(
+                    "lan_transfer_progress",
+                    serde_json::json!({
+                        "direction": "receive",
+                        "phase": "done",
+                        "total_bytes": size,
+                        "total_files": 1,
+                        "received_bytes": size,
+                        "received_files": 1,
+                    }),
+                );
             }
             super::protocol::Message::Batch { count } => {
-                match super::transfer::receive_batch(
+                let files = match super::transfer::receive_batch(
                     &conn,
                     count,
                     &out_folder,
@@ -893,37 +947,39 @@ async fn handle_incoming_session(
                 )
                 .await
                 {
-                    Ok(files) => {
-                        let body = match files.len() {
-                            0 => "Received files".to_string(),
-                            1 => format!("Received {}", files[0].0),
-                            n => format!("Received {} items", n),
-                        };
-                        emit_android_receive_notification(context.handle, &sender_alias, &body);
-                        let names: Vec<&str> = files.iter().map(|(n, _, _)| n.as_str()).collect();
-                        let details: Vec<serde_json::Value> = files.iter()
-                            .map(|(name, path, size)| serde_json::json!({"name": name, "path": path, "size": size}))
-                            .collect();
-                        let _ = context.handle.emit(
-                            "lan_files_received",
-                            serde_json::json!({
-                                "peer_id": sender_id,
-                                "files": names,
-                                "file_details": details,
-                            }),
-                        );
+                    Ok(files) => files,
+                    Err(error) => {
+                        emit_transfer_error(context.handle, "receive");
+                        return Err(format!("Batch receive error: {error}"));
                     }
-                    Err(e) => emit_log(
-                        context.handle,
-                        "error",
-                        &format!("Batch receive error: {}", e),
-                    ),
-                }
+                };
+                let body = match files.len() {
+                    0 => "Received files".to_string(),
+                    1 => format!("Received {}", files[0].0),
+                    n => format!("Received {} items", n),
+                };
+                emit_android_receive_notification(context.handle, &sender_alias, &body);
+                let names: Vec<&str> = files.iter().map(|(n, _, _)| n.as_str()).collect();
+                let details: Vec<serde_json::Value> = files
+                    .iter()
+                    .map(|(name, path, size)| {
+                        serde_json::json!({"name": name, "path": path, "size": size})
+                    })
+                    .collect();
+                let _ = context.handle.emit(
+                    "lan_files_received",
+                    serde_json::json!({
+                        "peer_id": sender_id,
+                        "files": names,
+                        "file_details": details,
+                    }),
+                );
+                return Ok(());
             }
-            super::protocol::Message::Done => break,
-            _ => {}
+            super::protocol::Message::Done => return Ok(()),
+            super::protocol::Message::Dir { .. } => {
+                return Err("Unexpected directory marker outside a batch".into());
+            }
         }
     }
-
-    Ok(())
 }

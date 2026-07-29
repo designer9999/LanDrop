@@ -1,4 +1,5 @@
 {
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for LanDrop — shared across all platforms",
   "windows": ["main"],

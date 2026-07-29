@@ -105,47 +105,6 @@ pub fn run() {
                 }
             }
 
-            // Auto-add Windows Firewall rule so other devices can connect to us
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                if let Ok(exe) = std::env::current_exe() {
-                    let exe_path = exe.to_string_lossy().to_string();
-                    let _ = std::process::Command::new("netsh")
-                        .args([
-                            "advfirewall",
-                            "firewall",
-                            "add",
-                            "rule",
-                            "name=LanDrop",
-                            "dir=in",
-                            "action=allow",
-                            &format!("program={}", exe_path),
-                            "protocol=TCP",
-                            "profile=private,public",
-                            "enable=yes",
-                        ])
-                        .creation_flags(0x08000000)
-                        .output();
-                    let _ = std::process::Command::new("netsh")
-                        .args([
-                            "advfirewall",
-                            "firewall",
-                            "add",
-                            "rule",
-                            "name=LanDrop",
-                            "dir=in",
-                            "action=allow",
-                            &format!("program={}", exe_path),
-                            "protocol=UDP",
-                            "profile=private,public",
-                            "enable=yes",
-                        ])
-                        .creation_flags(0x08000000)
-                        .output();
-                }
-            }
-
             // Load device identity and create LAN service
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir().expect("app data dir");
@@ -156,10 +115,10 @@ pub fn run() {
             {
                 use tauri_plugin_notification::{Channel, Importance, NotificationExt, Visibility};
                 let _ = app.notification().create_channel(
-                    Channel::builder("landrop-incoming", "LanDrop incoming")
+                    Channel::builder("landrop-incoming-v2", "LanDrop incoming")
                         .description("Incoming LanDrop files and messages")
                         .importance(Importance::High)
-                        .visibility(Visibility::Public)
+                        .visibility(Visibility::Private)
                         .vibration(true)
                         .build(),
                 );

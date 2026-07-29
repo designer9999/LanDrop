@@ -368,9 +368,6 @@ class AppState {
     this.devices = this.devices.map((d) =>
       d.id === id ? { ...d, online: false } : d
     );
-    if (this.activeDeviceId === id) {
-      this.activeDeviceId = this.onlineDevices[0]?.id ?? null;
-    }
   }
 
   /** Clear all offline devices (used by refresh button) */
@@ -383,7 +380,6 @@ class AppState {
 
   markAllDevicesOffline() {
     this.devices = this.devices.map((device) => ({ ...device, online: false }));
-    this.activeDeviceId = null;
   }
 
   setActiveDevice(id: string | null) {
@@ -519,10 +515,14 @@ class AppState {
     this.messages = this.messages.filter((m) => m.peerId !== peerId);
   }
 
-  deleteOldMessages(daysOld: number): MessageEntry[] {
+  deleteOldMessages(peerId: string, daysOld: number): MessageEntry[] {
     const cutoff = new Date(Date.now() - daysOld * 86400000).toISOString();
-    const deletedMessages = this.messages.filter((m) => !m.starred && m.timestamp < cutoff);
-    this.messages = this.messages.filter((m) => m.starred || m.timestamp >= cutoff);
+    const deletedMessages = this.messages.filter(
+      (m) => m.peerId === peerId && !m.starred && m.timestamp < cutoff
+    );
+    this.messages = this.messages.filter(
+      (m) => m.peerId !== peerId || m.starred || m.timestamp >= cutoff
+    );
     return deletedMessages;
   }
 
@@ -531,7 +531,8 @@ class AppState {
     const starred = this.messages.filter((m) => m.starred);
     const unstarred = this.messages.filter((m) => !m.starred);
     const keep = Math.max(0, 500 - starred.length);
-    this.messages = [...unstarred.slice(-keep), ...starred].sort((a, b) =>
+    const recentUnstarred = keep > 0 ? unstarred.slice(-keep) : [];
+    this.messages = [...recentUnstarred, ...starred].sort((a, b) =>
       a.timestamp.localeCompare(b.timestamp)
     );
   }
@@ -560,7 +561,7 @@ class AppState {
     const activeDeviceId = snapshot.activeDeviceId ?? null;
 
     this.devices = devices;
-    this.activeDeviceId = activeDeviceId && devices.some((device) => device.id === activeDeviceId && device.online)
+    this.activeDeviceId = activeDeviceId && devices.some((device) => device.id === activeDeviceId)
       ? activeDeviceId
       : null;
     this.activity = Array.isArray(snapshot.activity) ? snapshot.activity : [];
@@ -575,7 +576,7 @@ class AppState {
     return {
       version: 1,
       devices: devicesForPersistence(this.devices),
-      activeDeviceId: this.activeDevice?.online ? this.activeDeviceId : null,
+      activeDeviceId: this.activeDevice ? this.activeDeviceId : null,
       activity: this.activity,
       messages: sanitizeMessages(this.messages),
       notificationsEnabled: this.notificationsEnabled,

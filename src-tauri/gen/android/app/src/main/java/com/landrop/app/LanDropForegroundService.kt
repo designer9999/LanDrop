@@ -35,6 +35,10 @@ class LanDropForegroundService : Service() {
         super.onDestroy()
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopSelf(startId)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun acquireMulticastLock() {
@@ -77,6 +81,7 @@ class LanDropForegroundService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
     }
 
@@ -89,12 +94,15 @@ class LanDropForegroundService : Service() {
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Keeps LanDrop available for local network receives"
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
         manager.createNotificationChannel(channel)
     }
 
     companion object {
-        private const val CHANNEL_ID = "landrop-background"
+        // Version the channel so upgraded installs receive the new privacy setting;
+        // Android keeps most settings of an already-created channel unchanged.
+        private const val CHANNEL_ID = "landrop-background-v2"
         private const val NOTIFICATION_ID = 29171
     }
 }

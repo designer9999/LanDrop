@@ -1,94 +1,138 @@
 # LanDrop
 
-Instant file and text transfer between devices on the same network. No internet, no cloud, no accounts — everything stays on your LAN.
+LanDrop sends files and text directly between devices on the same local network.
+There is no account, cloud storage, or relay server.
+
+> [!IMPORTANT]
+> LanDrop's current transfer protocol is plaintext and does not cryptographically
+> authenticate peers. Use it only on networks and with devices you trust. See
+> [Security](#security) before distributing or installing Android builds.
 
 ## Features
 
-- **Instant file transfer** — drag & drop files and folders between devices
-- **Text messaging** — send quick messages alongside files
-- **Auto-discovery** — devices find each other automatically via mDNS
-- **Cross-platform** — Windows desktop + Android (more platforms coming)
-- **Image previews** — thumbnails for images in chat and full-screen lightbox
-- **System tray** — runs quietly in the background, ready when you need it
-- **Global hotkeys** — system-wide shortcut to instantly attach files
-- **Auto-updates** — check for updates directly from the app (Windows)
-- **Privacy-first** — zero data leaves your network, ever
+- Direct file, folder, and text transfer over TCP
+- Automatic peer discovery with mDNS
+- Windows, macOS, Linux, and Android builds
+- Transfer history, image previews, and desktop video previews
+- Per-peer receive folders
+- Desktop system tray, global shortcut, and signed Tauri updater artifacts
+- No telemetry, account, cloud storage, or internet relay
 
 ## Download
 
-Get the latest release from the [Releases page](https://github.com/designer9999/LanDrop/releases).
+Download builds from the [GitHub Releases page](https://github.com/designer9999/LanDrop/releases).
 
-| Platform | File |
-|----------|------|
-| Windows  | `LanDrop_x.x.x_x64-setup.exe` (NSIS installer) |
-| Android  | `landrop-android-arm64.apk` |
+| Platform | Release asset |
+| --- | --- |
+| Windows | `LanDrop_x.x.x_x64-setup.exe` |
+| Android (arm64) | `landrop-android-arm64-release.apk` |
+| macOS (Apple Silicon) | `LanDrop_x.x.x_aarch64.dmg` |
+| macOS (Intel) | `LanDrop_x.x.x_x64.dmg` |
+| Linux | `.AppImage` or `.deb` |
 
-### Windows
+macOS and Windows operating-system code signing is not configured yet. The Tauri
+updater signature protects updater artifacts, but it is not a substitute for Apple
+notarization or Windows Authenticode.
 
-1. Download the `.exe` installer from Releases
-2. Run it — installs to your user profile (no admin required)
-3. LanDrop starts and discovers other devices on your network
+## How it works
 
-### Android
+1. Start LanDrop on two devices connected to the same network.
+2. The devices advertise and discover each other through mDNS.
+3. Select a peer and send files, folders, or text.
+4. LanDrop opens a direct TCP connection and writes received files to the selected
+   receive folder.
 
-1. Download the `.apk` from Releases
-2. Enable "Install from unknown sources" if prompted
-3. Open LanDrop — it finds your other devices automatically
+The current wire protocol is intentionally simple, but it has no pairing, encryption,
+receiver approval, integrity digest, resume, or final acknowledgement. Those are
+prioritized in the [technical audit](documentation/technical-audit-2026-07.md).
 
-## How It Works
+## Tech stack
 
-1. Launch LanDrop on two or more devices connected to the same network
-2. Devices discover each other automatically (mDNS/Bonjour)
-3. Select a device, drop files or type a message
-4. Transfer happens directly over TCP — no relay, no cloud
+- Svelte 5, TypeScript 6, Vite 8, and Tailwind CSS 4
+- Rust and Tauri 2
+- `mdns-sd` discovery and a custom framed TCP transfer protocol
+- Tauri Android with small Kotlin integrations
 
-All transfers are local. Your files never touch the internet.
+TypeScript 7 is deliberately not used yet. Microsoft currently directs Svelte and
+other embedded-language projects to remain on TypeScript 6 until the native compiler
+exposes a stable tooling API.
 
-## Tech Stack
-
-- **Frontend**: Svelte 5 with Material Design 3 (Expressive) dark theme
-- **Backend**: Rust (Tauri v2)
-- **Discovery**: mDNS (`mdns-sd` crate)
-- **Transfer**: Direct TCP with custom binary protocol
-- **Mobile**: Tauri Android with native Kotlin plugins
-
-## Building from Source
+## Build from source
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) 20+
-- [Rust](https://rustup.rs/) (stable)
-- [Tauri CLI](https://v2.tauri.app/start/prerequisites/)
+- [Node.js 24 LTS](https://nodejs.org/en/about/previous-releases)
+- [Rust](https://rustup.rs/) as selected by `rust-toolchain.toml`
+- The [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS
 
-### Windows
+Install reproducibly and run the full local verification:
 
 ```bash
-npm install
-npx tauri build
+npm ci
+npm run verify
+npm audit --audit-level=high
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features
+cargo install cargo-audit --version 0.22.2 --locked
+cargo audit --file src-tauri/Cargo.lock
 ```
 
-The installer will be at `src-tauri/target/release/bundle/nsis/`.
-
-### Android
-
-Requires Android SDK, NDK r27, and JDK 17+.
+Build the desktop app:
 
 ```bash
-npx tauri android build --target aarch64 --apk
+npm run tauri build
+```
+
+Build an Android arm64 APK (Android SDK, NDK r27, and JDK 17 are required):
+
+```bash
+npm run tauri android build -- --target aarch64 --apk
 ```
 
 ## Releasing
 
-Push a version tag to trigger automated builds:
+Keep the version identical in all three manifests:
+
+- `package.json`
+- `src-tauri/Cargo.toml`
+- `src-tauri/tauri.conf.json`
+
+Then create and push an annotated version tag:
 
 ```bash
-# Update version in src-tauri/tauri.conf.json
-git tag v1.0.1
-git push --tags
+git tag -a v1.6.13 -m "LanDrop v1.6.13"
+git push origin v1.6.13
 ```
 
-GitHub Actions builds the Windows installer and Android APK, creates a signed release with update metadata for the auto-updater.
+The release workflow accepts stable `vMAJOR.MINOR.PATCH` tags, verifies the versions
+and source, creates a draft, serializes desktop packaging so updater metadata cannot
+race, validates the updater asset set, publishes SHA-256 checksums, and publishes
+only after all required jobs succeed. Configure a protected GitHub `release`
+environment with required reviewers before using it.
+
+Android publishing is disabled by default after the signing-key incident. It runs
+only when the repository variable `ENABLE_ANDROID_RELEASE` is exactly `true`, after
+the identity migration is complete. Signing and updater credentials must be stored
+as environment secrets in the protected GitHub `release` environment, not as
+repository-level secrets; see
+[`android/signing/README.md`](android/signing/README.md).
+
+## Security
+
+The Android keystore previously committed to this public repository is compromised.
+It was removed from the current tree, but remains recoverable from Git history and
+must never be used again. Do not publish another Android update until the application
+identity and user migration plan have been chosen.
+
+The LAN protocol also does not yet provide cryptographic authentication or encryption.
+There is no evidence from this code audit that either issue has been exploited, but
+both are trust-boundary defects, not cosmetic hardening tasks.
+
+Read [SECURITY.md](SECURITY.md) and the
+[July 2026 technical audit](documentation/technical-audit-2026-07.md) for the incident
+response and modernization roadmap.
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -16,10 +16,10 @@
 
   const app = getAppState();
   const device = $derived(app.activeDevice);
-  const hasLiveDevices = $derived(app.onlineDevices.length > 0);
+  const hasKnownDevices = $derived(app.devices.length > 0);
 </script>
 
-{#if !hasLiveDevices}
+{#if !hasKnownDevices}
   <div class="welcome-wrapper">
     <div class="welcome-card">
       <div class="welcome-icon-ring">

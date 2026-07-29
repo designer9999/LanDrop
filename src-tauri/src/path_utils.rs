@@ -19,8 +19,7 @@ pub(crate) fn sanitize_file_name(name: &str) -> String {
     let normalized = name.replace('\\', "/");
     let file_name = normalized
         .split('/')
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .unwrap_or("file");
     let cleaned = sanitize_component(file_name);
     if cleaned.is_empty() {

@@ -888,8 +888,13 @@ pub async fn open_file(path: String, app: tauri::AppHandle) -> Result<(), String
 pub async fn open_url(url: String, app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
 
+    let parsed = tauri::Url::parse(&url).map_err(|_| "open_url: invalid URL".to_string())?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") {
+        return Err("open_url: only https://github.com links are allowed".to_string());
+    }
+
     app.opener()
-        .open_url(url, None::<&str>)
+        .open_url(parsed, None::<&str>)
         .map_err(|e| format!("open_url: {e}"))
 }
 

@@ -35,7 +35,7 @@
   let editingDevice = $state<import("$lib/state/app-state.svelte").DiscoveredDevice | null>(null);
   let persistedStateReady = $state(false);
   let receiveSettingsReady = $state(false);
-  let persistedPeerFolders = $state<Record<string, string>>({});
+  let persistedPeerFolders: Record<string, string> = {};
   let transferRateBps = $state<number | null>(null);
   let transferEtaSeconds = $state<number | null>(null);
   let lastProgressSample = $state<{ bytes: number; at: number; direction: "send" | "receive" } | null>(null);
@@ -177,16 +177,26 @@
     if (peerFolders === previousPeerFolderState) return;
     previousPeerFolderState = peerFolders;
 
+    const nextPersistedPeerFolders = { ...persistedPeerFolders };
     for (const device of app.devices) {
-      setPeerOutFolder(device.id, device.outFolder ?? "");
+      const folder = device.outFolder ?? "";
+      nextPersistedPeerFolders[device.id] = folder;
+      setPeerOutFolder(device.id, folder).catch(() => {});
     }
+    persistedPeerFolders = nextPersistedPeerFolders;
   });
 
   onMount(() => {
     let unlisteners: Array<() => void> = [];
+    let disposed = false;
 
-    (async () => {
+    function cleanupListeners() {
+      for (const unlisten of unlisteners.splice(0)) unlisten();
+    }
+
+    void (async () => {
       const persistedState = await loadPersistedAppState().catch(() => null);
+      if (disposed) return;
       if (persistedState) {
         app.hydratePersistedState(persistedState);
       } else {
@@ -201,11 +211,13 @@
       persistedStateReady = true;
 
       const status = await getStatus();
+      if (disposed) return;
       app.localIp = status.local_ip ?? "unknown";
       if (status.app_version) appVersion = status.app_version;
 
       try {
         const savedFolders = await getReceiveFolderSettings();
+        if (disposed) return;
         persistedPeerFolders = savedFolders.peer_folders ?? {};
 
         const savedDefaultFolder = savedFolders.default_out_folder?.trim() ?? "";
@@ -232,11 +244,8 @@
         document.body.classList.add("mica-active");
       }
 
-      // Start mDNS discovery — zero config, no passwords
-      await startLanService();
-      await repairStoredMessagePaths();
-
-      unlisteners = await Promise.all([
+      // Register listeners before discovery starts so initial peer events cannot be missed.
+      const listenerResults = await Promise.allSettled([
         onLanLog((level, text) => {
           const mapped = level === "success" ? "success" : level === "error" ? "error" : level === "warn" ? "warn" : "info";
           app.addLog(mapped as "info" | "warn" | "error" | "success", text);
@@ -335,19 +344,53 @@
               }
             }
             lastProgressSample = { bytes: completedBytes, at: now, direction: progress.direction };
-          } else if (progress.phase === "done") {
+          } else if (progress.phase === "done" || progress.phase === "error") {
             lastProgressSample = null;
             transferRateBps = null;
             transferEtaSeconds = null;
           }
-          transferProgress = progress.phase === "done" ? null : progress;
+          const terminal = progress.phase === "done" || progress.phase === "error";
+          if (!terminal) {
+            transferProgress = progress;
+          } else if (!transferProgress || transferProgress.direction === progress.direction) {
+            transferProgress = null;
+          }
         }),
       ]);
 
-      await setupHotkeys();
-    })();
+      const registeredListeners = listenerResults.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : []
+      );
+      if (disposed) {
+        registeredListeners.forEach((unlisten) => unlisten());
+        return;
+      }
+      unlisteners.push(...registeredListeners);
 
-    return () => { unlisteners.forEach(fn => fn()); };
+      const failedListener = listenerResults.find((result) => result.status === "rejected");
+      if (failedListener?.status === "rejected") throw failedListener.reason;
+
+      // Start mDNS discovery only after every frontend listener is ready.
+      await startLanService();
+      if (disposed) return;
+
+      await repairStoredMessagePaths().catch((error) => {
+        app.addLog("warn", `Could not repair stored message paths: ${error}`);
+      });
+      if (disposed) return;
+
+      await setupHotkeys();
+    })().catch((error) => {
+      if (disposed) return;
+      cleanupListeners();
+      app.addLog("error", `Application startup failed: ${error}`);
+      showSnackbar("LanDrop could not start. Check the debug log and try again.");
+    });
+
+    return () => {
+      disposed = true;
+      cleanupListeners();
+    };
   });
 
   // ── Global hotkeys ──
@@ -399,7 +442,7 @@
     if (!app.hasFiles || app.transferActive) return;
     const device = app.activeDevice;
     if (!device) { showSnackbar("No device selected"); return; }
-    if (!device.online && !device.ip.trim()) { showSnackbar("Device is offline"); return; }
+    if (!device.online) { showSnackbar("Device is offline"); return; }
 
     const filesCopy = [...app.files];
     const pathsCopy = [...app.filePaths];
@@ -424,6 +467,9 @@
         }));
         app.addMessage({ peerId: device.id, direction: "sent", text: "", attachments });
         app.clearFiles();
+      } else {
+        showSnackbar(`Send failed — ${device.alias} did not accept the transfer`);
+        app.addLog("warn", `File transfer to ${device.alias} was not accepted`);
       }
     } catch (e) {
       showSnackbar("Send failed — " + e);
@@ -439,22 +485,39 @@
     if (!app.sendTextContent.trim() || app.transferActive) return;
     const device = app.activeDevice;
     if (!device) { showSnackbar("No device selected"); return; }
-    const textToSend = app.sendTextContent.trim();
-    app.sendTextContent = "";
-    if (!device.online && !device.ip.trim()) {
-      app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
-      showSnackbar("Device is offline — message saved locally");
+    if (!device.online) {
+      showSnackbar("Device is offline");
       return;
     }
+
+    const textDraft = app.sendTextContent;
+    const textToSend = textDraft.trim();
+    app.sendTextContent = "";
+
+    function restoreText() {
+      app.sendTextContent = app.sendTextContent.trim()
+        ? `${textDraft}\n${app.sendTextContent}`
+        : textDraft;
+    }
+
+    app.transferActive = true;
     try {
       const sent = await lanSendText(device.id, textToSend, device.ip);
       if (sent) {
         app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
         app.addActivity({ peerId: device.id, direction: "sent", type: "text", items: [], success: true });
+      } else {
+        restoreText();
+        showSnackbar(`Send failed — ${device.alias} did not accept the message`);
+        app.addLog("warn", `Message to ${device.alias} was not accepted`);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
+      restoreText();
       app.markDeviceOffline(device.id);
-      showSnackbar(`Send failed — ${e?.message ?? e ?? "device unreachable"}`);
+      const detail = e instanceof Error ? e.message : String(e ?? "device unreachable");
+      showSnackbar(`Send failed — ${detail}`);
+    } finally {
+      app.transferActive = false;
     }
   }
 

@@ -15,7 +15,9 @@
   let { onedit }: Props = $props();
 
   const app = getAppState();
-  const visibleDevices = $derived(app.onlineDevices);
+  const visibleDevices = $derived(
+    [...app.devices].sort((a, b) => Number(b.online) - Number(a.online))
+  );
 
   let scrollEl: HTMLDivElement | undefined = $state();
   let canScrollLeft = $state(false);

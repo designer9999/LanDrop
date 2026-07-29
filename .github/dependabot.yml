@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      tauri-javascript:
+        patterns:
+          - "@tauri-apps/*"
+      frontend:
+        patterns:
+          - "@sveltejs/*"
+          - "@tailwindcss/*"
+          - "svelte"
+          - "tailwindcss"
+          - "vite"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      tauri-rust:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: gradle
+    directory: /src-tauri/gen/android
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

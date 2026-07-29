@@ -26,7 +26,11 @@
   let composerEl: HTMLTextAreaElement | undefined = $state();
   let fabMenuOpen = $state(false);
 
-  const canSend = $derived(!app.transferActive && (app.hasFiles || !!app.sendTextContent.trim()));
+  const canSend = $derived(
+    app.activeDeviceOnline
+      && !app.transferActive
+      && (app.hasFiles || !!app.sendTextContent.trim())
+  );
   const isMediaFile = (type: string) => isImage(type) || isVideo(type);
   const imageFiles = $derived(app.files.filter(f => f.info && isMediaFile(f.info.type)));
   const otherFiles = $derived(app.files.filter(f => !f.info || !isMediaFile(f.info.type)));

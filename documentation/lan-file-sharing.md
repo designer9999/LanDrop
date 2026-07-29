@@ -4,13 +4,20 @@ LanDrop uses local-only discovery and on-demand TCP transfer. It must keep
 working when multicast is unreliable, when Windows has virtual adapters, and
 when VPN software such as Mullvad owns the default route.
 
+> [!WARNING]
+> This documents the current legacy v1 behavior, not a security boundary. Device
+> UUIDs are public discovery identifiers, the `/24` test is only a routing
+> heuristic, and transfers are not authenticated or encrypted. See
+> `technical-audit-2026-07.md` for the replacement plan.
+
 ## Core Rules
 
-- Only same-LAN IPv4 peers are accepted. With a local IP of `192.168.0.98`,
-  valid peers must be on `192.168.0.0/24`; VPN, WSL, Hyper-V, Docker,
-  Bluetooth, link-local, loopback, and other virtual addresses are ignored.
-- mDNS is treated as a hint, not the source of truth. The app verifies peers
-  through the TCP UUID handshake before using a recovered IP.
+- The current implementation accepts only IPv4 peers whose first three octets
+  match. With a local IP of `192.168.0.98`, it assumes `192.168.0.0/24`.
+  This is inaccurate on other subnet sizes and must be replaced with real
+  interface/netmask information.
+- mDNS is treated as a hint. The TCP UUID handshake identifies the advertised
+  peer but does not authenticate it.
 - Sending is on-demand. The TCP connection opens for one text/file transfer and
   closes after `Done`.
 - The app must never get stuck on a stale peer IP. If a stored or UI-provided IP
@@ -68,8 +75,8 @@ Each probe performs only the LanDrop UUID handshake:
 3. Read the remote 16-byte UUID.
 4. If the UUID matches the target peer, store that IP and emit discovery.
 
-This makes send-back recover even when mDNS disappears, when the peer changed
-IP, or when a VPN adapter polluted discovery.
+This makes send-back recover even when mDNS disappears or the peer changed IP.
+Because UUIDs are public, it does not protect against a malicious LAN host.
 
 ## Send Path
 
@@ -86,11 +93,11 @@ If all candidates fail:
 
 ## Receive Path
 
-Incoming TCP sessions are rejected unless the remote address is same-LAN IPv4.
-This prevents VPN, WSL, Hyper-V, and other non-LAN interfaces from rehydrating a
-peer with a bad send-back address.
+Incoming TCP sessions are rejected unless the remote address passes the current
+same-`/24` heuristic. This may filter some virtual interfaces, but it neither
+models arbitrary subnet boundaries nor proves that a host is trusted.
 
-After the incoming UUID handshake succeeds, the sender is registered or updated
+After the incoming UUID exchange succeeds, the sender is registered or updated
 in `discovered_peers`, so a device that can send to us can also be sent back to
 using the exact same LAN source address.
 

@@ -81,15 +81,22 @@ export async function lanSendFiles(
   onPrepared?: (files: PreparedSendPath[]) => void,
 ): Promise<boolean> {
   // On Android, resolve content:// URIs to real files before sending
-  const prepared = isMobile()
+  const mobile = isMobile();
+  const prepared = mobile
     ? await prepareSendPaths(paths)
     : paths.map((path) => ({ originalPath: path, sendPath: path, historyPath: path }));
   onPrepared?.(prepared);
 
-  const result = await invoke<boolean>("lan_send_files", { peerId, paths: prepared.map((file) => file.sendPath), peerIp });
-  // Clean up temp files after send
-  if (isMobile()) invoke("cleanup_send_cache").catch(() => {});
-  return result;
+  try {
+    return await invoke<boolean>("lan_send_files", {
+      peerId,
+      paths: prepared.map((file) => file.sendPath),
+      peerIp,
+    });
+  } finally {
+    // Always remove temporary Android send copies, including after failed sends.
+    if (mobile) await invoke("cleanup_send_cache").catch(() => {});
+  }
 }
 
 export async function setDefaultOutFolder(folder: string): Promise<void> {
@@ -348,7 +355,7 @@ export async function onLanFilesReceived(
 
 export interface TransferProgress {
   direction: "send" | "receive";
-  phase: "start" | "transferring" | "done";
+  phase: "start" | "transferring" | "done" | "error";
   total_bytes?: number;
   total_files?: number;
   sent_bytes?: number;

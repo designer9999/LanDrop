@@ -10,7 +10,7 @@
   import type { MessageEntry } from "$lib/state/app-state.svelte";
   import type { FilePreview } from "$lib/api/bridge";
   import { isImage } from "$lib/utils/file-utils";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   import MessageBubble from "./MessageBubble.svelte";
   import Composer from "./Composer.svelte";
@@ -32,28 +32,41 @@
   // ── Thumbnail cache (shared across messages + composer) ──
   let thumbCache = $state<Record<string, string>>({});
   const _thumbLoading = new Set<string>();
-  const MAX_THUMB_CACHE = 200;
+  const MAX_HISTORY_THUMBNAILS = 200;
+  let thumbnailCacheDisposed = false;
 
   function loadThumb(path: string) {
     if (path in thumbCache || _thumbLoading.has(path)) return;
     _thumbLoading.add(path);
     getThumbnail(path).then(uri => {
       _thumbLoading.delete(path);
-      const keys = Object.keys(thumbCache);
-      if (keys.length >= MAX_THUMB_CACHE) {
-        const pruned = { ...thumbCache };
-        const removeCount = keys.length - MAX_THUMB_CACHE + 1;
-        for (const k of keys.slice(0, removeCount)) {
-          revokeBlobUrl(pruned[k]);
-          delete pruned[k];
-        }
-        thumbCache = pruned;
+      if (thumbnailCacheDisposed) {
+        if (uri) revokeBlobUrl(uri);
+        return;
       }
       thumbCache = { ...thumbCache, [path]: uri ?? "" };
     }).catch(() => {
       _thumbLoading.delete(path);
+      if (thumbnailCacheDisposed) return;
       thumbCache = { ...thumbCache, [path]: "" };
     });
+  }
+
+  function newestHistoryThumbnailPaths(messages: MessageEntry[]): string[] {
+    const paths = new Set<string>();
+    for (let index = messages.length - 1; index >= 0 && paths.size < MAX_HISTORY_THUMBNAILS; index -= 1) {
+      for (const attachment of messages[index].attachments ?? []) {
+        if (attachment.type === "image" && attachment.path) paths.add(attachment.path);
+        if (attachment.type === "folder") {
+          for (const child of attachment.children ?? []) {
+            if (child.type === "image" && child.path) paths.add(child.path);
+            if (paths.size >= MAX_HISTORY_THUMBNAILS) break;
+          }
+        }
+        if (paths.size >= MAX_HISTORY_THUMBNAILS) break;
+      }
+    }
+    return [...paths];
   }
 
   // ── Messages state ──
@@ -129,21 +142,25 @@
     wasAtBottom = scrollTop + clientHeight >= scrollHeight - 60;
   }
 
-  // ── Load thumbnails for visible messages + composer files ──
+  // ── Load thumbnails for recent history + all composer files ──
   $effect(() => {
-    for (const msg of displayMessages) {
-      if (!msg.attachments) continue;
-      for (const att of msg.attachments) {
-        if (att.type === "image" && att.path) loadThumb(att.path);
-        if (att.type === "folder" && att.children?.length) {
-          for (const child of att.children) {
-            if (child.type === "image" && child.path) loadThumb(child.path);
-          }
-        }
-      }
-    }
+    const candidates = new Set(newestHistoryThumbnailPaths(currentPeerMessages));
     for (const file of app.files) {
-      if (file.info && isImage(file.info.type)) loadThumb(file.path);
+      if (file.info && isImage(file.info.type)) candidates.add(file.path);
+    }
+
+    const stalePaths = Object.keys(thumbCache).filter((path) => !candidates.has(path));
+    if (stalePaths.length > 0) {
+      const pruned = { ...thumbCache };
+      for (const path of stalePaths) {
+        revokeBlobUrl(pruned[path]);
+        delete pruned[path];
+      }
+      thumbCache = pruned;
+    }
+
+    for (const path of candidates) {
+      loadThumb(path);
     }
   });
 
@@ -264,7 +281,9 @@
   }
 
   function deleteMessagesOlderThan(daysOld: number) {
-    const deletedMessages = app.deleteOldMessages(daysOld);
+    const peerId = app.activeDevice?.id;
+    if (!peerId) return;
+    const deletedMessages = app.deleteOldMessages(peerId, daysOld);
     deleteHistoryFiles(collectAttachmentPaths(deletedMessages));
   }
 
@@ -314,13 +333,32 @@
   // ── Drag-drop via Tauri native API ──
   onMount(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     onDragDrop(
       (paths) => { dragOver = false; addPaths(paths); },
       () => { dragOver = true; },
       () => { dragOver = false; },
-    ).then(fn => { unlisten = fn; });
+    ).then(fn => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
 
-    return () => { unlisten?.(); };
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
+  onDestroy(() => {
+    thumbnailCacheDisposed = true;
+    clearTimeout(copyTimer);
+    for (const url of Object.values(thumbCache)) {
+      revokeBlobUrl(url);
+    }
+    if (lightboxSrc && lightboxSrc !== thumbCache[lightboxPath]) {
+      revokeBlobUrl(lightboxSrc);
+    }
+    _thumbLoading.clear();
   });
 </script>
 

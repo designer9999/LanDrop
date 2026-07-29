@@ -18,6 +18,12 @@ use discovery::DiscoveredPeer;
 use identity::normalize_uuid;
 use identity::DeviceIdentity;
 
+fn peer_uuid_bytes(peer_id: &str) -> Result<[u8; 16], String> {
+    uuid::Uuid::parse_str(peer_id.trim())
+        .map(|uuid| *uuid.as_bytes())
+        .map_err(|_| format!("Invalid peer ID: {peer_id}"))
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct PersistedFolderSettings {
     default_out_folder: String,
@@ -133,6 +139,7 @@ impl LanService {
         peer_ip_hint: Option<&str>,
         text: &str,
     ) -> Result<bool, String> {
+        let expected_peer_uuid = peer_uuid_bytes(peer_id)?;
         let mut peer_ips = self.resolve_peer_ips(peer_id, peer_ip_hint).await;
         if peer_ips.is_empty() {
             if let Some(ip) = self.find_peer_on_lan(peer_id).await {
@@ -149,7 +156,7 @@ impl LanService {
         for ip in &peer_ips {
             // Retry once on failure (TCP listener may have recovered)
             for attempt in 0..2 {
-                match transfer::send_text_to_peer(ip, &uuid, text).await {
+                match transfer::send_text_to_peer(ip, &uuid, &expected_peer_uuid, text).await {
                     Ok(()) => {
                         self.remember_peer_ip(peer_id, ip).await;
                         return Ok(true);
@@ -174,7 +181,7 @@ impl LanService {
 
         if let Some(ip) = self.find_peer_on_lan(peer_id).await {
             if !peer_ips.iter().any(|existing| existing == &ip) {
-                match transfer::send_text_to_peer(&ip, &uuid, text).await {
+                match transfer::send_text_to_peer(&ip, &uuid, &expected_peer_uuid, text).await {
                     Ok(()) => {
                         self.remember_peer_ip(peer_id, &ip).await;
                         return Ok(true);
@@ -198,6 +205,7 @@ impl LanService {
         peer_ip_hint: Option<&str>,
         paths: &[String],
     ) -> Result<bool, String> {
+        let expected_peer_uuid = peer_uuid_bytes(peer_id)?;
         let mut peer_ips = self.resolve_peer_ips(peer_id, peer_ip_hint).await;
         if peer_ips.is_empty() {
             if let Some(ip) = self.find_peer_on_lan(peer_id).await {
@@ -212,7 +220,15 @@ impl LanService {
         let mut last_err = String::new();
 
         for ip in &peer_ips {
-            match transfer::send_files_to_peer(ip, &uuid, paths, Some(&self.handle)).await {
+            match transfer::send_files_to_peer(
+                ip,
+                &uuid,
+                &expected_peer_uuid,
+                paths,
+                Some(&self.handle),
+            )
+            .await
+            {
                 Ok(()) => {
                     self.remember_peer_ip(peer_id, ip).await;
                     return Ok(true);
@@ -233,7 +249,15 @@ impl LanService {
 
         if let Some(ip) = self.find_peer_on_lan(peer_id).await {
             if !peer_ips.iter().any(|existing| existing == &ip) {
-                match transfer::send_files_to_peer(&ip, &uuid, paths, Some(&self.handle)).await {
+                match transfer::send_files_to_peer(
+                    &ip,
+                    &uuid,
+                    &expected_peer_uuid,
+                    paths,
+                    Some(&self.handle),
+                )
+                .await
+                {
                     Ok(()) => {
                         self.remember_peer_ip(peer_id, &ip).await;
                         return Ok(true);
@@ -243,6 +267,13 @@ impl LanService {
             }
         }
 
+        let _ = self.handle.emit(
+            "lan_transfer_progress",
+            serde_json::json!({
+                "direction": "send",
+                "phase": "error",
+            }),
+        );
         Err(format!(
             "Failed to send to peer {} via {}: {}",
             peer_id,

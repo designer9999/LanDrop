@@ -5,7 +5,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import { showInExplorer, copyToClipboard } from "$lib/api/bridge";
   import type { FilePreview } from "$lib/api/bridge";
-  import hljs from "highlight.js";
+  import hljs from "highlight.js/lib/common";
 
   interface Props {
     preview: FilePreview | null;
@@ -25,11 +25,11 @@
     js: "javascript", ts: "typescript", jsx: "javascript", tsx: "typescript",
     py: "python", rb: "ruby", rs: "rust", go: "go", java: "java",
     kt: "kotlin", swift: "swift", cs: "csharp", cpp: "cpp", c: "c", h: "c",
-    php: "php", sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell",
+    php: "php", sh: "bash", bash: "bash", zsh: "bash", ps1: "shell",
     json: "json", yaml: "yaml", yml: "yaml", toml: "ini", xml: "xml",
     html: "xml", htm: "xml", css: "css", scss: "scss", less: "less",
     sql: "sql", md: "markdown", txt: "", csv: "", log: "",
-    svelte: "xml", vue: "xml", dockerfile: "dockerfile",
+    svelte: "xml", vue: "xml", dockerfile: "bash",
     makefile: "makefile", gitignore: "", env: "bash",
   };
 
