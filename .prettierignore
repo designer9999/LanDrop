@@ -1,0 +1,9 @@
+dist/
+node_modules/
+package-lock.json
+src-tauri/target/
+src-tauri/gen/
+android/
+m3 Expressive/
+*.md
+.github/

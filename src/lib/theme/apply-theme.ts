@@ -7,4 +7,14 @@ export function applyThemeToDOM(tokens: M3ColorTokens): void {
   for (const [prop, value] of Object.entries(vars)) {
     root.style.setProperty(prop, value);
   }
+  // Cache the surface pair for the pre-paint boot script (public/boot-theme.js)
+  // so the next launch's first frame matches this theme.
+  try {
+    localStorage.setItem(
+      "landrop-theme-boot",
+      JSON.stringify({ surface: tokens.surface, onSurface: tokens.onSurface }),
+    );
+  } catch {
+    /* non-fatal */
+  }
 }

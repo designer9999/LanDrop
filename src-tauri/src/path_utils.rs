@@ -70,6 +70,33 @@ mod tests {
     }
 
     #[test]
+    fn sanitizes_hostile_relative_transfer_paths() {
+        // Drive-relative Windows paths lose the drive prefix.
+        assert_eq!(
+            sanitize_relative_path(r"C:temp\notes.txt"),
+            "temp/notes.txt"
+        );
+        // UNC paths keep only the sanitized components.
+        assert_eq!(
+            sanitize_relative_path(r"\\server\share\file.txt"),
+            "server/share/file.txt"
+        );
+        // Trailing dots/spaces (invalid on Windows) are trimmed away.
+        assert_eq!(sanitize_relative_path("folder/name..."), "folder/name");
+        assert_eq!(sanitize_relative_path("folder/name . "), "folder/name");
+        // A component that sanitizes to nothing is dropped, not left empty.
+        assert_eq!(sanitize_relative_path("a/.../b.txt"), "a/b.txt");
+        // Home-relative and absolute prefixes never escape.
+        assert_eq!(sanitize_relative_path("~/secret.txt"), "secret.txt");
+        assert_eq!(sanitize_relative_path("/etc/passwd"), "etc/passwd");
+        // Long components survive (byte length is bounded by the frame limit).
+        let long = "x".repeat(300);
+        assert_eq!(sanitize_relative_path(&long), long);
+        // Everything stripped: falls back to a safe file name.
+        assert_eq!(sanitize_relative_path("../../"), "file");
+    }
+
+    #[test]
     fn sanitizes_relative_transfer_paths() {
         assert_eq!(
             sanitize_relative_path(r"C:\drop\folder\a:b.txt"),

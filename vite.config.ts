@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
@@ -19,5 +20,14 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
+  },
+  // Track the WebView2 / WebKitGTK floor rather than the bundler default.
+  build: {
+    target: ["es2022", "chrome105", "safari13"],
+  },
+  test: {
+    // The suite covers the pure layer only (no DOM, no Tauri runtime).
+    environment: "node",
+    include: ["src/**/*.test.ts"],
   },
 });

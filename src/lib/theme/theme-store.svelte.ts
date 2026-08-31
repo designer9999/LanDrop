@@ -20,7 +20,13 @@ function loadConfig(): ThemeConfig {
       return cfg;
     }
   } catch {}
-  return { seedColor: "#6750A4", variant: "expressive", isDark: true, mica: false, micaOpacity: 70 };
+  return {
+    seedColor: "#6750A4",
+    variant: "expressive",
+    isDark: true,
+    mica: false,
+    micaOpacity: 70,
+  };
 }
 
 function saveConfig(cfg: ThemeConfig) {
@@ -40,7 +46,13 @@ class ThemeState {
   tokens: M3ColorTokens = $derived(generateColorTokens(this.seedColor, this.variant, this.isDark));
 
   persist() {
-    saveConfig({ seedColor: this.seedColor, variant: this.variant, isDark: this.isDark, mica: this.mica, micaOpacity: this.micaOpacity });
+    saveConfig({
+      seedColor: this.seedColor,
+      variant: this.variant,
+      isDark: this.isDark,
+      mica: this.mica,
+      micaOpacity: this.micaOpacity,
+    });
   }
 }
 

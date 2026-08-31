@@ -9,7 +9,19 @@
   import Slider from "$lib/ui/Slider.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickSaveFolder, copyToClipboard, setMica, getDeviceIdentity, setDeviceAlias, isMobile, getPlatformInfo, openUrl, type PlatformInfo } from "$lib/api/bridge";
+  import {
+    pickSaveFolder,
+    copyToClipboard,
+    setMica,
+    getDeviceIdentity,
+    setDeviceAlias,
+    isMobile,
+    getPlatformInfo,
+    openUrl,
+    setDefaultOutFolder,
+    setReceiveSortByDate,
+    type PlatformInfo,
+  } from "$lib/api/bridge";
   import { playReceiveSound } from "$lib/utils/notification-sound";
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { VARIANT_INFO, PRESET_COLORS, type SchemeVariant } from "$lib/theme/m3-color";
@@ -31,9 +43,11 @@
   let debugOpen = $state(false);
   let sortingOpen = $state(false);
   let debugEl: HTMLDivElement | undefined = $state();
-  let updateStatus = $state<"idle" | "checking" | "available" | "downloading" | "uptodate" | "error">("idle");
-  let updateError = $state("");
-  const androidApkUrl = "https://github.com/designer9999/LanDrop/releases/latest/download/landrop-android-arm64-release.apk";
+  let updateStatus = $state<
+    "idle" | "checking" | "available" | "downloading" | "uptodate" | "error"
+  >("idle");
+  const androidApkUrl =
+    "https://github.com/designer9999/LanDrop/releases/latest/download/landrop-android-arm64-release.apk";
   const androidReleaseUrl = "https://github.com/designer9999/LanDrop/releases/latest";
 
   // Device identity
@@ -58,10 +72,10 @@
     const trimmed = deviceAlias.trim();
     if (!trimmed) return;
     try {
-      await setDeviceAlias(trimmed);
-      deviceAlias = trimmed;
+      const applied = await setDeviceAlias(trimmed);
+      deviceAlias = applied || trimmed;
       aliasEditing = false;
-      onsnackbar?.("Device name updated — restart to broadcast new name");
+      onsnackbar?.("Device name updated — broadcasting new name");
     } catch {
       onsnackbar?.("Failed to update device name");
     }
@@ -79,7 +93,6 @@
       return;
     }
     updateStatus = "checking";
-    updateError = "";
     try {
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
@@ -94,19 +107,29 @@
       } else {
         updateStatus = "uptodate";
         onsnackbar?.("You're on the latest version");
-        setTimeout(() => { updateStatus = "idle"; }, 3000);
+        setTimeout(() => {
+          updateStatus = "idle";
+        }, 3000);
       }
     } catch (e) {
+      // 2.11 surfaces Windows installer-launch failures from downloadAndInstall,
+      // so name the phase that actually failed instead of always "check".
+      const failedWhileInstalling = updateStatus === "downloading";
       updateStatus = "error";
-      updateError = String(e);
-      onsnackbar?.(`Update check failed: ${String(e)}`);
-      setTimeout(() => { updateStatus = "idle"; }, 5000);
+      onsnackbar?.(
+        failedWhileInstalling
+          ? `Update install failed: ${String(e)}`
+          : `Update check failed: ${String(e)}`,
+      );
+      setTimeout(() => {
+        updateStatus = "idle";
+      }, 5000);
     }
   }
 
-  // Hex input
-  let hexInput = $state(theme.seedColor.replace("#", ""));
-  $effect(() => { hexInput = theme.seedColor.replace("#", ""); });
+  // Hex input — writable $derived: follows the theme seed, but accepts
+  // in-progress local edits until the seed changes again.
+  let hexInput = $derived(theme.seedColor.replace("#", ""));
 
   function onHexInput(e: Event) {
     const val = (e.target as HTMLInputElement).value.replace(/[^0-9a-fA-F]/g, "").slice(0, 6);
@@ -175,13 +198,12 @@
 </script>
 
 <div class="flex flex-col gap-4">
-
   <!-- Device Identity -->
   <Card variant="elevated">
     <button
       class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
              cursor-pointer border-none bg-transparent p-0 -my-0.5"
-      onclick={() => deviceOpen = !deviceOpen}
+      onclick={() => (deviceOpen = !deviceOpen)}
     >
       <span class="text-primary"><Icon name="devices" size={20} /></span>
       This Device
@@ -194,7 +216,9 @@
     {#if deviceOpen}
       <div class="flex flex-col gap-4 mt-4 section-enter">
         <div class="flex items-center gap-3 p-4 rounded-xl bg-surface-container">
-          <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary text-on-primary">
+          <div
+            class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary text-on-primary"
+          >
             <Icon name="computer" size={20} />
           </div>
           <div class="flex-1 min-w-0">
@@ -203,7 +227,10 @@
                 <input
                   class="flex-1 bg-transparent border-b border-primary outline-none text-sm text-on-surface py-1"
                   bind:value={deviceAlias}
-                  onkeydown={(e) => { if (e.key === "Enter") saveAlias(); if (e.key === "Escape") aliasEditing = false; }}
+                  onkeydown={(e) => {
+                    if (e.key === "Enter") saveAlias();
+                    if (e.key === "Escape") aliasEditing = false;
+                  }}
                 />
                 <button
                   class="w-7 h-7 inline-flex items-center justify-center rounded-full
@@ -217,19 +244,21 @@
               <button
                 class="flex items-center gap-1 text-sm text-on-surface font-medium cursor-pointer
                        bg-transparent border-none p-0 hover:text-primary"
-                onclick={() => aliasEditing = true}
+                onclick={() => (aliasEditing = true)}
                 title="Click to rename"
               >
                 {deviceAlias || "Loading..."}
                 <Icon name="edit" size={14} />
               </button>
             {/if}
-            <div class="text-xs text-on-surface-variant font-mono mt-1 truncate opacity-50">{deviceId}</div>
+            <div class="text-xs text-on-surface-variant font-mono mt-1 truncate opacity-50">
+              {deviceId}
+            </div>
           </div>
         </div>
 
         <div class="text-xs text-on-surface-variant">
-          Other devices on your network will see this name. Changes take effect after restart.
+          Other devices on your network will see this name. Changes are broadcast right away.
         </div>
       </div>
     {/if}
@@ -240,7 +269,7 @@
     <button
       class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
              cursor-pointer border-none bg-transparent p-0 -my-0.5"
-      onclick={() => themeOpen = !themeOpen}
+      onclick={() => (themeOpen = !themeOpen)}
     >
       <span class="text-primary"><Icon name="palette" size={20} /></span>
       Theme
@@ -252,14 +281,17 @@
 
     {#if themeOpen}
       <div class="flex flex-col gap-6 mt-4 section-enter">
-
         <!-- Dark / Light toggle -->
         <div class="theme-row" class:opacity-40={theme.mica}>
           <Icon name="light_mode" size={20} />
           <Switch checked={theme.isDark} disabled={theme.mica} onchange={toggleDark} />
           <Icon name="dark_mode" size={20} />
           <span class="text-xs text-on-surface-variant">
-            {theme.mica ? "Dark mode (required for transparency)" : theme.isDark ? "Dark mode" : "Light mode"}
+            {theme.mica
+              ? "Dark mode (required for transparency)"
+              : theme.isDark
+                ? "Dark mode"
+                : "Light mode"}
           </span>
         </div>
 
@@ -267,7 +299,9 @@
         <div class="flex items-center justify-between py-1" class:opacity-40={!theme.isDark}>
           <div>
             <div class="text-sm text-on-surface">Transparency</div>
-            <div class="text-xs text-on-surface-variant">{!theme.isDark ? "Requires dark mode" : "Blurred translucent background"}</div>
+            <div class="text-xs text-on-surface-variant">
+              {!theme.isDark ? "Requires dark mode" : "Blurred translucent background"}
+            </div>
           </div>
           <Switch checked={theme.mica} disabled={!theme.isDark} onchange={toggleMica} />
         </div>
@@ -283,6 +317,7 @@
               min={0}
               max={100}
               step={1}
+              aria-label="Background transparency"
               bind:value={theme.micaOpacity}
               oninput={onOpacityChange}
             />
@@ -301,12 +336,7 @@
             />
             <div class="hex-input-wrap">
               <span class="hex-hash">#</span>
-              <input
-                value={hexInput}
-                oninput={onHexInput}
-                maxlength="6"
-                class="hex-input"
-              />
+              <input value={hexInput} oninput={onHexInput} maxlength="6" class="hex-input" />
             </div>
           </div>
           <div class="preset-grid">
@@ -338,7 +368,6 @@
             {/each}
           </div>
         </section>
-
       </div>
     {/if}
   </Card>
@@ -348,7 +377,7 @@
     <button
       class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
              cursor-pointer border-none bg-transparent p-0 -my-0.5"
-      onclick={() => receiveOpen = !receiveOpen}
+      onclick={() => (receiveOpen = !receiveOpen)}
     >
       <span class="text-primary"><Icon name="download" size={20} /></span>
       Receive settings
@@ -363,27 +392,45 @@
         <div>
           <p class="text-xs font-medium text-on-surface-variant mb-2">Default save folder</p>
           {#if app.receiveOptions.outFolder}
-            <div class="flex items-center gap-2 h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded-xs">
+            <div
+              class="flex items-center gap-2 h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded-xs"
+            >
               <span class="text-tertiary"><Icon name="folder" size={16} /></span>
-              <span class="flex-1 text-xs text-on-surface font-mono truncate">{app.receiveOptions.outFolder}</span>
+              <span class="flex-1 text-xs text-on-surface font-mono truncate"
+                >{app.receiveOptions.outFolder}</span
+              >
               <button
                 class="w-7 h-7 inline-flex items-center justify-center rounded-full
                        text-on-surface-variant hover:text-error cursor-pointer bg-transparent border-none"
-                onclick={() => app.updateReceiveOption("outFolder", undefined)}
+                onclick={() => {
+                  app.updateReceiveOption("outFolder", undefined);
+                  setDefaultOutFolder("").catch(() => {});
+                }}
               >
                 <Icon name="close" size={16} />
               </button>
             </div>
           {:else}
-            <Button variant="elevated" full onclick={async () => {
-              try {
-                const f = await pickSaveFolder();
-                if (f) app.updateReceiveOption("outFolder", f);
-                else onsnackbar?.("Folder picker dialog was cancelled or unavailable. On Linux Wayland, install xdg-desktop-portal-gtk or xdg-desktop-portal-hyprland.");
-              } catch (err: any) {
-                onsnackbar?.(`Folder picker failed: ${err?.message ?? err}`);
-              }
-            }}>
+            <Button
+              variant="elevated"
+              full
+              onclick={async () => {
+                try {
+                  const f = await pickSaveFolder();
+                  if (f) {
+                    app.updateReceiveOption("outFolder", f);
+                    await setDefaultOutFolder(f);
+                  } else
+                    onsnackbar?.(
+                      "Folder picker dialog was cancelled or unavailable. On Linux Wayland, install xdg-desktop-portal-gtk or xdg-desktop-portal-hyprland.",
+                    );
+                } catch (err: unknown) {
+                  onsnackbar?.(
+                    `Folder picker failed: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
+              }}
+            >
               <Icon name="create_new_folder" size={18} />
               Set save folder
             </Button>
@@ -408,12 +455,20 @@
         <div class="text-sm text-on-surface">Notification sounds</div>
         <div class="text-xs text-on-surface-variant">Play sound when files or messages arrive</div>
       </div>
-      <Switch checked={app.notificationsEnabled} onchange={(v) => { app.setNotifications(v); if (v) playReceiveSound(); }} />
+      <Switch
+        checked={app.notificationsEnabled}
+        onchange={(v) => {
+          app.setNotifications(v);
+          if (v) playReceiveSound();
+        }}
+      />
     </div>
     <div class="flex items-center justify-between py-1 mt-1">
       <div>
         <div class="text-sm text-on-surface">Pop up on receive</div>
-        <div class="text-xs text-on-surface-variant">Bring window to front when messages or files arrive</div>
+        <div class="text-xs text-on-surface-variant">
+          Bring window to front when messages or files arrive
+        </div>
       </div>
       <Switch checked={app.popOnReceive} onchange={(v) => app.setPopOnReceive(v)} />
     </div>
@@ -436,25 +491,32 @@
       <Switch checked={app.hotkeys.enabled} onchange={(v) => app.updateHotkeys({ enabled: v })} />
     </div>
     {#if platform && !platform.supports_global_hotkeys && app.hotkeys.enabled}
-      <div class="mt-2 p-2 rounded text-xs" style="background: color-mix(in srgb, var(--md-sys-color-tertiary) 15%, transparent); color: var(--md-sys-color-on-tertiary-container);">
-        <strong>Wayland note:</strong> global hotkeys are blocked by Wayland's security model. On Hyprland, add to <code>~/.config/hypr/hyprland.conf</code>:<br/>
-        <code style="font-size: 10px;">bind = , F3, exec, hyprctl dispatch focuswindow class:com.landrop.app</code>
+      <div
+        class="mt-2 p-2 rounded text-xs"
+        style="background: color-mix(in srgb, var(--md-sys-color-tertiary) 15%, transparent); color: var(--md-sys-color-on-tertiary-container);"
+      >
+        <strong>Wayland note:</strong> global hotkeys are blocked by Wayland's security model. On
+        Hyprland, add to <code>~/.config/hypr/hyprland.conf</code>:<br />
+        <code style="font-size: 10px;"
+          >bind = , F3, exec, hyprctl dispatch focuswindow class:com.landrop.app</code
+        >
       </div>
     {/if}
     {#if app.hotkeys.enabled}
       <div class="mt-3 flex items-center gap-3">
         <div class="flex-1">
           <div style="--tf-bg: var(--md-sys-color-surface-container-low)">
-          <TextField
-            label="Quick send shortcut"
-            value={app.hotkeys.quickSend}
-            placeholder="e.g. F3"
-            oninput={(e) => {
-              const val = (e.target as HTMLInputElement).value.toUpperCase();
-              app.updateHotkeys({ quickSend: val });
-            }}
-          />
-        </div></div>
+            <TextField
+              label="Quick send shortcut"
+              value={app.hotkeys.quickSend}
+              placeholder="e.g. F3"
+              oninput={(e) => {
+                const val = (e.target as HTMLInputElement).value.toUpperCase();
+                app.updateHotkeys({ quickSend: val });
+              }}
+            />
+          </div>
+        </div>
       </div>
       <div class="text-xs text-on-surface-variant mt-1 opacity-70">
         Press this key anywhere to open file picker and attach to current chat
@@ -467,7 +529,7 @@
     <button
       class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
              cursor-pointer border-none bg-transparent p-0 -my-0.5"
-      onclick={() => sortingOpen = !sortingOpen}
+      onclick={() => (sortingOpen = !sortingOpen)}
     >
       <span class="text-primary"><Icon name="folder_copy" size={20} /></span>
       Sorting
@@ -482,18 +544,29 @@
         <div class="flex items-center justify-between py-1">
           <div>
             <div class="text-sm text-on-surface">Date folders</div>
-            <div class="text-xs text-on-surface-variant">Create a new daily folder like <span class="font-mono">08.04.2026</span> inside your receive folder</div>
+            <div class="text-xs text-on-surface-variant">
+              Create a new daily folder like <span class="font-mono">08.04.2026</span> inside your receive
+              folder
+            </div>
           </div>
-          <Switch checked={app.receiveOptions.sortByDate ?? false} onchange={(v) => app.updateReceiveOption("sortByDate", v)} />
+          <Switch
+            checked={app.receiveOptions.sortByDate ?? false}
+            onchange={(v) => {
+              app.updateReceiveOption("sortByDate", v);
+              setReceiveSortByDate(v).catch(() => {});
+            }}
+          />
         </div>
 
         <div class="sorting-preview">
           <div class="sorting-preview-title">Example</div>
           <div class="sorting-preview-path">
-            {(app.receiveOptions.outFolder ?? "Your default save folder") + ((app.receiveOptions.sortByDate ?? false) ? "\\08.04.2026" : "")}
+            {(app.receiveOptions.outFolder ?? "Your default save folder") +
+              ((app.receiveOptions.sortByDate ?? false) ? "\\08.04.2026" : "")}
           </div>
           <div class="sorting-preview-note">
-            Incoming files will go to the selected receive folder first, then into the date folder when enabled.
+            Incoming files will go to the selected receive folder first, then into the date folder
+            when enabled.
           </div>
         </div>
       </div>
@@ -505,7 +578,7 @@
     <button
       class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
              cursor-pointer border-none bg-transparent p-0"
-      onclick={() => aboutOpen = !aboutOpen}
+      onclick={() => (aboutOpen = !aboutOpen)}
     >
       <span class="text-primary"><Icon name="info" size={20} /></span>
       About
@@ -518,7 +591,9 @@
     {#if aboutOpen}
       <div class="flex flex-col gap-3 mt-4 section-enter">
         <div class="flex items-center gap-3 p-4 rounded-xl bg-surface-container">
-          <div class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary text-on-primary">
+          <div
+            class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary text-on-primary"
+          >
             <Icon name="swap_horiz" size={20} />
           </div>
           <div class="flex-1">
@@ -527,15 +602,42 @@
           </div>
         </div>
 
-        <Button variant="elevated" full onclick={checkForUpdates} disabled={!isMobile() && (updateStatus === "checking" || updateStatus === "downloading")}>
-          <Icon name={isMobile() ? "download" : updateStatus === "uptodate" ? "check_circle" : updateStatus === "error" ? "error" : "system_update"} size={18} />
-          {isMobile() ? "Download latest Android APK" : updateStatus === "checking" ? "Checking..." : updateStatus === "downloading" ? "Downloading..." : updateStatus === "uptodate" ? "Up to date!" : updateStatus === "error" ? "Check failed" : "Check for updates"}
+        <Button
+          variant="elevated"
+          full
+          onclick={checkForUpdates}
+          disabled={!isMobile() && (updateStatus === "checking" || updateStatus === "downloading")}
+        >
+          <Icon
+            name={isMobile()
+              ? "download"
+              : updateStatus === "uptodate"
+                ? "check_circle"
+                : updateStatus === "error"
+                  ? "error"
+                  : "system_update"}
+            size={18}
+          />
+          {isMobile()
+            ? "Download latest Android APK"
+            : updateStatus === "checking"
+              ? "Checking..."
+              : updateStatus === "downloading"
+                ? "Downloading..."
+                : updateStatus === "uptodate"
+                  ? "Up to date!"
+                  : updateStatus === "error"
+                    ? "Check failed"
+                    : "Check for updates"}
         </Button>
 
         {#if isMobile()}
           <div class="android-update-help">
             <Icon name="install_mobile" size={16} />
-            <span>After download, open the APK from Downloads or the browser notification, then tap Update or Install.</span>
+            <span
+              >After download, open the APK from Downloads or the browser notification, then tap
+              Update or Install.</span
+            >
           </div>
         {/if}
 
@@ -557,12 +659,14 @@
     <button
       class="w-full flex items-center gap-2 text-on-surface text-sm font-medium
              cursor-pointer border-none bg-transparent p-0 -my-0.5"
-      onclick={() => debugOpen = !debugOpen}
+      onclick={() => (debugOpen = !debugOpen)}
     >
       <span class="text-primary"><Icon name="bug_report" size={20} /></span>
       Debug Log
       {#if app.logs.length > 0}
-        <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant">
+        <span
+          class="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant"
+        >
           {app.logs.length}
         </span>
       {/if}
@@ -577,15 +681,19 @@
         <p class="text-xs text-on-surface-variant">
           Real-time log of backend events and transfers.
         </p>
-        <div
-          bind:this={debugEl}
-          class="debug-log"
-        >
+        <div bind:this={debugEl} class="debug-log">
           {#if app.logs.length === 0}
-            <div class="text-xs text-on-surface-variant opacity-40 text-center py-4">No log entries yet</div>
+            <div class="text-xs text-on-surface-variant opacity-40 text-center py-4">
+              No log entries yet
+            </div>
           {:else}
-            {#each app.logs as log}
-              <div class="debug-entry" class:debug-error={log.level === "error"} class:debug-warn={log.level === "warn"} class:debug-success={log.level === "success"}>
+            {#each app.logs as log (log)}
+              <div
+                class="debug-entry"
+                class:debug-error={log.level === "error"}
+                class:debug-warn={log.level === "warn"}
+                class:debug-success={log.level === "success"}
+              >
                 <span class="debug-time">{log.time}</span>
                 <span class="debug-level">{log.level.toUpperCase()}</span>
                 <span class="debug-text">{log.text}</span>
@@ -598,11 +706,16 @@
             <Icon name="delete_sweep" size={16} />
             Clear log
           </Button>
-          <Button variant="elevated" onclick={async () => {
-            const text = app.logs.map(l => `[${l.time}] ${l.level.toUpperCase()} ${l.text}`).join("\n");
-            await copyToClipboard(text);
-            onsnackbar?.("Log copied to clipboard");
-          }}>
+          <Button
+            variant="elevated"
+            onclick={async () => {
+              const text = app.logs
+                .map((l) => `[${l.time}] ${l.level.toUpperCase()} ${l.text}`)
+                .join("\n");
+              await copyToClipboard(text);
+              onsnackbar?.("Log copied to clipboard");
+            }}
+          >
             <Icon name="content_copy" size={16} />
             Copy log
           </Button>
@@ -610,7 +723,6 @@
       </div>
     {/if}
   </Card>
-
 </div>
 
 <style>
@@ -627,8 +739,14 @@
     animation: section-slide var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
   }
   @keyframes section-slide {
-    from { opacity: 0; transform: translateY(-8px); }
-    to   { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   .android-update-help {
@@ -682,8 +800,13 @@
     padding: 0;
     background: none;
   }
-  .color-picker::-webkit-color-swatch-wrapper { padding: 0; }
-  .color-picker::-webkit-color-swatch { border: none; border-radius: 12px; }
+  .color-picker::-webkit-color-swatch-wrapper {
+    padding: 0;
+  }
+  .color-picker::-webkit-color-swatch {
+    border: none;
+    border-radius: 12px;
+  }
 
   .hex-input-wrap {
     display: flex;
@@ -723,7 +846,9 @@
     border: 2px solid transparent;
     background: var(--swatch-color);
     cursor: pointer;
-    transition: transform var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial), border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    transition:
+      transform var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial),
+      border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   .preset-swatch:hover {
     transform: scale(1.15);
@@ -746,7 +871,9 @@
     border: 1px solid var(--md-sys-color-outline-variant);
     background: var(--md-sys-color-surface-container-high);
     color: var(--md-sys-color-on-surface-variant);
-    transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects), border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    transition:
+      background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
+      border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   .variant-card:hover {
     background: var(--md-sys-color-surface-container-highest);
@@ -845,14 +972,22 @@
     font-weight: 600;
     color: var(--md-sys-color-on-surface-variant);
   }
-  .debug-error .debug-level { color: var(--md-sys-color-error); }
-  .debug-warn .debug-level { color: var(--md-sys-color-tertiary); }
-  .debug-success .debug-level { color: #4caf50; }
+  .debug-error .debug-level {
+    color: var(--md-sys-color-error);
+  }
+  .debug-warn .debug-level {
+    color: var(--md-sys-color-tertiary);
+  }
+  .debug-success .debug-level {
+    color: #4caf50;
+  }
   .debug-text {
     color: var(--md-sys-color-on-surface);
     white-space: pre-wrap;
     word-break: break-all;
     min-width: 0;
   }
-  .debug-error .debug-text { color: var(--md-sys-color-error); }
+  .debug-error .debug-text {
+    color: var(--md-sys-color-error);
+  }
 </style>

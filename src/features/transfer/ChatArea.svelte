@@ -6,11 +6,30 @@
   import Icon from "$lib/ui/Icon.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { pickFiles, pickFolder, getFileInfo, copyToClipboard, getThumbnail, getFullImage, readFilePreview, onDragDrop, isMobile, getContentFileName, revokeBlobUrl, openFile, deleteHistoryFiles } from "$lib/api/bridge";
-  import type { MessageEntry } from "$lib/state/app-state.svelte";
+  import {
+    pickFiles,
+    pickFolder,
+    getFileInfo,
+    copyToClipboard,
+    getThumbnail,
+    getFullImage,
+    readFilePreview,
+    onDragDrop,
+    isMobile,
+    getContentFileName,
+    revokeBlobUrl,
+    openFile,
+    deleteHistoryFiles,
+  } from "$lib/api/bridge";
   import type { FilePreview } from "$lib/api/bridge";
   import { isImage } from "$lib/utils/file-utils";
+  import {
+    collectAttachmentPaths,
+    getBubblePosition,
+    newestHistoryThumbnailPaths,
+  } from "$lib/utils/message-utils";
   import { onDestroy, onMount } from "svelte";
+  import { SvelteMap } from "svelte/reactivity";
 
   import MessageBubble from "./MessageBubble.svelte";
   import Composer from "./Composer.svelte";
@@ -30,43 +49,32 @@
   const app = getAppState();
 
   // ── Thumbnail cache (shared across messages + composer) ──
-  let thumbCache = $state<Record<string, string>>({});
+  // SvelteMap gives per-key reactivity — the old record was spread-cloned
+  // (O(n)) on every thumbnail that resolved.
+  const thumbCache = new SvelteMap<string, string>();
+  // Plain Set on purpose: an in-flight guard, never rendered.
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const _thumbLoading = new Set<string>();
   const MAX_HISTORY_THUMBNAILS = 200;
   let thumbnailCacheDisposed = false;
 
   function loadThumb(path: string) {
-    if (path in thumbCache || _thumbLoading.has(path)) return;
+    if (thumbCache.has(path) || _thumbLoading.has(path)) return;
     _thumbLoading.add(path);
-    getThumbnail(path).then(uri => {
-      _thumbLoading.delete(path);
-      if (thumbnailCacheDisposed) {
-        if (uri) revokeBlobUrl(uri);
-        return;
-      }
-      thumbCache = { ...thumbCache, [path]: uri ?? "" };
-    }).catch(() => {
-      _thumbLoading.delete(path);
-      if (thumbnailCacheDisposed) return;
-      thumbCache = { ...thumbCache, [path]: "" };
-    });
-  }
-
-  function newestHistoryThumbnailPaths(messages: MessageEntry[]): string[] {
-    const paths = new Set<string>();
-    for (let index = messages.length - 1; index >= 0 && paths.size < MAX_HISTORY_THUMBNAILS; index -= 1) {
-      for (const attachment of messages[index].attachments ?? []) {
-        if (attachment.type === "image" && attachment.path) paths.add(attachment.path);
-        if (attachment.type === "folder") {
-          for (const child of attachment.children ?? []) {
-            if (child.type === "image" && child.path) paths.add(child.path);
-            if (paths.size >= MAX_HISTORY_THUMBNAILS) break;
-          }
+    getThumbnail(path)
+      .then((uri) => {
+        _thumbLoading.delete(path);
+        if (thumbnailCacheDisposed) {
+          if (uri) revokeBlobUrl(uri);
+          return;
         }
-        if (paths.size >= MAX_HISTORY_THUMBNAILS) break;
-      }
-    }
-    return [...paths];
+        thumbCache.set(path, uri ?? "");
+      })
+      .catch(() => {
+        _thumbLoading.delete(path);
+        if (thumbnailCacheDisposed) return;
+        thumbCache.set(path, "");
+      });
   }
 
   // ── Messages state ──
@@ -105,7 +113,7 @@
       ? app.messages
       : app.activeDevice
         ? app.getPeerMessages(app.activeDevice.id)
-        : []
+        : [],
   );
   const showToolbar = $derived(currentPeerMessages.length > 0 || showStarredOnly || searchOpen);
 
@@ -115,7 +123,8 @@
 
   $effect(() => {
     const latest = app.messages[app.messages.length - 1];
-    if (!latest || latest.id === lastRevealedIncomingMessageId || latest.direction !== "received") return;
+    if (!latest || latest.id === lastRevealedIncomingMessageId || latest.direction !== "received")
+      return;
 
     lastRevealedIncomingMessageId = latest.id;
     if (app.messageViewAll || app.activeDevice?.id !== latest.peerId) return;
@@ -144,19 +153,20 @@
 
   // ── Load thumbnails for recent history + all composer files ──
   $effect(() => {
-    const candidates = new Set(newestHistoryThumbnailPaths(currentPeerMessages));
+    // Plain Set on purpose: a local membership test inside the effect.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const candidates = new Set(
+      newestHistoryThumbnailPaths(currentPeerMessages, MAX_HISTORY_THUMBNAILS),
+    );
     for (const file of app.files) {
       if (file.info && isImage(file.info.type)) candidates.add(file.path);
     }
 
-    const stalePaths = Object.keys(thumbCache).filter((path) => !candidates.has(path));
-    if (stalePaths.length > 0) {
-      const pruned = { ...thumbCache };
-      for (const path of stalePaths) {
-        revokeBlobUrl(pruned[path]);
-        delete pruned[path];
-      }
-      thumbCache = pruned;
+    for (const path of [...thumbCache.keys()]) {
+      if (candidates.has(path)) continue;
+      const cached = thumbCache.get(path);
+      if (cached) revokeBlobUrl(cached);
+      thumbCache.delete(path);
     }
 
     for (const path of candidates) {
@@ -164,26 +174,14 @@
     }
   });
 
-  // ── Bubble grouping ──
-  function getBubblePosition(index: number): "solo" | "first" | "middle" | "last" {
-    const msgs = displayMessages;
-    const curr = msgs[index];
-    const prev = index > 0 ? msgs[index - 1] : null;
-    const next = index < msgs.length - 1 ? msgs[index + 1] : null;
-    const sameAsPrev = prev && prev.direction === curr.direction && prev.peerId === curr.peerId;
-    const sameAsNext = next && next.direction === curr.direction && next.peerId === curr.peerId;
-    if (sameAsPrev && sameAsNext) return "middle";
-    if (sameAsPrev) return "last";
-    if (sameAsNext) return "first";
-    return "solo";
-  }
-
   // ── Handlers ──
   async function handleCopy(msgId: string, text: string) {
     await copyToClipboard(text);
     copiedMsgId = msgId;
     clearTimeout(copyTimer);
-    copyTimer = setTimeout(() => { if (copiedMsgId === msgId) copiedMsgId = null; }, 1200);
+    copyTimer = setTimeout(() => {
+      if (copiedMsgId === msgId) copiedMsgId = null;
+    }, 1200);
     onsnackbar?.("Copied to clipboard");
   }
 
@@ -197,7 +195,9 @@
         try {
           const resolved = await getContentFileName(path);
           if (resolved?.name) name = resolved.name;
-        } catch { /* plugin call failed */ }
+        } catch {
+          /* plugin call failed */
+        }
         // Fallback: extract something useful from the URI
         if (!name) {
           const decoded = decodeURIComponent(path);
@@ -213,7 +213,7 @@
           }
         }
         const ext = name.includes(".") ? "." + name.split(".").pop()!.toLowerCase() : "";
-        app.addFile(path, { name, size: "", type: ext, count: undefined });
+        app.addFile(path, { name, size_bytes: 0, type: ext, count: undefined });
       } else {
         const info = await getFileInfo(path);
         app.addFile(path, info);
@@ -252,19 +252,6 @@
     }
   }
 
-  function collectAttachmentPaths(messages: MessageEntry[]): string[] {
-    const paths = new Set<string>();
-    for (const message of messages) {
-      for (const attachment of message.attachments ?? []) {
-        if (attachment.path) paths.add(attachment.path);
-        for (const child of attachment.children ?? []) {
-          if (child.path) paths.add(child.path);
-        }
-      }
-    }
-    return [...paths];
-  }
-
   function clearActiveChatKeepSaved() {
     const peerId = app.activeDevice?.id;
     if (!peerId) return;
@@ -291,7 +278,7 @@
     lightboxPath = path;
     lightboxName = name;
     lightboxLoading = true;
-    lightboxSrc = thumbCache[path] ?? null;
+    lightboxSrc = thumbCache.get(path) ?? null;
     try {
       const full = await getFullImage(path, 800);
       if (full) lightboxSrc = full;
@@ -304,7 +291,7 @@
 
   function closeLightbox() {
     // Revoke full-res blob URL (not the thumbnail, which stays in cache)
-    if (lightboxSrc && lightboxSrc !== thumbCache[lightboxPath]) {
+    if (lightboxSrc && lightboxSrc !== thumbCache.get(lightboxPath)) {
       revokeBlobUrl(lightboxSrc);
     }
     lightboxSrc = null;
@@ -335,13 +322,22 @@
     let unlisten: (() => void) | undefined;
     let disposed = false;
     onDragDrop(
-      (paths) => { dragOver = false; addPaths(paths); },
-      () => { dragOver = true; },
-      () => { dragOver = false; },
-    ).then(fn => {
-      if (disposed) fn();
-      else unlisten = fn;
-    }).catch(() => {});
+      (paths) => {
+        dragOver = false;
+        addPaths(paths);
+      },
+      () => {
+        dragOver = true;
+      },
+      () => {
+        dragOver = false;
+      },
+    )
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
 
     return () => {
       disposed = true;
@@ -352,26 +348,23 @@
   onDestroy(() => {
     thumbnailCacheDisposed = true;
     clearTimeout(copyTimer);
-    for (const url of Object.values(thumbCache)) {
+    for (const url of thumbCache.values()) {
       revokeBlobUrl(url);
     }
-    if (lightboxSrc && lightboxSrc !== thumbCache[lightboxPath]) {
+    if (lightboxSrc && lightboxSrc !== thumbCache.get(lightboxPath)) {
       revokeBlobUrl(lightboxSrc);
     }
     _thumbLoading.clear();
   });
 </script>
 
-<div
-  class="chat-container"
-  class:drag-over={dragOver}
->
+<div class="chat-container" class:drag-over={dragOver}>
   {#if showToolbar}
     <div class="chat-toolbar">
       <button
         class="chip"
         class:chip-active={app.messageViewAll}
-        onclick={() => app.messageViewAll = !app.messageViewAll}
+        onclick={() => (app.messageViewAll = !app.messageViewAll)}
       >
         {app.messageViewAll ? "All peers" : "This peer"}
       </button>
@@ -379,7 +372,7 @@
       <button
         class="chip"
         class:chip-active={showStarredOnly}
-        onclick={() => showStarredOnly = !showStarredOnly}
+        onclick={() => (showStarredOnly = !showStarredOnly)}
       >
         <Icon name={showStarredOnly ? "star" : "star_border"} size={11} />
         Saved
@@ -387,18 +380,17 @@
 
       <span class="flex-1"></span>
 
-      <button
-        class="toolbar-icon"
-        onclick={openDefaultSaveFolder}
-        title="Open default save folder"
-      >
+      <button class="toolbar-icon" onclick={openDefaultSaveFolder} title="Open default save folder">
         <Icon name="folder_open" size={15} />
       </button>
 
       <button
         class="toolbar-icon"
         class:toolbar-icon-active={searchOpen}
-        onclick={() => { searchOpen = !searchOpen; if (!searchOpen) app.messageSearch = ""; }}
+        onclick={() => {
+          searchOpen = !searchOpen;
+          if (!searchOpen) app.messageSearch = "";
+        }}
         title="Search messages"
       >
         <Icon name="search" size={15} />
@@ -407,7 +399,7 @@
       <div class="relative">
         <button
           class="toolbar-icon hover:text-error"
-          onclick={() => showClearMenu = !showClearMenu}
+          onclick={() => (showClearMenu = !showClearMenu)}
           title="Clear messages"
         >
           <Icon name="delete_outline" size={15} />
@@ -415,19 +407,11 @@
         {#if showClearMenu}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="clear-menu" onclick={() => showClearMenu = false}>
-            <button onclick={clearActiveChatKeepSaved}>
-              Clear chat (keep saved)
-            </button>
-            <button onclick={deleteActiveChat}>
-              Delete all for this peer
-            </button>
-            <button onclick={() => deleteMessagesOlderThan(7)}>
-              Delete older than 7 days
-            </button>
-            <button onclick={() => deleteMessagesOlderThan(30)}>
-              Delete older than 30 days
-            </button>
+          <div class="clear-menu" onclick={() => (showClearMenu = false)}>
+            <button onclick={clearActiveChatKeepSaved}> Clear chat (keep saved) </button>
+            <button onclick={deleteActiveChat}> Delete all for this peer </button>
+            <button onclick={() => deleteMessagesOlderThan(7)}> Delete older than 7 days </button>
+            <button onclick={() => deleteMessagesOlderThan(30)}> Delete older than 30 days </button>
           </div>
         {/if}
       </div>
@@ -445,16 +429,12 @@
     {/if}
   {/if}
 
-  <div
-    bind:this={messagesEl}
-    class="chat-messages"
-    onscroll={handleScroll}
-  >
+  <div bind:this={messagesEl} class="chat-messages" onscroll={handleScroll}>
     {#if displayMessages.length > 0}
       {#each displayMessages as msg, i (msg.id)}
         <MessageBubble
           {msg}
-          position={getBubblePosition(i)}
+          position={getBubblePosition(displayMessages, i)}
           isCopied={copiedMsgId === msg.id}
           viewAll={app.messageViewAll}
           {thumbCache}
@@ -476,7 +456,9 @@
         </div>
         <span class="chat-empty-title">{peerName ? `Chat with ${peerName}` : "Select a peer"}</span>
         <span class="chat-empty-hint">
-          {peerName ? "Drop files, attach with the clip icon, or type a message" : "Add or select a peer to start transferring"}
+          {peerName
+            ? "Drop files, attach with the clip icon, or type a message"
+            : "Add or select a peer to start transferring"}
         </span>
       </div>
     {/if}
@@ -584,30 +566,48 @@
   }
 
   .chat-empty {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 8px; flex: 1; padding: 40px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    padding: 40px 20px;
     text-align: center;
     animation: empty-in var(--md-spring-default-spatial-dur) var(--md-spring-default-spatial) both;
   }
   @keyframes empty-in {
-    from { opacity: 0; transform: scale(0.95); }
-    to   { opacity: 1; transform: scale(1); }
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
   .chat-empty-icon {
-    display: flex; align-items: center; justify-content: center;
-    width: 56px; height: 56px; border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
     background: var(--md-sys-color-surface-container-high);
     color: var(--md-sys-color-on-surface-variant);
     margin-bottom: 4px;
   }
   .chat-empty-title {
-    font-size: 14px; font-weight: 500;
+    font-size: 14px;
+    font-weight: 500;
     color: var(--md-sys-color-on-surface);
   }
   .chat-empty-hint {
-    font-size: 12px; line-height: 16px;
+    font-size: 12px;
+    line-height: 16px;
     color: var(--md-sys-color-on-surface-variant);
-    opacity: 0.7; max-width: 240px;
+    opacity: 0.7;
+    max-width: 240px;
   }
 
   .clear-menu {
@@ -620,18 +620,30 @@
     border-radius: 8px;
     padding: 4px 0;
     min-width: 200px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     animation: menu-in var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
   }
   @keyframes menu-in {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
   .clear-menu button {
-    display: block; width: 100%; text-align: left;
-    padding: 8px 12px; background: transparent; border: none;
-    color: var(--md-sys-color-on-surface); font-size: 12px;
-    cursor: pointer; transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    color: var(--md-sys-color-on-surface);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   .clear-menu button:hover {
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);

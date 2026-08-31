@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::sync::{watch, Mutex};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 use discovery::DiscoveredPeer;
 use identity::normalize_uuid;
@@ -62,9 +62,15 @@ fn save_folder_settings(
     }
 }
 
+/// One discovery run: its cancellation token and the task driving it.
+struct DiscoveryRun {
+    cancel: CancellationToken,
+    join: JoinHandle<()>,
+}
+
 pub struct LanService {
     pub handle: AppHandle,
-    running: Arc<AtomicBool>,
+    run: Mutex<Option<DiscoveryRun>>,
     identity: DeviceIdentity,
     data_dir: PathBuf,
     /// All discovered peers on the LAN, keyed by device UUID
@@ -75,8 +81,8 @@ pub struct LanService {
     default_out_folder: Arc<Mutex<String>>,
     /// Whether incoming files should be placed into a date-based subfolder
     sort_by_date: Arc<Mutex<bool>>,
-    /// Current alias (mutable, synced to mDNS)
-    alias: Arc<Mutex<String>>,
+    /// Current alias; discovery watches this and re-registers mDNS on change
+    alias_tx: watch::Sender<String>,
 }
 
 impl LanService {
@@ -85,25 +91,34 @@ impl LanService {
         let folder_settings = load_folder_settings(&data_dir);
         Self {
             handle,
-            running: Arc::new(AtomicBool::new(false)),
+            run: Mutex::new(None),
             identity,
             data_dir,
             discovered_peers: Arc::new(Mutex::new(HashMap::new())),
             peer_folders: Arc::new(Mutex::new(folder_settings.peer_folders)),
             default_out_folder: Arc::new(Mutex::new(folder_settings.default_out_folder)),
             sort_by_date: Arc::new(Mutex::new(folder_settings.sort_by_date)),
-            alias: Arc::new(Mutex::new(alias)),
+            alias_tx: watch::Sender::new(alias),
         }
     }
 
     pub async fn start(&self) -> Result<(), String> {
-        if self.running.load(Ordering::SeqCst) {
-            return Ok(());
+        let mut run = self.run.lock().await;
+        if let Some(active) = run.as_ref() {
+            if !active.cancel.is_cancelled() && !active.join.is_finished() {
+                return Ok(());
+            }
         }
-        self.running.store(true, Ordering::SeqCst);
+        // Await the previous run before spawning again: its mDNS goodbye is
+        // sent and its TCP listener released, so a fresh registration cannot
+        // race a zombie daemon (no fixed sleep needed).
+        if let Some(previous) = run.take() {
+            previous.cancel.cancel();
+            let _ = previous.join.await;
+        }
 
+        let cancel = CancellationToken::new();
         let handle = self.handle.clone();
-        let running = self.running.clone();
         let identity = self.identity.clone();
         let discovered = self.discovered_peers.clone();
         let receive_routing = discovery::ReceiveRoutingState {
@@ -111,25 +126,29 @@ impl LanService {
             default_out_folder: self.default_out_folder.clone(),
             sort_by_date: self.sort_by_date.clone(),
         };
-        let alias = self.alias.clone();
+        let alias_rx = self.alias_tx.subscribe();
+        let task_cancel = cancel.clone();
 
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             discovery::run_discovery(
                 handle,
-                running,
+                task_cancel,
                 identity,
                 discovered,
                 receive_routing,
-                alias,
+                alias_rx,
             )
             .await;
         });
+        *run = Some(DiscoveryRun { cancel, join });
 
         Ok(())
     }
 
     pub async fn stop(&self) {
-        self.running.store(false, Ordering::SeqCst);
+        if let Some(active) = self.run.lock().await.as_ref() {
+            active.cancel.cancel();
+        }
         self.discovered_peers.lock().await.clear();
     }
 
@@ -312,15 +331,23 @@ impl LanService {
         (default_out_folder, peer_folders, sort_by_date)
     }
 
-    pub async fn set_alias(&self, new_alias: &str) {
-        *self.alias.lock().await = new_alias.to_string();
+    /// Apply a sanitized, size-capped alias, persist it, and notify the
+    /// running discovery loop so it re-registers mDNS with the new name.
+    /// Returns the alias that was actually applied.
+    pub async fn set_alias(&self, new_alias: &str) -> String {
+        let sanitized = identity::sanitize_alias(new_alias);
+        if sanitized.is_empty() {
+            return self.alias_tx.borrow().clone();
+        }
         let alias_file = self.data_dir.join("device_alias.txt");
-        let _ = fs::write(alias_file, new_alias);
+        let _ = fs::write(alias_file, &sanitized);
+        self.alias_tx.send_replace(sanitized.clone());
+        sanitized
     }
 
     pub async fn get_identity(&self) -> DeviceIdentity {
         let mut identity = self.identity.clone();
-        identity.alias = self.alias.lock().await.clone();
+        identity.alias = self.alias_tx.borrow().clone();
         identity
     }
 

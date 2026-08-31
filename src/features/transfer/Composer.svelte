@@ -3,14 +3,28 @@
 -->
 <script lang="ts">
   import Icon from "$lib/ui/Icon.svelte";
+  import FileCard from "./FileCard.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import { saveClipboardImage, getFileInfo, getClipboardFiles, getVideoSrc } from "$lib/api/bridge";
-  import { fileExtensionLabel, fileNameFromPath, isImage, isVideo } from "$lib/utils/file-utils";
-  import { onMount } from "svelte";
+  import {
+    saveClipboardImage,
+    getFileInfo,
+    getClipboardFiles,
+    getVideoSrc,
+    revokeBlobUrl,
+  } from "$lib/api/bridge";
+  import {
+    fileExtensionLabel,
+    fileNameFromPath,
+    fileSizeStr,
+    isImage,
+    isVideo,
+  } from "$lib/utils/file-utils";
+  import { onDestroy, onMount } from "svelte";
+  import type { SvelteMap } from "svelte/reactivity";
 
   interface Props {
     peerName?: string;
-    thumbCache: Record<string, string>;
+    thumbCache: SvelteMap<string, string>;
     onpickfiles: () => void;
     onpickfolder: () => void;
     onsend: () => void;
@@ -19,7 +33,16 @@
     onaddpaths: (paths: string[]) => void;
   }
 
-  let { peerName, thumbCache, onpickfiles, onpickfolder, onsend, onlightbox, onfilepreview, onaddpaths }: Props = $props();
+  let {
+    peerName,
+    thumbCache,
+    onpickfiles,
+    onpickfolder,
+    onsend,
+    onlightbox,
+    onfilepreview,
+    onaddpaths,
+  }: Props = $props();
 
   const app = getAppState();
 
@@ -27,22 +50,57 @@
   let fabMenuOpen = $state(false);
 
   const canSend = $derived(
-    app.activeDeviceOnline
-      && !app.transferActive
-      && (app.hasFiles || !!app.sendTextContent.trim())
+    app.activeDeviceOnline && !app.transferActive && (app.hasFiles || !!app.sendTextContent.trim()),
   );
   const isMediaFile = (type: string) => isImage(type) || isVideo(type);
-  const imageFiles = $derived(app.files.filter(f => f.info && isMediaFile(f.info.type)));
-  const otherFiles = $derived(app.files.filter(f => !f.info || !isMediaFile(f.info.type)));
+  const imageFiles = $derived(app.files.filter((f) => f.info && isMediaFile(f.info.type)));
+  const otherFiles = $derived(app.files.filter((f) => !f.info || !isMediaFile(f.info.type)));
 
   let videoUrls = $state<Record<string, string>>({});
+  // Plain Set on purpose: an in-flight guard, never rendered.
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
+  const _videoLoading = new Set<string>();
+  let destroyed = false;
+
   $effect(() => {
-    for (const f of imageFiles) {
-      if (f.info && isVideo(f.info.type) && !(f.path in videoUrls)) {
-        getVideoSrc(f.path).then(url => {
-          if (url) videoUrls = { ...videoUrls, [f.path]: url };
-        });
+    const currentVideoPaths = new Set(
+      imageFiles.filter((f) => f.info && isVideo(f.info.type)).map((f) => f.path),
+    );
+
+    // Release URLs whose attachment left the composer (removed or sent)
+    const stale = Object.keys(videoUrls).filter((p) => !currentVideoPaths.has(p));
+    if (stale.length > 0) {
+      const next = { ...videoUrls };
+      for (const p of stale) {
+        revokeBlobUrl(next[p]);
+        delete next[p];
       }
+      videoUrls = next;
+    }
+
+    for (const f of imageFiles) {
+      if (f.info && isVideo(f.info.type) && !(f.path in videoUrls) && !_videoLoading.has(f.path)) {
+        _videoLoading.add(f.path);
+        getVideoSrc(f.path)
+          .then((url) => {
+            _videoLoading.delete(f.path);
+            if (destroyed) {
+              if (url) revokeBlobUrl(url);
+              return;
+            }
+            if (url) videoUrls = { ...videoUrls, [f.path]: url };
+          })
+          .catch(() => {
+            _videoLoading.delete(f.path);
+          });
+      }
+    }
+  });
+
+  onDestroy(() => {
+    destroyed = true;
+    for (const url of Object.values(videoUrls)) {
+      revokeBlobUrl(url);
     }
   });
 
@@ -89,7 +147,9 @@
   }
 
   onMount(() => {
-    function handleWindowClick() { fabMenuOpen = false; }
+    function handleWindowClick() {
+      fabMenuOpen = false;
+    }
     window.addEventListener("click", handleWindowClick);
     return () => window.removeEventListener("click", handleWindowClick);
   });
@@ -98,11 +158,27 @@
 <div class="composer">
   {#if fabMenuOpen}
     <div class="fab-menu-items">
-      <button class="fab-menu-item" style="animation-delay: 0ms;" onclick={(e) => { e.stopPropagation(); fabMenuOpen = false; onpickfiles(); }}>
+      <button
+        class="fab-menu-item"
+        style="animation-delay: 0ms;"
+        onclick={(e) => {
+          e.stopPropagation();
+          fabMenuOpen = false;
+          onpickfiles();
+        }}
+      >
         <Icon name="attach_file" size={18} />
         <span class="text-sm font-medium">Files</span>
       </button>
-      <button class="fab-menu-item" style="animation-delay: 40ms;" onclick={(e) => { e.stopPropagation(); fabMenuOpen = false; onpickfolder(); }}>
+      <button
+        class="fab-menu-item"
+        style="animation-delay: 40ms;"
+        onclick={(e) => {
+          e.stopPropagation();
+          fabMenuOpen = false;
+          onpickfolder();
+        }}
+      >
         <Icon name="folder" size={18} />
         <span class="text-sm font-medium">Folder</span>
       </button>
@@ -111,27 +187,51 @@
 
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="composer-box" onclick={(e) => { if ((e.target as HTMLElement).closest('button, .composer-img')) return; composerEl?.focus(); }}>
+  <div
+    class="composer-box"
+    onclick={(e) => {
+      if ((e.target as HTMLElement).closest("button, .composer-img")) return;
+      composerEl?.focus();
+    }}
+  >
     {#if app.hasFiles}
       <div class="composer-attachments">
         {#each imageFiles as file (file.path)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="composer-img" onclick={() => onlightbox(file.path, file.info?.name ?? "image")}>
+          <div
+            class="composer-img"
+            onclick={() => onlightbox(file.path, file.info?.name ?? "image")}
+          >
             {#if file.info && isVideo(file.info.type)}
               {#if videoUrls[file.path]}
-                <!-- svelte-ignore a11y_media_has_caption -->
-                <video src="{videoUrls[file.path]}#t=0.1" class="composer-img-preview" preload="metadata" muted playsinline></video>
+                <video
+                  src="{videoUrls[file.path]}#t=0.1"
+                  class="composer-img-preview"
+                  preload="metadata"
+                  muted
+                  playsinline
+                ></video>
               {:else}
                 <div class="composer-img-loading"><div class="composer-img-shimmer"></div></div>
               {/if}
-            {:else if thumbCache[file.path] && thumbCache[file.path] !== ""}
-              <img src={thumbCache[file.path]} alt={file.info?.name ?? "image"} class="composer-img-preview" />
+            {:else if thumbCache.get(file.path)}
+              <img
+                src={thumbCache.get(file.path)}
+                alt={file.info?.name ?? "image"}
+                class="composer-img-preview"
+              />
             {:else}
               <div class="composer-img-loading"><div class="composer-img-shimmer"></div></div>
             {/if}
             {#if !app.transferActive}
-              <button class="composer-img-remove" onclick={(e) => { e.stopPropagation(); app.removeFile(file.path); }}>
+              <button
+                class="composer-img-remove"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  app.removeFile(file.path);
+                }}
+              >
                 <Icon name="close" size={14} />
               </button>
             {/if}
@@ -139,22 +239,29 @@
         {/each}
         {#each otherFiles as file (file.path)}
           {@const name = file.info?.name ?? fileNameFromPath(file.path, "file")}
-          {@const ext = fileExtensionLabel(name)}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="composer-file-card" onclick={() => onfilepreview(file.path)}>
-            <Icon name={file.info?.type === "folder" ? "folder" : "description"} size={18} />
-            <span class="composer-file-name">{name}</span>
-            {#if file.info?.size}
-              <span class="composer-file-size">{file.info.size}</span>
-            {/if}
-            <span class="att-file-badge">{file.info?.type === "folder" ? "FOLDER" : ext}</span>
-            {#if !app.transferActive}
-              <button class="composer-file-remove" onclick={(e) => { e.stopPropagation(); app.removeFile(file.path); }}>
-                <Icon name="close" size={14} />
-              </button>
-            {/if}
-          </div>
+          <FileCard
+            compact
+            icon={file.info?.type === "folder" ? "folder" : "description"}
+            {name}
+            size={file.info?.size_bytes ? fileSizeStr(file.info.size_bytes) : undefined}
+            badge={file.info?.type === "folder" ? "FOLDER" : fileExtensionLabel(name)}
+            onclick={() => onfilepreview(file.path)}
+          >
+            {#snippet action()}
+              {#if !app.transferActive}
+                <button
+                  class="composer-file-remove file-card-action"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    app.removeFile(file.path);
+                  }}
+                  aria-label="Remove {name}"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              {/if}
+            {/snippet}
+          </FileCard>
         {/each}
       </div>
     {/if}
@@ -165,8 +272,7 @@
       rows={1}
       bind:value={app.sendTextContent}
       onkeydown={handleKeydown}
-      onpaste={handlePaste}
-    ></textarea>
+      onpaste={handlePaste}></textarea>
 
     <div class="composer-actions">
       <button
@@ -181,7 +287,10 @@
             border-radius var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial),
             background-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
             color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
-        onclick={(e) => { e.stopPropagation(); fabMenuOpen = !fabMenuOpen; }}
+        onclick={(e) => {
+          e.stopPropagation();
+          fabMenuOpen = !fabMenuOpen;
+        }}
         title={fabMenuOpen ? "Close" : "Attach"}
       >
         <Icon name="add" size={20} />
@@ -272,7 +381,9 @@
     pointer-events: none;
     transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .composer-img:hover::after { opacity: 0.08; }
+  .composer-img:hover::after {
+    opacity: 0.08;
+  }
 
   .composer-img-preview {
     display: block;
@@ -299,11 +410,15 @@
       color-mix(in srgb, var(--md-sys-color-on-surface) 6%, transparent) 50%,
       transparent 100%
     );
-    animation: shimmer-slide 1.5s cubic-bezier(0.2, 0.0, 0, 1.0) infinite;
+    animation: shimmer-slide 1.5s cubic-bezier(0.2, 0, 0, 1) infinite;
   }
   @keyframes shimmer-slide {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(100%); }
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
   }
 
   .composer-img-remove {
@@ -325,53 +440,11 @@
     padding: 0;
     z-index: 1;
   }
-  .composer-img:hover .composer-img-remove { opacity: 1; }
+  .composer-img:hover .composer-img-remove {
+    opacity: 1;
+  }
 
-  /* ── File cards ── */
-  .composer-file-card {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    width: 120px;
-    padding: 10px 12px;
-    border-radius: 12px;
-    border: 1px solid color-mix(in srgb, var(--md-sys-color-outline) 25%, transparent);
-    background: color-mix(in srgb, var(--md-sys-color-on-surface) 4%, transparent);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
-  }
-  .composer-file-card:hover {
-    background: color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
-  }
-  .composer-file-name {
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.3;
-    word-break: break-word;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .composer-file-size {
-    font-size: 11px;
-    opacity: 0.5;
-  }
-  .att-file-badge {
-    display: inline-block;
-    margin-top: 6px;
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    width: fit-content;
-    background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
-    color: var(--md-sys-color-on-surface-variant);
-  }
+  /* ── File cards (chrome lives in FileCard.svelte) ── */
   .composer-file-remove {
     position: absolute;
     top: -6px;
@@ -391,8 +464,9 @@
     padding: 0;
     z-index: 1;
   }
-  .composer-file-card:hover .composer-file-remove { opacity: 1; }
-  .composer-file-remove:hover { color: var(--md-sys-color-error); }
+  .composer-file-remove:hover {
+    color: var(--md-sys-color-error);
+  }
 
   /* ── Textarea ── */
   .composer-textarea {
@@ -445,9 +519,15 @@
     pointer-events: none;
     transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .fab-btn:hover::after { opacity: 0.08; }
-  .fab-btn:active::after { opacity: 0.1; }
-  .fab-btn:hover { box-shadow: var(--shadow-level4); }
+  .fab-btn:hover::after {
+    opacity: 0.08;
+  }
+  .fab-btn:active::after {
+    opacity: 0.1;
+  }
+  .fab-btn:hover {
+    box-shadow: var(--shadow-level4);
+  }
 
   /* ── Send button ── */
   .send-btn {
@@ -466,8 +546,7 @@
     box-shadow: var(--shadow-level3);
     position: relative;
     overflow: hidden;
-    transition:
-      opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
+    transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   .send-btn::after {
     content: "";
@@ -483,8 +562,12 @@
     cursor: pointer;
     opacity: 1;
   }
-  .send-btn:hover::after { opacity: 0.08; }
-  .send-btn:active::after { opacity: 0.1; }
+  .send-btn:hover::after {
+    opacity: 0.08;
+  }
+  .send-btn:active::after {
+    opacity: 0.1;
+  }
 
   /* ── FAB menu pills ── */
   .fab-menu-items {
@@ -526,10 +609,20 @@
     pointer-events: none;
     transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .fab-menu-item:hover::after { opacity: 0.08; }
-  .fab-menu-item:active::after { opacity: 0.1; }
+  .fab-menu-item:hover::after {
+    opacity: 0.08;
+  }
+  .fab-menu-item:active::after {
+    opacity: 0.1;
+  }
   @keyframes fab-menu-enter {
-    from { opacity: 0; transform: translateY(8px) scale(0.92); }
-    to   { opacity: 1; transform: translateY(0) scale(1); }
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.92);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 </style>

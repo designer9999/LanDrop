@@ -124,7 +124,7 @@ export function generateColorTokens(
   seedHex: string,
   variant: SchemeVariant = "expressive",
   isDark: boolean = true,
-  contrastLevel: number = 0.0
+  contrastLevel: number = 0.0,
 ): M3ColorTokens {
   const seedArgb = argbFromHex(seedHex);
   const seedHct = Hct.fromInt(seedArgb);

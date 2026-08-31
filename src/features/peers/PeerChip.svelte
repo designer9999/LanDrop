@@ -20,7 +20,13 @@
   {onclick}
   title="{device.alias}{device.online ? '' : ' (offline)'}"
 >
-  <PeerAvatar name={device.alias} color={device.color} icon={device.avatarIcon} size="sm" {selected} />
+  <PeerAvatar
+    name={device.alias}
+    color={device.color}
+    icon={device.avatarIcon}
+    size="sm"
+    {selected}
+  />
   {#if device.online}
     <span class="status-dot" class:selected></span>
   {:else}
@@ -59,13 +65,18 @@
   }
   .status-dot.selected {
     background: var(--md-sys-color-primary);
-    animation: pulse-glow 2s cubic-bezier(0.2, 0.0, 0, 1.0) infinite;
+    animation: pulse-glow 2s cubic-bezier(0.2, 0, 0, 1) infinite;
   }
   .status-dot.offline {
     background: var(--md-sys-color-outline);
   }
   @keyframes pulse-glow {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
   }
 </style>

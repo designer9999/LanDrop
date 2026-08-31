@@ -46,7 +46,7 @@
   let hovered = $state(false);
   let hasValue = $derived(value.length > 0);
   let isFloating = $derived(focused || hasValue);
-  const inputId = `tf-${Math.random().toString(36).slice(2, 8)}`;
+  const inputId = $props.id();
 
   let showErrorIcon = $derived(error && !trailingIcon);
 </script>
@@ -56,12 +56,12 @@
   <div
     class="relative rounded-md border outline-solid outline-2 -outline-offset-2
            {error
-             ? 'border-error outline-error'
-             : focused
-               ? 'border-primary outline-primary'
-               : hovered
-                 ? 'border-on-surface outline-transparent'
-                 : 'border-outline outline-transparent'}"
+      ? 'border-error outline-error'
+      : focused
+        ? 'border-primary outline-primary'
+        : hovered
+          ? 'border-on-surface outline-transparent'
+          : 'border-outline outline-transparent'}"
     style="transition: border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects),
                        outline-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);"
     onpointerenter={() => (hovered = true)}
@@ -97,8 +97,7 @@
         onfocus={() => (focused = true)}
         onblur={() => (focused = false)}
         {oninput}
-        {onkeydown}
-      ></textarea>
+        {onkeydown}></textarea>
     {:else}
       <div class="flex items-center h-14">
         {#if leadingIcon}

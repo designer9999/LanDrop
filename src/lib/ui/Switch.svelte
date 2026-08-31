@@ -32,11 +32,7 @@
   }
 
   let handleSize = $derived(pressed ? 28 : checked ? 24 : 16);
-  let handleLeft = $derived(
-    checked
-      ? (pressed ? 20 : 24)
-      : (pressed ? 2 : 6)
-  );
+  let handleLeft = $derived(checked ? (pressed ? 20 : 24) : pressed ? 2 : 6);
 </script>
 
 <button
@@ -48,10 +44,17 @@
          disabled:cursor-not-allowed"
   {disabled}
   onclick={toggle}
-  onpointerdown={() => { if (!disabled) pressed = true; }}
+  onpointerdown={() => {
+    if (!disabled) pressed = true;
+  }}
   onpointerup={() => (pressed = false)}
-  onpointerleave={() => { pressed = false; hovered = false; }}
-  onpointerenter={() => { if (!disabled) hovered = true; }}
+  onpointerleave={() => {
+    pressed = false;
+    hovered = false;
+  }}
+  onpointerenter={() => {
+    if (!disabled) hovered = true;
+  }}
 >
   <span
     class="relative inline-flex items-center w-13 h-8 rounded-full"
@@ -99,16 +102,28 @@
 
 <style>
   .switch-disabled-track-selected {
-    background-color: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent) !important;
+    background-color: color-mix(
+      in srgb,
+      var(--md-sys-color-on-surface) 12%,
+      transparent
+    ) !important;
   }
   .switch-disabled-track-unselected {
-    background-color: color-mix(in srgb, var(--md-sys-color-surface-container-highest) 12%, transparent) !important;
+    background-color: color-mix(
+      in srgb,
+      var(--md-sys-color-surface-container-highest) 12%,
+      transparent
+    ) !important;
     border-color: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent) !important;
   }
   .switch-disabled-handle-selected {
     background-color: var(--md-sys-color-surface) !important;
   }
   .switch-disabled-handle-unselected {
-    background-color: color-mix(in srgb, var(--md-sys-color-on-surface) 38%, transparent) !important;
+    background-color: color-mix(
+      in srgb,
+      var(--md-sys-color-on-surface) 38%,
+      transparent
+    ) !important;
   }
 </style>

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -11,8 +11,7 @@ use tokio::time;
 use walkdir::WalkDir;
 
 use super::protocol::{Message, CHUNK_SIZE, TCP_PORT};
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-use crate::commands::format_size;
+
 use crate::path_utils::sanitize_relative_path;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,6 +25,41 @@ const DISK_SPACE_RESERVE_BYTES: u64 = 10_000_000;
 const PART_FILE_CREATE_ATTEMPTS: usize = 16;
 
 static RECEIVE_FINALIZE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+const PROGRESS_EMIT_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Rate-limits `lan_transfer_progress` emissions to at most one per 100 ms or
+/// per 1% of total bytes — whichever comes first. A 10 GB transfer otherwise
+/// serializes 40k+ events into the WebView. Terminal events bypass this.
+struct ProgressThrottle {
+    last_emit: Option<Instant>,
+    last_bytes: u64,
+    min_bytes_delta: u64,
+}
+
+impl ProgressThrottle {
+    fn new(total_bytes: u64) -> Self {
+        Self {
+            last_emit: None,
+            last_bytes: 0,
+            min_bytes_delta: (total_bytes / 100).max(1),
+        }
+    }
+
+    fn should_emit(&mut self, transferred_bytes: u64) -> bool {
+        let due_time = self
+            .last_emit
+            .is_none_or(|at| at.elapsed() >= PROGRESS_EMIT_MIN_INTERVAL);
+        let due_bytes = transferred_bytes.saturating_sub(self.last_bytes) >= self.min_bytes_delta;
+        if due_time || due_bytes {
+            self.last_emit = Some(Instant::now());
+            self.last_bytes = transferred_bytes;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 pub struct Connection {
     reader: Mutex<OwnedReadHalf>,
@@ -311,8 +345,7 @@ pub async fn send_files_to_peer(
 
         if path
             .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+            .is_ok_and(|m| m.file_type().is_symlink())
         {
             continue;
         }
@@ -418,6 +451,7 @@ pub async fn send_files_to_peer(
 
     let mut sent_bytes: u64 = 0;
     let mut sent_files: usize = 0;
+    let mut progress_throttle = ProgressThrottle::new(total_size);
 
     for (name, file_path) in &file_entries {
         // Open first, then obtain metadata from that same handle so the declared
@@ -482,18 +516,20 @@ pub async fn send_files_to_peer(
                 .ok_or_else(|| "Sent byte counter overflowed".to_string())?;
 
             if let Some(h) = handle {
-                let _ = h.emit(
-                    "lan_transfer_progress",
-                    serde_json::json!({
-                        "direction": "send",
-                        "phase": "transferring",
-                        "total_bytes": total_size,
-                        "total_files": total_files,
-                        "sent_bytes": sent_bytes,
-                        "sent_files": sent_files,
-                        "current_file": name,
-                    }),
-                );
+                if sent_bytes == total_size || progress_throttle.should_emit(sent_bytes) {
+                    let _ = h.emit(
+                        "lan_transfer_progress",
+                        serde_json::json!({
+                            "direction": "send",
+                            "phase": "transferring",
+                            "total_bytes": total_size,
+                            "total_files": total_files,
+                            "sent_bytes": sent_bytes,
+                            "sent_files": sent_files,
+                            "current_file": name,
+                        }),
+                    );
+                }
             }
         }
 
@@ -560,6 +596,7 @@ pub async fn receive_file(
     let mut remaining = size;
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut received_bytes: u64 = 0;
+    let mut progress_throttle = ProgressThrottle::new(size);
 
     let receive_result: Result<(), String> = async {
         while remaining > 0 {
@@ -574,16 +611,18 @@ pub async fn receive_file(
                 .ok_or_else(|| "Received byte counter overflowed".to_string())?;
 
             if let Some(h) = handle {
-                let _ = h.emit(
-                    "lan_transfer_progress",
-                    serde_json::json!({
-                        "direction": "receive",
-                        "phase": "transferring",
-                        "total_bytes": size,
-                        "received_bytes": received_bytes,
-                        "current_file": name,
-                    }),
-                );
+                if remaining == 0 || progress_throttle.should_emit(received_bytes) {
+                    let _ = h.emit(
+                        "lan_transfer_progress",
+                        serde_json::json!({
+                            "direction": "receive",
+                            "phase": "transferring",
+                            "total_bytes": size,
+                            "received_bytes": received_bytes,
+                            "current_file": name,
+                        }),
+                    );
+                }
             }
         }
 
@@ -846,27 +885,27 @@ fn check_disk_space(path: &Path, needed: u64) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
 
         let dir = path.parent().unwrap_or(path);
-        let dir_str = dir.to_string_lossy().to_string();
-        let wide: Vec<u16> = OsStr::new(&dir_str)
+        let wide: Vec<u16> = dir
+            .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
 
         let mut free_bytes: u64 = 0;
+        #[expect(unsafe_code, reason = "disk-space query requires the Win32 FFI call")]
         let result = unsafe {
-            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
-                wide.as_ptr(),
-                &mut free_bytes as *mut u64,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+            windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                windows::core::PCWSTR(wide.as_ptr()),
+                Some(&mut free_bytes),
+                None,
+                None,
             )
         };
 
-        if result != 0 && free_bytes < required {
+        if result.is_ok() && free_bytes < required {
             return Err(format!(
                 "Not enough disk space. Need {} but only {} available",
                 format_size(needed),
@@ -881,7 +920,9 @@ fn check_disk_space(path: &Path, needed: u64) -> Result<(), String> {
         let dir = path.parent().unwrap_or(path);
         let dir_str = dir.to_string_lossy().to_string();
         if let Ok(c_path) = CString::new(dir_str) {
+            #[expect(unsafe_code, reason = "statvfs requires a zeroed out-parameter")]
             let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+            #[expect(unsafe_code, reason = "disk-space query requires the libc FFI call")]
             let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
             if result == 0 {
                 let free_bytes = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
@@ -937,6 +978,19 @@ fn deduplicate_path(path: &Path) -> Result<PathBuf, String> {
     ))
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
 fn dirs_next_downloads() -> String {
     // On Android, directories crate doesn't work — use the standard shared Downloads path
     #[cfg(target_os = "android")]
@@ -988,7 +1042,8 @@ fn resolve_receive_base_dir(out_folder: &str, sort_by_date: bool) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        receive_file, validate_message, Connection, Message, MAX_BATCH_FILES, MAX_TEXT_BYTES,
+        receive_batch, receive_file, validate_message, Connection, Message, MAX_BATCH_FILES,
+        MAX_CONTROL_FRAME_BYTES, MAX_TEXT_BYTES,
     };
     use std::net::Ipv4Addr;
     use std::path::{Path, PathBuf};
@@ -1009,6 +1064,17 @@ mod tests {
 
     fn test_directory(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("landrop-transfer-{label}-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Write one length-prefixed control frame from the test client side.
+    async fn write_frame(client: &mut TcpStream, msg: &Message) {
+        let json = serde_json::to_vec(msg).expect("encode test frame");
+        let len = u32::try_from(json.len()).expect("frame length fits u32");
+        client
+            .write_all(&len.to_be_bytes())
+            .await
+            .expect("write frame length");
+        client.write_all(&json).await.expect("write frame payload");
     }
 
     fn assert_no_partial_files(directory: &Path) {
@@ -1190,6 +1256,316 @@ mod tests {
 
         std::fs::remove_dir_all(directory).expect("remove receive root");
         std::fs::remove_dir_all(outside).expect("remove outside directory");
+    }
+
+    #[test]
+    fn deduplicates_existing_destination_names() {
+        use super::deduplicate_path;
+
+        let directory = test_directory("dedup");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+
+        // Free name is returned unchanged.
+        let free = directory.join("report.pdf");
+        assert_eq!(deduplicate_path(&free).expect("free name"), free);
+
+        // First collision becomes "report (1).pdf", then "report (2).pdf".
+        std::fs::write(&free, b"a").expect("create collision");
+        assert_eq!(
+            deduplicate_path(&free)
+                .expect("first dedup")
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("report (1).pdf")
+        );
+        std::fs::write(directory.join("report (1).pdf"), b"b").expect("create collision 2");
+        assert_eq!(
+            deduplicate_path(&free)
+                .expect("second dedup")
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("report (2).pdf")
+        );
+
+        // Extensionless names keep the bare " (n)" suffix.
+        let bare = directory.join("LICENSE");
+        std::fs::write(&bare, b"c").expect("create bare collision");
+        assert_eq!(
+            deduplicate_path(&bare)
+                .expect("bare dedup")
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("LICENSE (1)")
+        );
+
+        // Multi-dot names only replace the final extension segment.
+        let tarball = directory.join("archive.tar.gz");
+        std::fs::write(&tarball, b"d").expect("create tarball collision");
+        assert_eq!(
+            deduplicate_path(&tarball)
+                .expect("tarball dedup")
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("archive.tar (1).gz")
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn resolves_receive_base_dir_with_and_without_date_folder() {
+        use super::resolve_receive_base_dir;
+
+        let root = test_directory("base-dir");
+        let folder = root.to_string_lossy().into_owned();
+
+        assert_eq!(resolve_receive_base_dir(&folder, false), root);
+
+        let dated = resolve_receive_base_dir(&folder, true);
+        assert_eq!(dated.parent(), Some(root.as_path()));
+        let date_folder = dated
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("date folder name");
+        // dd.mm.yyyy
+        assert_eq!(date_folder.len(), 10);
+        let parts: Vec<&str> = date_folder.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].len() == 2 && parts[0].chars().all(|c| c.is_ascii_digit()));
+        assert!(parts[1].len() == 2 && parts[1].chars().all(|c| c.is_ascii_digit()));
+        assert!(parts[2].len() == 4 && parts[2].chars().all(|c| c.is_ascii_digit()));
+
+        // An empty folder falls back to the platform Downloads directory.
+        assert!(!resolve_receive_base_dir("", false).as_os_str().is_empty());
+    }
+
+    #[test]
+    fn progress_throttle_emits_on_time_or_percent_steps() {
+        use super::ProgressThrottle;
+
+        let mut throttle = ProgressThrottle::new(1_000_000);
+        // First call has no previous emit: always due.
+        assert!(throttle.should_emit(0));
+        // A tiny step right after is neither 100 ms old nor 1% of the total.
+        assert!(!throttle.should_emit(1));
+        // Crossing 1% (10_000 bytes) emits regardless of elapsed time.
+        assert!(throttle.should_emit(10_001));
+
+        // A zero-byte total must not divide by zero and must stay emit-capable.
+        let mut empty = ProgressThrottle::new(0);
+        assert!(empty.should_emit(0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn receives_batch_with_directory_markers() {
+        let directory = test_directory("batch-happy");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let folder = directory.to_string_lossy().into_owned();
+
+        let (mut client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+
+        let send = async {
+            // Item 1 arrives inside a folder, item 2 is a loose file.
+            write_frame(
+                &mut client,
+                &Message::Dir {
+                    name: "docs".into(),
+                },
+            )
+            .await;
+            write_frame(
+                &mut client,
+                &Message::File {
+                    name: "docs/a.txt".into(),
+                    size: 5,
+                },
+            )
+            .await;
+            client.write_all(b"hello").await.expect("write a.txt body");
+            write_frame(
+                &mut client,
+                &Message::File {
+                    name: "b.txt".into(),
+                    size: 3,
+                },
+            )
+            .await;
+            client.write_all(b"abc").await.expect("write b.txt body");
+            write_frame(&mut client, &Message::Done).await;
+            client.shutdown().await.expect("close client stream");
+        };
+
+        let (files, ()) = tokio::join!(receive_batch(&connection, 2, &folder, false, None), send);
+        let files = files.expect("batch receive succeeds");
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, "docs/a.txt");
+        assert_eq!(files[0].2, 5);
+        assert_eq!(files[1].0, "b.txt");
+        assert_eq!(files[1].2, 3);
+        assert_eq!(
+            std::fs::read(directory.join("docs").join("a.txt")).expect("read nested file"),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(directory.join("b.txt")).expect("read loose file"),
+            b"abc"
+        );
+        assert_no_partial_files(&directory);
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_rejects_early_done() {
+        let directory = test_directory("batch-early-done");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let folder = directory.to_string_lossy().into_owned();
+
+        let (mut client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+
+        let send = async {
+            write_frame(
+                &mut client,
+                &Message::File {
+                    name: "only.txt".into(),
+                    size: 2,
+                },
+            )
+            .await;
+            client.write_all(b"ok").await.expect("write body");
+            // Promised two files, terminates after one.
+            write_frame(&mut client, &Message::Done).await;
+            client.shutdown().await.expect("close client stream");
+        };
+
+        let (result, ()) = tokio::join!(receive_batch(&connection, 2, &folder, false, None), send);
+        let error = result.expect_err("early Done must fail the batch");
+        assert!(
+            error.contains("Batch ended early after 1 of 2 files"),
+            "{error}"
+        );
+        assert_no_partial_files(&directory);
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_rejects_unexpected_message_kind() {
+        let directory = test_directory("batch-wrong-kind");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let folder = directory.to_string_lossy().into_owned();
+
+        let (mut client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+
+        let send = async {
+            write_frame(
+                &mut client,
+                &Message::Text {
+                    text: "not a file".into(),
+                },
+            )
+            .await;
+            client.shutdown().await.expect("close client stream");
+        };
+
+        let (result, ()) = tokio::join!(receive_batch(&connection, 1, &folder, false, None), send);
+        let error = result.expect_err("a text frame is not a batch item");
+        assert!(
+            error.contains("Unexpected text message in batch"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_requires_a_done_terminator() {
+        let directory = test_directory("batch-no-done");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let folder = directory.to_string_lossy().into_owned();
+
+        let (mut client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+
+        let send = async {
+            write_frame(
+                &mut client,
+                &Message::File {
+                    name: "one.txt".into(),
+                    size: 1,
+                },
+            )
+            .await;
+            client.write_all(b"x").await.expect("write body");
+            // Wrong terminator.
+            write_frame(&mut client, &Message::Text { text: "bye".into() }).await;
+            client.shutdown().await.expect("close client stream");
+        };
+
+        let (result, ()) = tokio::join!(receive_batch(&connection, 1, &folder, false, None), send);
+        let error = result.expect_err("batch must end with Done");
+        assert!(error.contains("Expected batch completion"), "{error}");
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepts_a_frame_of_exactly_the_maximum_length() {
+        let (mut client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+
+        let send = async {
+            let len = u32::try_from(MAX_CONTROL_FRAME_BYTES).expect("max fits u32");
+            client
+                .write_all(&len.to_be_bytes())
+                .await
+                .expect("write frame length");
+            client
+                .write_all(&vec![b'x'; MAX_CONTROL_FRAME_BYTES])
+                .await
+                .expect("write frame payload");
+            client.shutdown().await.expect("close client stream");
+        };
+
+        let (message, ()) = tokio::join!(connection.recv_message(), send);
+        // The length is accepted (not "too large"); the payload then fails to parse.
+        let error = message.expect_err("payload is not valid JSON");
+        assert!(error.contains("Invalid control message"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_a_frame_one_byte_over_the_maximum() {
+        let (mut client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+
+        let send = async {
+            let len = u32::try_from(MAX_CONTROL_FRAME_BYTES + 1).expect("max + 1 fits u32");
+            client
+                .write_all(&len.to_be_bytes())
+                .await
+                .expect("write frame length");
+            client.shutdown().await.expect("close client stream");
+        };
+
+        let (message, ()) = tokio::join!(connection.recv_message(), send);
+        let error = message.expect_err("oversized frame must be rejected");
+        assert!(error.contains("Control message too large"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clean_eof_before_any_frame_is_not_an_error() {
+        // Guards the discovery-probe case: a peer that connects and closes
+        // without sending a control frame is a probe, not a failed transfer.
+        let (client, server) = tcp_pair().await;
+        let connection = Connection::from_stream(server);
+        drop(client);
+
+        let message = connection.recv_message().await.expect("clean EOF is Ok");
+        assert!(message.is_none());
     }
 
     #[test]

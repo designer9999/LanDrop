@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[expect(
+    clippy::expect_used,
+    reason = "startup cannot continue without an app data dir or a running app"
+)]
 pub fn run() {
     // Linux Wayland: force native Wayland backend for sharp fractional scaling.
     // WebKitGTK's DMA-BUF renderer crashes on NVIDIA + Wayland — disable it.
@@ -21,11 +25,7 @@ pub fn run() {
     // whatever the AppRun script set.
     #[cfg(target_os = "linux")]
     {
-        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
-            || std::env::var("XDG_SESSION_TYPE")
-                .map(|v| v == "wayland")
-                .unwrap_or(false);
-        if is_wayland {
+        if commands::platform::is_wayland_session() {
             // Always set, even if AppImage hook set it to x11
             std::env::set_var("GDK_BACKEND", "wayland");
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
@@ -86,19 +86,7 @@ pub fn run() {
             // support saving window position, so the plugin just thrashes for nothing)
             #[cfg(desktop)]
             {
-                let skip_window_state = {
-                    #[cfg(target_os = "linux")]
-                    {
-                        std::env::var("WAYLAND_DISPLAY").is_ok()
-                            || std::env::var("XDG_SESSION_TYPE")
-                                .map(|v| v == "wayland")
-                                .unwrap_or(false)
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        false
-                    }
-                };
+                let skip_window_state = commands::platform::is_wayland_session();
                 if !skip_window_state {
                     app.handle()
                         .plugin(tauri_plugin_window_state::Builder::default().build())?;
@@ -210,7 +198,6 @@ pub fn run() {
             commands::get_file_info,
             commands::show_in_explorer,
             commands::get_thumbnail,
-            commands::get_local_ip,
             commands::get_platform_info,
             commands::save_clipboard_image,
             commands::get_clipboard_files,

@@ -7,7 +7,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import PeerAvatar from "./PeerAvatar.svelte";
   import { getAppState, PEER_COLORS, type DiscoveredDevice } from "$lib/state/app-state.svelte";
-  import { pickSaveFolder } from "$lib/api/bridge";
+  import { pickSaveFolder, setPeerOutFolder } from "$lib/api/bridge";
 
   interface Props {
     open: boolean;
@@ -61,6 +61,8 @@
       avatarIcon,
       outFolder: outFolder || undefined,
     });
+    // Rust owns receive folders — write through at the moment of action.
+    setPeerOutFolder(device.id, outFolder).catch(() => {});
     open = false;
     onclose();
   }
@@ -73,26 +75,26 @@
   }
 </script>
 
-<Dialog
-  bind:open
-  headline="Device Settings"
-  confirmLabel="Save"
-  onconfirm={handleSave}
-  onclose={onclose}
->
+<Dialog bind:open headline="Device Settings" confirmLabel="Save" onconfirm={handleSave} {onclose}>
   {#if device}
     <div class="flex flex-col gap-4">
-
       <!-- Device info -->
       <div class="device-info">
-        <button class="avatar-edit" onclick={() => avatarIcon = nextAvatarIcon(avatarIcon)} title="Change avatar icon">
+        <button
+          class="avatar-edit"
+          onclick={() => (avatarIcon = nextAvatarIcon(avatarIcon))}
+          title="Change avatar icon"
+        >
           <PeerAvatar name={device.alias} {color} icon={avatarIcon} size="lg" />
         </button>
         <div class="device-details">
           <div class="device-name">{device.alias}</div>
           <div class="device-meta">
             <span class="device-type">
-              <Icon name={device.deviceType === "mobile" ? "phone_android" : "computer"} size={14} />
+              <Icon
+                name={device.deviceType === "mobile" ? "phone_android" : "computer"}
+                size={14}
+              />
               {device.deviceType === "mobile" ? "Mobile" : "Desktop"}
             </span>
             <span class="device-ip">{device.ip}</span>
@@ -113,17 +115,17 @@
             class:avatar-option-active={!avatarIcon}
             aria-label="Use first letter"
             title="First letter"
-            onclick={() => avatarIcon = undefined}
+            onclick={() => (avatarIcon = undefined)}
           >
             <span class="avatar-letter">D</span>
           </button>
-          {#each AVATAR_ICONS as iconName}
+          {#each AVATAR_ICONS as iconName (iconName)}
             <button
               class="avatar-option"
               class:avatar-option-active={avatarIcon === iconName}
               aria-label="Use {iconName} icon"
               title={iconName.replaceAll("_", " ")}
-              onclick={() => avatarIcon = iconName}
+              onclick={() => (avatarIcon = iconName)}
             >
               <Icon name={iconName} size={19} />
             </button>
@@ -133,24 +135,32 @@
 
       <!-- Save folder -->
       <div>
-        <div class="text-xs text-on-surface-variant mb-2">Save folder for this device (optional)</div>
+        <div class="text-xs text-on-surface-variant mb-2">
+          Save folder for this device (optional)
+        </div>
         {#if outFolder}
-          <div class="flex items-center gap-2 h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded-xs">
+          <div
+            class="flex items-center gap-2 h-10 px-3 bg-surface-container-lowest border border-outline-variant rounded-xs"
+          >
             <span class="text-tertiary"><Icon name="folder" size={16} /></span>
             <span class="flex-1 text-xs text-on-surface font-mono truncate">{outFolder}</span>
             <button
               class="w-7 h-7 inline-flex items-center justify-center rounded-full
                      text-on-surface-variant hover:text-error cursor-pointer bg-transparent border-none"
-              onclick={() => outFolder = ""}
+              onclick={() => (outFolder = "")}
             >
               <Icon name="close" size={16} />
             </button>
           </div>
         {:else}
-          <Button variant="outlined" full onclick={async () => {
-            const f = await pickSaveFolder();
-            if (f) outFolder = f;
-          }}>
+          <Button
+            variant="outlined"
+            full
+            onclick={async () => {
+              const f = await pickSaveFolder();
+              if (f) outFolder = f;
+            }}
+          >
             <Icon name="create_new_folder" size={18} />
             Choose folder
           </Button>
@@ -161,7 +171,7 @@
       <div>
         <div class="text-xs text-on-surface-variant mb-2">Color</div>
         <div class="flex gap-2">
-          {#each PEER_COLORS as bg, i}
+          {#each PEER_COLORS as bg, i (bg)}
             <button
               class="w-7 h-7 rounded-full cursor-pointer border-2 shrink-0"
               aria-label="Color {i + 1}"
@@ -170,7 +180,7 @@
                 border-color: {i === color ? 'var(--md-sys-color-on-surface)' : 'transparent'};
                 transition: border-color var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
               "
-              onclick={() => color = i}
+              onclick={() => (color = i)}
             ></button>
           {/each}
         </div>
@@ -181,19 +191,15 @@
         {#if !showDelete}
           <button
             class="text-sm text-error cursor-pointer bg-transparent border-none px-0"
-            onclick={() => showDelete = true}
+            onclick={() => (showDelete = true)}
           >
             Forget this device
           </button>
         {:else}
           <div class="flex items-center gap-2">
             <span class="text-sm text-error">Remove from device list?</span>
-            <Button variant="error" onclick={handleForget}>
-              Remove
-            </Button>
-            <Button variant="outlined" onclick={() => showDelete = false}>
-              No
-            </Button>
+            <Button variant="error" onclick={handleForget}>Remove</Button>
+            <Button variant="outlined" onclick={() => (showDelete = false)}>No</Button>
           </div>
         {/if}
       </div>

@@ -2,7 +2,6 @@ use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(target_os = "android")]
@@ -12,12 +11,64 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 use super::identity::{normalize_uuid, DeviceIdentity};
 use super::protocol::{MDNS_SERVICE_TYPE, TCP_PORT};
 use super::transfer::{probe_peer_id, Connection};
 
 const MAX_INCOMING_SESSIONS: usize = 32;
+
+fn service_instance_name(my_id: &str) -> String {
+    format!("LanDrop-{}", &my_id[..8])
+}
+
+fn service_fullname(my_id: &str) -> String {
+    format!("{}.{}", service_instance_name(my_id), MDNS_SERVICE_TYPE)
+}
+
+/// Build and register this device's mDNS service record.
+fn register_landrop_service(
+    handle: &AppHandle,
+    mdns: &ServiceDaemon,
+    my_id: &str,
+    alias: &str,
+    device_type: &str,
+    local_ip: Ipv4Addr,
+) {
+    let properties = [("id", my_id), ("alias", alias), ("dtype", device_type)];
+    let host_name = format!("landrop-{}.local.", &my_id[..8]);
+    let instance_name = service_instance_name(my_id);
+
+    match ServiceInfo::new(
+        MDNS_SERVICE_TYPE,
+        &instance_name,
+        &host_name,
+        local_ip.to_string(),
+        TCP_PORT,
+        &properties[..],
+    ) {
+        Ok(service) => match mdns.register(service) {
+            Ok(_) => emit_log(
+                handle,
+                "success",
+                &format!("Registered as \"{}\" on {}:{}", alias, local_ip, TCP_PORT),
+            ),
+            Err(e) => emit_log(
+                handle,
+                "error",
+                &format!("Failed to register mDNS service: {}", e),
+            ),
+        },
+        Err(e) => {
+            emit_log(
+                handle,
+                "error",
+                &format!("Failed to create mDNS service info: {}", e),
+            );
+        }
+    }
+}
 
 /// Emit a log event to the frontend debug panel
 fn emit_log(handle: &AppHandle, level: &str, text: &str) {
@@ -48,7 +99,7 @@ fn emit_android_receive_notification(handle: &AppHandle, title: &str, body: &str
     let focused = handle
         .get_webview_window("main")
         .and_then(|window| window.is_focused().ok())
-        .unwrap_or(false);
+        .is_some_and(|focused| focused);
     if focused {
         return;
     }
@@ -245,11 +296,11 @@ struct IncomingSessionContext<'a> {
 /// Run mDNS-based discovery: register this device, browse for others, accept TCP transfers.
 pub async fn run_discovery(
     handle: AppHandle,
-    running: Arc<AtomicBool>,
+    cancel: CancellationToken,
     identity: DeviceIdentity,
     discovered_peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
     receive_routing: ReceiveRoutingState,
-    alias: Arc<Mutex<String>>,
+    mut alias_rx: tokio::sync::watch::Receiver<String>,
 ) {
     // Get our local LAN IP
     let local_ip = match get_local_ipv4() {
@@ -260,7 +311,6 @@ pub async fn run_discovery(
                 "error",
                 "No LAN IPv4 address found — cannot start discovery",
             );
-            running.store(false, Ordering::SeqCst);
             return;
         }
     };
@@ -288,55 +338,21 @@ pub async fn run_discovery(
                      has connection.mdns=2 (or install avahi-daemon).",
                 );
             }
-            running.store(false, Ordering::SeqCst);
             return;
         }
     };
 
     // Register our service
-    let my_id = normalize_uuid(&identity.id).unwrap_or_else(|| identity.id.clone());
-    let current_alias = alias.lock().await.clone();
-
-    let properties = [
-        ("id", my_id.as_str()),
-        ("alias", current_alias.as_str()),
-        ("dtype", identity.device_type.as_str()),
-    ];
-
-    let host_name = format!("landrop-{}.local.", &my_id[..8]);
-    let instance_name = format!("LanDrop-{}", &my_id[..8]);
-
-    match ServiceInfo::new(
-        MDNS_SERVICE_TYPE,
-        &instance_name,
-        &host_name,
-        local_ip.to_string(),
-        TCP_PORT,
-        &properties[..],
-    ) {
-        Ok(service) => match mdns.register(service) {
-            Ok(_) => emit_log(
-                &handle,
-                "success",
-                &format!(
-                    "Registered as \"{}\" on {}:{}",
-                    current_alias, local_ip, TCP_PORT
-                ),
-            ),
-            Err(e) => emit_log(
-                &handle,
-                "error",
-                &format!("Failed to register mDNS service: {}", e),
-            ),
-        },
-        Err(e) => {
-            emit_log(
-                &handle,
-                "error",
-                &format!("Failed to create mDNS service info: {}", e),
-            );
-        }
-    }
+    let my_id = identity.id.to_string();
+    let current_alias = alias_rx.borrow_and_update().clone();
+    register_landrop_service(
+        &handle,
+        &mdns,
+        &my_id,
+        &current_alias,
+        &identity.device_type,
+        local_ip,
+    );
 
     // Browse for other instances
     let browse_receiver = match mdns.browse(MDNS_SERVICE_TYPE) {
@@ -350,7 +366,7 @@ pub async fn run_discovery(
         }
         Err(e) => {
             emit_log(&handle, "error", &format!("Failed to browse mDNS: {}", e));
-            running.store(false, Ordering::SeqCst);
+            let _ = mdns.shutdown();
             return;
         }
     };
@@ -386,13 +402,13 @@ pub async fn run_discovery(
                             TCP_PORT, e
                         ),
                     );
-                    running.store(false, Ordering::SeqCst);
+                    let _ = mdns.shutdown();
                     return;
                 }
             }
         }
         let Some(listener) = listener_opt else {
-            running.store(false, Ordering::SeqCst);
+            let _ = mdns.shutdown();
             return;
         };
         listener
@@ -406,208 +422,229 @@ pub async fn run_discovery(
     type PendingRemovalMap = Arc<Mutex<HashMap<String, (Instant, String, u16)>>>;
     let pending_removals: PendingRemovalMap = Arc::new(Mutex::new(HashMap::new()));
 
-    let running_mdns = running.clone();
+    let cancel_mdns = cancel.clone();
     let handle_mdns = handle.clone();
     let peers_mdns = discovered_peers.clone();
     let my_id_mdns = my_id.clone();
     let pending_mdns = pending_removals.clone();
     let local_ip_mdns = local_ip;
+    let mdns_task = mdns.clone();
+    let device_type_mdns = identity.device_type.clone();
+    let mut alias_rx_mdns = alias_rx.clone();
     let mdns_processor = tokio::spawn(async move {
         let grace_period = Duration::from_secs(15);
-        let mut last_sweep = Instant::now();
+        let mut sweep_interval = time::interval(Duration::from_secs(5));
+        sweep_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        let mut alias_watch_alive = true;
 
         loop {
-            if !running_mdns.load(Ordering::Relaxed) {
-                break;
-            }
+            tokio::select! {
+                _ = cancel_mdns.cancelled() => break,
 
-            // ── Sweep pending removals every 5 seconds ──
-            if last_sweep.elapsed() >= Duration::from_secs(5) {
-                last_sweep = Instant::now();
-                let mut pending = pending_mdns.lock().await;
-                let expired: Vec<(String, String, u16)> = pending
-                    .iter()
-                    .filter(|(_, (at, _, _))| at.elapsed() >= grace_period)
-                    .map(|(id, (_, ip, port))| (id.clone(), ip.clone(), *port))
-                    .collect();
-                for (id, ip, port) in expired {
-                    pending.remove(&id);
-                    // TCP liveness check — try to connect before marking offline
-                    let addr = format!("{}:{}", ip, port);
-                    let alive = matches!(
-                        tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
-                            .await,
-                        Ok(Ok(_))
-                    );
-                    if alive {
-                        // Peer is still alive — mDNS lied. Re-add to discovered.
-                        emit_log(
-                            &handle_mdns,
-                            "info",
-                            &format!("Peer {} still alive (mDNS removal was false)", &id[..8]),
-                        );
-                    } else {
-                        // Peer is genuinely gone
-                        let mut peers = peers_mdns.lock().await;
-                        peers.remove(&id);
-                        drop(peers);
-                        let _ = handle_mdns.emit("lan_peer_lost", serde_json::json!({"id": id}));
+                // ── Alias changed: re-register the service with the new TXT ──
+                changed = alias_rx_mdns.changed(), if alias_watch_alive => {
+                    if changed.is_err() {
+                        alias_watch_alive = false;
+                        continue;
+                    }
+                    let new_alias = alias_rx_mdns.borrow_and_update().clone();
+                    if let Err(e) = mdns_task.unregister(&service_fullname(&my_id_mdns)) {
                         emit_log(
                             &handle_mdns,
                             "warn",
-                            &format!("Peer {} confirmed offline after TCP check", &id[..8]),
+                            &format!("mDNS unregister before alias update failed: {}", e),
                         );
                     }
+                    register_landrop_service(
+                        &handle_mdns,
+                        &mdns_task,
+                        &my_id_mdns,
+                        &new_alias,
+                        &device_type_mdns,
+                        local_ip_mdns,
+                    );
                 }
-            }
 
-            // Poll mDNS events with timeout so we can check `running`
-            if let Ok(Ok(Ok(event))) = tokio::time::timeout(
-                Duration::from_secs(1),
-                tokio::task::spawn_blocking({
-                    let recv = browse_receiver.clone();
-                    move || recv.recv_timeout(Duration::from_secs(1))
-                }),
-            )
-            .await
-            {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        // Extract peer info from TXT records
-                        let props = info.get_properties();
-                        let raw_peer_id = props.get_property_val_str("id").unwrap_or_default();
-                        let peer_id = match normalize_uuid(raw_peer_id) {
-                            Some(id) => id,
-                            None => {
-                                if !raw_peer_id.is_empty() {
+                // ── Sweep pending removals every 5 seconds ──
+                _ = sweep_interval.tick() => {
+                    let mut pending = pending_mdns.lock().await;
+                    let expired: Vec<(String, String, u16)> = pending
+                        .iter()
+                        .filter(|(_, (at, _, _))| at.elapsed() >= grace_period)
+                        .map(|(id, (_, ip, port))| (id.clone(), ip.clone(), *port))
+                        .collect();
+                    for (id, ip, port) in expired {
+                        pending.remove(&id);
+                        // TCP liveness check — try to connect before marking offline
+                        let addr = format!("{}:{}", ip, port);
+                        let alive = matches!(
+                            tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+                                .await,
+                            Ok(Ok(_))
+                        );
+                        if alive {
+                            // Peer is still alive — mDNS lied. Re-add to discovered.
+                            emit_log(
+                                &handle_mdns,
+                                "info",
+                                &format!("Peer {} still alive (mDNS removal was false)", &id[..8]),
+                            );
+                        } else {
+                            // Peer is genuinely gone
+                            let mut peers = peers_mdns.lock().await;
+                            peers.remove(&id);
+                            drop(peers);
+                            let _ = handle_mdns.emit("lan_peer_lost", serde_json::json!({"id": id}));
+                            emit_log(
+                                &handle_mdns,
+                                "warn",
+                                &format!("Peer {} confirmed offline after TCP check", &id[..8]),
+                            );
+                        }
+                    }
+                }
+
+                // ── mDNS browse events, natively async (no blocking-pool churn) ──
+                event = browse_receiver.recv_async() => {
+                    let Ok(event) = event else { break };
+                    match event {
+                        ServiceEvent::ServiceResolved(info) => {
+                            // Extract peer info from TXT records
+                            let props = info.get_properties();
+                            let raw_peer_id = props.get_property_val_str("id").unwrap_or_default();
+                            let peer_id = match normalize_uuid(raw_peer_id) {
+                                Some(id) => id,
+                                None => {
+                                    if !raw_peer_id.is_empty() {
+                                        emit_log(
+                                            &handle_mdns,
+                                            "warn",
+                                            &format!(
+                                                "Ignoring peer with invalid UUID: {}",
+                                                raw_peer_id
+                                            ),
+                                        );
+                                    }
+                                    continue;
+                                }
+                            };
+                            let peer_alias = props
+                                .get_property_val_str("alias")
+                                .unwrap_or_default()
+                                .to_string();
+                            let peer_dtype = props
+                                .get_property_val_str("dtype")
+                                .unwrap_or("desktop")
+                                .to_string();
+
+                            // Skip our own service
+                            if peer_id == my_id_mdns || peer_id.is_empty() {
+                                continue;
+                            }
+
+                            let ip = match choose_peer_ipv4(info.get_addresses().iter(), local_ip_mdns)
+                            {
+                                Some(ip) => ip.to_string(),
+                                None => {
                                     emit_log(
                                         &handle_mdns,
                                         "warn",
                                         &format!(
-                                            "Ignoring peer with invalid UUID: {}",
-                                            raw_peer_id
+                                            "Ignoring peer {} with no usable LAN IPv4 address",
+                                            &peer_id[..8]
                                         ),
                                     );
+                                    continue;
                                 }
-                                continue;
-                            }
-                        };
-                        let peer_alias = props
-                            .get_property_val_str("alias")
-                            .unwrap_or_default()
-                            .to_string();
-                        let peer_dtype = props
-                            .get_property_val_str("dtype")
-                            .unwrap_or("desktop")
-                            .to_string();
+                            };
 
-                        // Skip our own service
-                        if peer_id == my_id_mdns || peer_id.is_empty() {
-                            continue;
-                        }
-
-                        let ip = match choose_peer_ipv4(info.get_addresses().iter(), local_ip_mdns)
-                        {
-                            Some(ip) => ip.to_string(),
-                            None => {
-                                emit_log(
-                                    &handle_mdns,
-                                    "warn",
-                                    &format!(
-                                        "Ignoring peer {} with no usable LAN IPv4 address",
-                                        &peer_id[..8]
-                                    ),
-                                );
-                                continue;
-                            }
-                        };
-
-                        let advertised_ipv4s: Vec<String> = info
-                            .get_addresses()
-                            .iter()
-                            .filter_map(|addr| match addr.to_ip_addr() {
-                                IpAddr::V4(v4) => Some(v4.to_string()),
-                                _ => None,
-                            })
-                            .collect();
-                        if advertised_ipv4s.len() > 1 {
-                            emit_log(
-                                &handle_mdns,
-                                "info",
-                                &format!(
-                                    "Peer {} advertised IPs {}; using {}",
-                                    &peer_id[..8],
-                                    advertised_ipv4s.join(", "),
-                                    ip
-                                ),
-                            );
-                        }
-
-                        if ip.is_empty() {
-                            continue;
-                        }
-
-                        // Cancel any pending removal — peer is alive
-                        {
-                            let mut pending = pending_mdns.lock().await;
-                            if pending.remove(&peer_id).is_some() {
+                            let advertised_ipv4s: Vec<String> = info
+                                .get_addresses()
+                                .iter()
+                                .filter_map(|addr| match addr.to_ip_addr() {
+                                    IpAddr::V4(v4) => Some(v4.to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if advertised_ipv4s.len() > 1 {
                                 emit_log(
                                     &handle_mdns,
                                     "info",
                                     &format!(
-                                        "Cancelled pending removal for {} (re-discovered)",
-                                        &peer_id[..8]
+                                        "Peer {} advertised IPs {}; using {}",
+                                        &peer_id[..8],
+                                        advertised_ipv4s.join(", "),
+                                        ip
+                                    ),
+                                );
+                            }
+
+                            if ip.is_empty() {
+                                continue;
+                            }
+
+                            // Cancel any pending removal — peer is alive
+                            {
+                                let mut pending = pending_mdns.lock().await;
+                                if pending.remove(&peer_id).is_some() {
+                                    emit_log(
+                                        &handle_mdns,
+                                        "info",
+                                        &format!(
+                                            "Cancelled pending removal for {} (re-discovered)",
+                                            &peer_id[..8]
+                                        ),
+                                    );
+                                }
+                            }
+
+                            let peer = DiscoveredPeer {
+                                id: peer_id.clone(),
+                                alias: peer_alias,
+                                device_type: peer_dtype,
+                                ip,
+                                port: info.get_port(),
+                            };
+
+                            let mut peers = peers_mdns.lock().await;
+                            peers.insert(peer_id.clone(), peer.clone());
+                            drop(peers);
+
+                            let _ = handle_mdns.emit("lan_peer_discovered", &peer);
+                        }
+                        ServiceEvent::ServiceRemoved(_, fullname) => {
+                            // DON'T immediately remove — schedule a pending removal.
+                            // mDNS ServiceRemoved is unreliable on Windows.
+                            let peers = peers_mdns.lock().await;
+                            let found = peers
+                                .iter()
+                                .find(|(_, p)| fullname.contains(&p.id[..8]))
+                                .map(|(id, p)| (id.clone(), p.ip.clone(), p.port));
+                            drop(peers);
+
+                            if let Some((id, ip, port)) = found {
+                                let mut pending = pending_mdns.lock().await;
+                                pending.insert(id.clone(), (Instant::now(), ip, port));
+                                emit_log(
+                                    &handle_mdns,
+                                    "info",
+                                    &format!(
+                                        "mDNS removal for {} — verifying in {}s...",
+                                        &id[..8],
+                                        grace_period.as_secs()
                                     ),
                                 );
                             }
                         }
-
-                        let peer = DiscoveredPeer {
-                            id: peer_id.clone(),
-                            alias: peer_alias,
-                            device_type: peer_dtype,
-                            ip,
-                            port: info.get_port(),
-                        };
-
-                        let mut peers = peers_mdns.lock().await;
-                        peers.insert(peer_id.clone(), peer.clone());
-                        drop(peers);
-
-                        let _ = handle_mdns.emit("lan_peer_discovered", &peer);
+                        _ => {}
                     }
-                    ServiceEvent::ServiceRemoved(_, fullname) => {
-                        // DON'T immediately remove — schedule a pending removal.
-                        // mDNS ServiceRemoved is unreliable on Windows.
-                        let peers = peers_mdns.lock().await;
-                        let found = peers
-                            .iter()
-                            .find(|(_, p)| fullname.contains(&p.id[..8]))
-                            .map(|(id, p)| (id.clone(), p.ip.clone(), p.port));
-                        drop(peers);
-
-                        if let Some((id, ip, port)) = found {
-                            let mut pending = pending_mdns.lock().await;
-                            pending.insert(id.clone(), (Instant::now(), ip, port));
-                            emit_log(
-                                &handle_mdns,
-                                "info",
-                                &format!(
-                                    "mDNS removal for {} — verifying in {}s...",
-                                    &id[..8],
-                                    grace_period.as_secs()
-                                ),
-                            );
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
     });
 
     // ── Task 2: TCP listener — accepts incoming transfers ──
-    let running_tcp = running.clone();
+    let cancel_tcp = cancel.clone();
     let handle_tcp = handle.clone();
     let my_uuid = identity.id_bytes();
     let peers_tcp = discovered_peers.clone();
@@ -619,10 +656,6 @@ pub async fn run_discovery(
         let mut last_capacity_warning: Option<Instant> = None;
 
         loop {
-            if !running_tcp.load(Ordering::Relaxed) {
-                break;
-            }
-
             // If accept keeps failing, the socket is dead (network change, sleep/wake).
             // Rebind the listener to recover.
             if consecutive_errors >= 5 {
@@ -635,22 +668,27 @@ pub async fn run_discovery(
                     }
                     Err(e) => {
                         emit_log(&handle_tcp, "error", &format!("TCP rebind failed: {}", e));
-                        time::sleep(Duration::from_secs(3)).await;
+                        tokio::select! {
+                            _ = cancel_tcp.cancelled() => break,
+                            _ = time::sleep(Duration::from_secs(3)) => {}
+                        }
                         continue;
                     }
                 }
             }
 
-            let accept = time::timeout(Duration::from_secs(1), listener.accept()).await;
-            match accept {
-                Ok(Ok((stream, _addr))) => {
+            let accepted = tokio::select! {
+                _ = cancel_tcp.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
+                Ok((stream, _addr)) => {
                     consecutive_errors = 0;
                     let permit = match incoming_session_slots.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
                             if last_capacity_warning
-                                .map(|at| at.elapsed() >= Duration::from_secs(5))
-                                .unwrap_or(true)
+                                .is_none_or(|at| at.elapsed() >= Duration::from_secs(5))
                             {
                                 emit_log(
                                     &handle_tcp,
@@ -693,10 +731,9 @@ pub async fn run_discovery(
                         }
                     });
                 }
-                Ok(Err(_)) => {
+                Err(_) => {
                     consecutive_errors += 1;
                 }
-                Err(_) => {} // Timeout — normal, loop continues
             }
         }
     });
@@ -704,7 +741,7 @@ pub async fn run_discovery(
     // ── Task 3: same-LAN TCP healer scan ──
     // mDNS can be lost or polluted by VPN/virtual interfaces. Probe only this
     // machine's /24 LAN and recover peers by their UUID handshake.
-    let running_scan = running.clone();
+    let cancel_scan = cancel.clone();
     let handle_scan = handle.clone();
     let peers_scan = discovered_peers.clone();
     let my_id_scan = my_id.clone();
@@ -713,9 +750,9 @@ pub async fn run_discovery(
         let mut interval = time::interval(Duration::from_secs(30));
 
         loop {
-            interval.tick().await;
-            if !running_scan.load(Ordering::Relaxed) {
-                break;
+            tokio::select! {
+                _ = cancel_scan.cancelled() => break,
+                _ = interval.tick() => {}
             }
 
             let Some(local_ip) = get_local_ipv4() else {
@@ -746,10 +783,7 @@ pub async fn run_discovery(
                 }
 
                 let mut peers = peers_scan.lock().await;
-                let changed = peers
-                    .get(&peer_id)
-                    .map(|peer| peer.ip != ip)
-                    .unwrap_or(true);
+                let changed = peers.get(&peer_id).is_none_or(|peer| peer.ip != ip);
                 let peer = DiscoveredPeer {
                     id: peer_id.clone(),
                     alias: peers
@@ -782,9 +816,6 @@ pub async fn run_discovery(
 
     // Graceful shutdown — send mDNS goodbye
     let _ = mdns.shutdown();
-
-    // Always reset running flag on exit so start() can succeed next time
-    running.store(false, Ordering::SeqCst);
 }
 
 /// Handle a single incoming TCP session: identify the peer, receive messages, close.
@@ -981,5 +1012,137 @@ async fn handle_incoming_session(
                 return Err("Unexpected directory marker outside a batch".into());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        choose_peer_ipv4, is_bad_interface, is_same_lan_ipv4, is_usable_ipv4,
+        local_interface_score, notification_text_preview, peer_address_score, private_ipv4_score,
+        same_lan_probe_ips, service_fullname, service_instance_name,
+    };
+    use mdns_sd::ScopedIp;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn scoped(a: u8, b: u8, c: u8, d: u8) -> ScopedIp {
+        ScopedIp::from(IpAddr::V4(Ipv4Addr::new(a, b, c, d)))
+    }
+
+    #[test]
+    fn scores_private_ranges_in_preference_order() {
+        // 192.168/16 beats 172.16-31 beats 10/8 beats anything public.
+        assert!(
+            private_ipv4_score(Ipv4Addr::new(192, 168, 1, 5))
+                > private_ipv4_score(Ipv4Addr::new(172, 20, 1, 5))
+        );
+        assert!(
+            private_ipv4_score(Ipv4Addr::new(172, 20, 1, 5))
+                > private_ipv4_score(Ipv4Addr::new(10, 0, 0, 5))
+        );
+        assert!(
+            private_ipv4_score(Ipv4Addr::new(10, 0, 0, 5))
+                > private_ipv4_score(Ipv4Addr::new(8, 8, 8, 8))
+        );
+        // 172.15 and 172.32 are outside the private block.
+        assert_eq!(private_ipv4_score(Ipv4Addr::new(172, 15, 0, 1)), 1);
+        assert_eq!(private_ipv4_score(Ipv4Addr::new(172, 32, 0, 1)), 1);
+        assert_eq!(private_ipv4_score(Ipv4Addr::new(172, 16, 0, 1)), 20);
+        assert_eq!(private_ipv4_score(Ipv4Addr::new(172, 31, 0, 1)), 20);
+    }
+
+    #[test]
+    fn rejects_unusable_ipv4_addresses() {
+        assert!(is_usable_ipv4(Ipv4Addr::new(192, 168, 0, 2)));
+        assert!(!is_usable_ipv4(Ipv4Addr::LOCALHOST));
+        assert!(!is_usable_ipv4(Ipv4Addr::UNSPECIFIED));
+        assert!(!is_usable_ipv4(Ipv4Addr::new(224, 0, 0, 251)));
+        // Link-local autoconfiguration
+        assert!(!is_usable_ipv4(Ipv4Addr::new(169, 254, 1, 1)));
+    }
+
+    #[test]
+    fn penalizes_virtual_and_vpn_interfaces() {
+        assert!(is_bad_interface("wg0"));
+        assert!(is_bad_interface("vEthernet (WSL)"));
+        assert!(is_bad_interface("Hyper-V Virtual Adapter"));
+        assert!(!is_bad_interface("Wi-Fi"));
+        assert!(!is_bad_interface("eth0"));
+
+        let ip = Ipv4Addr::new(192, 168, 1, 10);
+        assert!(local_interface_score("Wi-Fi", ip) > local_interface_score("wg0", ip));
+        // Unusable addresses are ruled out entirely, whatever the interface.
+        assert_eq!(local_interface_score("Wi-Fi", Ipv4Addr::LOCALHOST), -1000);
+    }
+
+    #[test]
+    fn scores_peers_only_on_the_local_lan() {
+        let local = Ipv4Addr::new(192, 168, 1, 10);
+        assert!(is_same_lan_ipv4(local, Ipv4Addr::new(192, 168, 1, 44)));
+        assert!(!is_same_lan_ipv4(local, Ipv4Addr::new(192, 168, 2, 44)));
+
+        assert!(peer_address_score(local, Ipv4Addr::new(192, 168, 1, 44)) > 0);
+        assert_eq!(
+            peer_address_score(local, Ipv4Addr::new(10, 0, 0, 44)),
+            -1000
+        );
+        assert_eq!(peer_address_score(local, Ipv4Addr::LOCALHOST), -1000);
+    }
+
+    #[test]
+    fn chooses_the_same_lan_address_from_multiple_advertisements() {
+        let local = Ipv4Addr::new(192, 168, 1, 10);
+        let advertised = [
+            scoped(10, 8, 0, 6),     // VPN
+            scoped(192, 168, 1, 44), // real LAN
+            scoped(172, 17, 0, 2),   // docker bridge
+        ];
+        assert_eq!(
+            choose_peer_ipv4(advertised.iter(), local),
+            Some(Ipv4Addr::new(192, 168, 1, 44))
+        );
+
+        // Nothing on this LAN: no candidate at all.
+        let off_lan = [scoped(10, 8, 0, 6)];
+        assert_eq!(choose_peer_ipv4(off_lan.iter(), local), None);
+    }
+
+    #[test]
+    fn probe_range_covers_the_lan_without_self() {
+        let local = Ipv4Addr::new(192, 168, 1, 10);
+        let probes = same_lan_probe_ips(local);
+        assert_eq!(probes.len(), 253);
+        assert!(!probes.contains(&local));
+        assert!(probes.contains(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(probes.contains(&Ipv4Addr::new(192, 168, 1, 254)));
+        assert!(!probes.contains(&Ipv4Addr::new(192, 168, 1, 0)));
+        assert!(!probes.contains(&Ipv4Addr::new(192, 168, 1, 255)));
+    }
+
+    #[test]
+    fn builds_notification_previews_within_bounds() {
+        assert_eq!(notification_text_preview("   "), "New message received");
+        assert_eq!(notification_text_preview("  hello  "), "hello");
+
+        let long = "a".repeat(300);
+        let preview = notification_text_preview(&long);
+        assert!(preview.ends_with("..."));
+        assert_eq!(preview.chars().count(), 163);
+
+        // Multi-byte input is truncated by chars, never mid-encoding.
+        let emoji = "🦀".repeat(300);
+        let preview = notification_text_preview(&emoji);
+        assert!(preview.ends_with("..."));
+        assert_eq!(preview.chars().count(), 163);
+    }
+
+    #[test]
+    fn derives_stable_service_names_from_the_device_id() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(service_instance_name(id), "LanDrop-550e8400");
+        assert_eq!(
+            service_fullname(id),
+            "LanDrop-550e8400._landrop._tcp.local."
+        );
     }
 }

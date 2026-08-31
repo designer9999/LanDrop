@@ -9,4 +9,5 @@
 <span
   class="material-symbols-rounded leading-none"
   style="font-size: {size}px; display: inline-flex; align-items: center; justify-content: center; width: {size}px; height: {size}px; vertical-align: middle;"
->{name}</span>
+  >{name}</span
+>

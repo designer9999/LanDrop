@@ -78,8 +78,14 @@
   }
 
   @keyframes welcome-in {
-    from { opacity: 0; transform: translateY(12px) scale(0.97); }
-    to   { opacity: 1; transform: translateY(0) scale(1); }
+    from {
+      opacity: 0;
+      transform: translateY(12px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 
   .welcome-icon-ring {
@@ -165,7 +171,12 @@
   }
 
   @keyframes pulse-opacity {
-    0%, 100% { opacity: 0.7; }
-    50% { opacity: 0.4; }
+    0%,
+    100% {
+      opacity: 0.7;
+    }
+    50% {
+      opacity: 0.4;
+    }
   }
 </style>

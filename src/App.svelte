@@ -8,10 +8,41 @@
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
   import { getAppState } from "$lib/state/app-state.svelte";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
-  import { getStatus, startLanService, lanSendText, lanSendFiles, onLanLog, onLanPeerDiscovered, onLanPeerLost, onLanTextReceived, onLanFilesReceived, onTransferProgress, windowMinimize, windowToggleMaximize, windowClose, windowStartDrag, windowShow, setMica, setDefaultOutFolder, setPeerOutFolder, setReceiveSortByDate, getReceiveFolderSettings, registerShortcut, unregisterShortcut, getFileInfo, getExplorerSelection, getClipboardFiles } from "$lib/api/bridge";
+  import {
+    getStatus,
+    startLanService,
+    lanSendText,
+    lanSendFiles,
+    onLanLog,
+    onLanPeerDiscovered,
+    onLanPeerLost,
+    onLanTextReceived,
+    onLanFilesReceived,
+    onTransferProgress,
+    windowMinimize,
+    windowToggleMaximize,
+    windowClose,
+    windowStartDrag,
+    windowShow,
+    setMica,
+    getReceiveFolderSettings,
+    registerShortcut,
+    unregisterShortcut,
+    getFileInfo,
+    getExplorerSelection,
+    getClipboardFiles,
+  } from "$lib/api/bridge";
   import type { PreparedSendPath, TransferProgress } from "$lib/api/bridge";
   import { loadPersistedAppState, savePersistedAppState } from "$lib/persistence/app-store";
-  import { fileNameFromPath, isImage as fileIsImage, isVideo as fileIsVideo, fileSizeStr } from "$lib/utils/file-utils";
+  import {
+    fileNameFromPath,
+    isImage as fileIsImage,
+    isVideo as fileIsVideo,
+    fileSizeStr,
+    getReceivedFolderPath,
+    joinReceivePath,
+    limitHistoryItems,
+  } from "$lib/utils/file-utils";
   import { sendNativeNotification } from "$lib/utils/native-notifications";
   import { playReceiveSound } from "$lib/utils/notification-sound";
 
@@ -34,11 +65,17 @@
   let deviceDialogOpen = $state(false);
   let editingDevice = $state<import("$lib/state/app-state.svelte").DiscoveredDevice | null>(null);
   let persistedStateReady = $state(false);
-  let receiveSettingsReady = $state(false);
-  let persistedPeerFolders: Record<string, string> = {};
+  // Read-only display snapshot of Rust receive_folders.json, taken once at
+  // startup; Rust remains the single owner (UI writes go through
+  // set_peer_out_folder / set_default_out_folder at the moment of action).
+  let startupPeerFolders: Record<string, string> = {};
   let transferRateBps = $state<number | null>(null);
   let transferEtaSeconds = $state<number | null>(null);
-  let lastProgressSample = $state<{ bytes: number; at: number; direction: "send" | "receive" } | null>(null);
+  let lastProgressSample = $state<{
+    bytes: number;
+    at: number;
+    direction: "send" | "receive";
+  } | null>(null);
   const MAX_HISTORY_ITEMS = 100;
 
   function showSnackbar(msg: string) {
@@ -47,7 +84,7 @@
   }
 
   function openDeviceSettings(id: string) {
-    editingDevice = app.devices.find(d => d.id === id) ?? null;
+    editingDevice = app.devices.find((d) => d.id === id) ?? null;
     deviceDialogOpen = true;
   }
 
@@ -70,40 +107,24 @@
     app.messageSearch = "";
   }
 
-  function getReceivedFolderPath(filePath: string, relativeName: string): string {
-    let folderPath = filePath;
-    const segmentCount = relativeName.split("/").filter(Boolean).length;
-    for (let i = 1; i < segmentCount; i += 1) {
-      folderPath = folderPath.replace(/[\\/][^\\/]+$/, "");
-    }
-    return folderPath;
-  }
-
-  function joinReceivePath(baseFolder: string, name: string): string {
-    const trimmedBase = baseFolder.replace(/[\\/]+$/, "");
-    if (!trimmedBase) return name;
-    const separator = trimmedBase.includes("\\") ? "\\" : "/";
-    const normalizedName = name
-      .replace(/^[/\\]+/, "")
-      .replace(/[\\/]+/g, separator);
-    return `${trimmedBase}${separator}${normalizedName}`;
-  }
-
   function getConfiguredOutFolder(peerId: string): string {
-    return app.devices.find((device) => device.id === peerId)?.outFolder
-      ?? app.receiveOptions.outFolder
-      ?? "";
+    return (
+      app.devices.find((device) => device.id === peerId)?.outFolder ??
+      app.receiveOptions.outFolder ??
+      ""
+    );
   }
 
-  function getAttachmentCandidates(attachment: MessageAttachment): Array<{ name: string; path: string }> {
+  function getAttachmentCandidates(
+    attachment: MessageAttachment,
+  ): Array<{ name: string; path: string }> {
     return [
       { name: attachment.name, path: attachment.path },
-      ...(Array.isArray(attachment.children) ? attachment.children : []).map((child) => ({ name: child.name, path: child.path })),
+      ...(Array.isArray(attachment.children) ? attachment.children : []).map((child) => ({
+        name: child.name,
+        path: child.path,
+      })),
     ];
-  }
-
-  function limitHistoryItems<T>(items: T[]): T[] {
-    return items.length > MAX_HISTORY_ITEMS ? items.slice(0, MAX_HISTORY_ITEMS) : items;
   }
 
   async function repairStoredMessagePaths() {
@@ -120,7 +141,7 @@
           if (await getFileInfo(candidate.path)) continue;
 
           const repairedPath = joinReceivePath(outFolder, candidate.name);
-          if (!await getFileInfo(repairedPath)) continue;
+          if (!(await getFileInfo(repairedPath))) continue;
 
           app.updateAttachmentPath(message.id, candidate.path, repairedPath);
           repairedCount += 1;
@@ -129,7 +150,9 @@
     }
 
     if (repairedCount > 0) {
-      showSnackbar(`Re-linked ${repairedCount} saved item${repairedCount === 1 ? "" : "s"} to your current folder`);
+      showSnackbar(
+        `Re-linked ${repairedCount} saved item${repairedCount === 1 ? "" : "s"} to your current folder`,
+      );
     }
   }
 
@@ -152,39 +175,6 @@
     }, 200);
   });
   $effect(() => () => clearTimeout(persistedStateSaveTimer));
-
-  // Sync default out folder to backend when settings change
-  $effect(() => {
-    if (!receiveSettingsReady) return;
-    const folder = app.receiveOptions.outFolder ?? "";
-    setDefaultOutFolder(folder);
-  });
-
-  $effect(() => {
-    if (!receiveSettingsReady) return;
-    const sortByDate = app.receiveOptions.sortByDate ?? false;
-    setReceiveSortByDate(sortByDate);
-  });
-
-  let previousPeerFolderState = "";
-  $effect(() => {
-    if (!receiveSettingsReady) return;
-    const peerFolders = app.devices
-      .map((device) => `${device.id}:${device.outFolder ?? ""}`)
-      .sort()
-      .join("|");
-
-    if (peerFolders === previousPeerFolderState) return;
-    previousPeerFolderState = peerFolders;
-
-    const nextPersistedPeerFolders = { ...persistedPeerFolders };
-    for (const device of app.devices) {
-      const folder = device.outFolder ?? "";
-      nextPersistedPeerFolders[device.id] = folder;
-      setPeerOutFolder(device.id, folder).catch(() => {});
-    }
-    persistedPeerFolders = nextPersistedPeerFolders;
-  });
 
   onMount(() => {
     let unlisteners: Array<() => void> = [];
@@ -215,27 +205,23 @@
       app.localIp = status.local_ip ?? "unknown";
       if (status.app_version) appVersion = status.app_version;
 
+      // Hydrate the receive-folder display state from Rust — the single owner.
       try {
         const savedFolders = await getReceiveFolderSettings();
         if (disposed) return;
-        persistedPeerFolders = savedFolders.peer_folders ?? {};
+        startupPeerFolders = savedFolders.peer_folders ?? {};
 
         const savedDefaultFolder = savedFolders.default_out_folder?.trim() ?? "";
-        if (savedDefaultFolder && savedDefaultFolder !== (app.receiveOptions.outFolder?.trim() ?? "")) {
-          app.updateReceiveOption("outFolder", savedDefaultFolder || undefined);
-        }
-        if ((savedFolders.sort_by_date ?? false) !== (app.receiveOptions.sortByDate ?? false)) {
-          app.updateReceiveOption("sortByDate", savedFolders.sort_by_date ?? false);
-        }
+        app.updateReceiveOption("outFolder", savedDefaultFolder || undefined);
+        app.updateReceiveOption("sortByDate", savedFolders.sort_by_date ?? false);
 
-        for (const [peerId, folder] of Object.entries(persistedPeerFolders)) {
+        for (const [peerId, folder] of Object.entries(startupPeerFolders)) {
           const existingDevice = app.devices.find((device) => device.id === peerId);
           if (existingDevice && (existingDevice.outFolder ?? "") !== folder) {
             app.updateDeviceSettings(peerId, { outFolder: folder || undefined });
           }
         }
       } catch {}
-      receiveSettingsReady = true;
 
       // Restore mica if enabled
       if (theme.mica) {
@@ -247,40 +233,50 @@
       // Register listeners before discovery starts so initial peer events cannot be missed.
       const listenerResults = await Promise.allSettled([
         onLanLog((level, text) => {
-          const mapped = level === "success" ? "success" : level === "error" ? "error" : level === "warn" ? "warn" : "info";
+          const mapped =
+            level === "success"
+              ? "success"
+              : level === "error"
+                ? "error"
+                : level === "warn"
+                  ? "warn"
+                  : "info";
           app.addLog(mapped as "info" | "warn" | "error" | "success", text);
         }),
         onLanPeerDiscovered((peer) => {
           app.upsertDevice(peer);
-          const savedOutFolder = persistedPeerFolders[peer.id];
-          if (savedOutFolder && app.devices.find((device) => device.id === peer.id)?.outFolder !== savedOutFolder) {
+          const savedOutFolder = startupPeerFolders[peer.id];
+          if (
+            savedOutFolder &&
+            app.devices.find((device) => device.id === peer.id)?.outFolder !== savedOutFolder
+          ) {
             app.updateDeviceSettings(peer.id, { outFolder: savedOutFolder });
           }
           app.addLog("success", `Device discovered: ${peer.alias} (${peer.ip})`);
         }),
         onLanPeerLost((peerId) => {
           app.markDeviceOffline(peerId);
-          const device = app.devices.find(d => d.id === peerId);
+          const device = app.devices.find((d) => d.id === peerId);
           app.addLog("warn", `Device offline: ${device?.alias ?? peerId}`);
         }),
         onLanTextReceived((peerId, text) => {
           revealIncomingPeer(peerId);
           app.addMessage({ peerId, direction: "received", text });
-          app.addActivity({ peerId, direction: "received", type: "text", items: [], success: true });
           app.addLog("info", `Received text from ${peerId.slice(0, 8)} (${text.length} chars)`);
           if (app.notificationsEnabled) playReceiveSound();
           if (app.notificationsEnabled && !document.hasFocus()) {
             sendNativeNotification(
               app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop",
-              text || "New message received"
+              text || "New message received",
             ).catch(() => {});
           }
           if (app.popOnReceive) windowShow();
         }),
         onLanFilesReceived((peerId, files, details) => {
           revealIncomingPeer(peerId);
-          app.addActivity({ peerId, direction: "received", type: "files", items: limitHistoryItems(files), success: true, outFolder: app.effectiveOutFolder });
           if (details.length > 0) {
+            // Plain Map on purpose: a local grouping table, never reactive state.
+            // eslint-disable-next-line svelte/prefer-svelte-reactivity
             const folderFiles = new Map<string, typeof details>();
             const looseFiles: typeof details = [];
             for (const f of details) {
@@ -297,30 +293,51 @@
             const attachments: MessageAttachment[] = [];
             for (const [folder, folderDetails] of folderFiles) {
               const totalSize = folderDetails.reduce((sum, f) => sum + f.size, 0);
-              const folderPath = getReceivedFolderPath(folderDetails[0].path, folderDetails[0].name);
-              const children = limitHistoryItems(folderDetails).map((detail) => ({
-                name: detail.name,
-                path: detail.path,
-                size: fileSizeStr(detail.size),
-                type: fileIsImage(detail.name) ? "image" as const : fileIsVideo(detail.name) ? "video" as const : "file" as const,
-              }));
+              const folderPath = getReceivedFolderPath(
+                folderDetails[0].path,
+                folderDetails[0].name,
+              );
+              const children = limitHistoryItems(folderDetails, MAX_HISTORY_ITEMS).map(
+                (detail) => ({
+                  name: detail.name,
+                  path: detail.path,
+                  size: fileSizeStr(detail.size),
+                  type: fileIsImage(detail.name)
+                    ? ("image" as const)
+                    : fileIsVideo(detail.name)
+                      ? ("video" as const)
+                      : ("file" as const),
+                }),
+              );
               attachments.push({
-                name: folder, path: folderPath, size: fileSizeStr(totalSize),
-                type: "folder" as const, fileCount: folderDetails.length, children,
+                name: folder,
+                path: folderPath,
+                size: fileSizeStr(totalSize),
+                type: "folder" as const,
+                fileCount: folderDetails.length,
+                children,
               });
             }
             for (const f of looseFiles) {
               attachments.push({
-                name: f.name, path: f.path, size: fileSizeStr(f.size),
-                type: fileIsImage(f.name) ? "image" as const : fileIsVideo(f.name) ? "video" as const : "file" as const,
+                name: f.name,
+                path: f.path,
+                size: fileSizeStr(f.size),
+                type: fileIsImage(f.name)
+                  ? ("image" as const)
+                  : fileIsVideo(f.name)
+                    ? ("video" as const)
+                    : ("file" as const),
               });
             }
             app.addMessage({ peerId, direction: "received", text: "", attachments });
           }
           if (app.notificationsEnabled) playReceiveSound();
           if (app.notificationsEnabled && !document.hasFocus()) {
-            const peerAlias = app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop";
-            const body = files.length === 1 ? `Received ${files[0]}` : `Received ${files.length} items`;
+            const peerAlias =
+              app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop";
+            const body =
+              files.length === 1 ? `Received ${files[0]}` : `Received ${files.length} items`;
             sendNativeNotification(peerAlias, body).catch(() => {});
           }
           if (app.popOnReceive) windowShow();
@@ -329,7 +346,10 @@
           const completedBytes = progress.sent_bytes ?? progress.received_bytes ?? 0;
           const totalBytes = progress.total_bytes ?? 0;
           if (progress.phase === "start") {
-            lastProgressSample = completedBytes > 0 ? { bytes: completedBytes, at: Date.now(), direction: progress.direction } : null;
+            lastProgressSample =
+              completedBytes > 0
+                ? { bytes: completedBytes, at: Date.now(), direction: progress.direction }
+                : null;
             transferRateBps = null;
             transferEtaSeconds = null;
           } else if (progress.phase === "transferring" && totalBytes > 0) {
@@ -359,7 +379,7 @@
       ]);
 
       const registeredListeners = listenerResults.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : []
+        result.status === "fulfilled" ? [result.value] : [],
       );
       if (disposed) {
         registeredListeners.forEach((unlisten) => unlisten());
@@ -441,8 +461,14 @@
   async function handleSendFiles() {
     if (!app.hasFiles || app.transferActive) return;
     const device = app.activeDevice;
-    if (!device) { showSnackbar("No device selected"); return; }
-    if (!device.online) { showSnackbar("Device is offline"); return; }
+    if (!device) {
+      showSnackbar("No device selected");
+      return;
+    }
+    if (!device.online) {
+      showSnackbar("Device is offline");
+      return;
+    }
 
     const filesCopy = [...app.files];
     const pathsCopy = [...app.filePaths];
@@ -457,13 +483,21 @@
         preparedFiles = prepared;
       });
       if (sent) {
-        const names = filesCopy.map(f => f.info?.name ?? fileNameFromPath(f.path, "file"));
-        const historyPathFor = new Map(preparedFiles.map((file) => [file.originalPath, file.historyPath]));
-        app.addActivity({ peerId: device.id, direction: "sent", type: "files", items: limitHistoryItems(names), success: true });
-        const attachments: MessageAttachment[] = limitHistoryItems(filesCopy).map(f => ({
+        const historyPathFor = new Map(
+          preparedFiles.map((file) => [file.originalPath, file.historyPath]),
+        );
+        const attachments: MessageAttachment[] = limitHistoryItems(
+          filesCopy,
+          MAX_HISTORY_ITEMS,
+        ).map((f) => ({
           name: f.info?.name ?? fileNameFromPath(f.path, "file"),
-          path: historyPathFor.get(f.path) ?? f.path, size: f.info?.size ?? "",
-          type: fileIsImage(f.info?.name ?? f.path) ? "image" as const : fileIsVideo(f.info?.name ?? f.path) ? "video" as const : "file" as const,
+          path: historyPathFor.get(f.path) ?? f.path,
+          size: f.info?.size_bytes ? fileSizeStr(f.info.size_bytes) : "",
+          type: fileIsImage(f.info?.name ?? f.path)
+            ? ("image" as const)
+            : fileIsVideo(f.info?.name ?? f.path)
+              ? ("video" as const)
+              : ("file" as const),
         }));
         app.addMessage({ peerId: device.id, direction: "sent", text: "", attachments });
         app.clearFiles();
@@ -474,8 +508,7 @@
     } catch (e) {
       showSnackbar("Send failed — " + e);
       app.markDeviceOffline(device.id);
-      app.addLog("warn", `Send failed for ${device.alias} (${device.ip || "unknown ip"}) — restarting discovery: ${e}`);
-      startLanService().catch(() => {});
+      app.addLog("warn", `Send failed for ${device.alias} (${device.ip || "unknown ip"}): ${e}`);
     } finally {
       app.transferActive = false;
     }
@@ -484,7 +517,10 @@
   async function handleSendText() {
     if (!app.sendTextContent.trim() || app.transferActive) return;
     const device = app.activeDevice;
-    if (!device) { showSnackbar("No device selected"); return; }
+    if (!device) {
+      showSnackbar("No device selected");
+      return;
+    }
     if (!device.online) {
       showSnackbar("Device is offline");
       return;
@@ -505,7 +541,6 @@
       const sent = await lanSendText(device.id, textToSend, device.ip);
       if (sent) {
         app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
-        app.addActivity({ peerId: device.id, direction: "sent", type: "text", items: [], success: true });
       } else {
         restoreText();
         showSnackbar(`Send failed — ${device.alias} did not accept the message`);
@@ -553,7 +588,11 @@
   }
 </script>
 
-<div class="app-shell" class:mica-on={theme.mica} style:--mica-opacity={theme.mica ? (0.05 + theme.micaOpacity * 0.75 / 100) : 1}>
+<div
+  class="app-shell"
+  class:mica-on={theme.mica}
+  style:--mica-opacity={theme.mica ? 0.05 + (theme.micaOpacity * 0.75) / 100 : 1}
+>
   <!-- Custom title bar -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="titlebar" onmousedown={handleTitlebarMouseDown}>
@@ -571,7 +610,7 @@
 
       <IconButton
         title={app.activeView === "settings" ? "Back" : "Settings"}
-        onclick={() => app.activeView = app.activeView === "settings" ? "transfer" : "settings"}
+        onclick={() => (app.activeView = app.activeView === "settings" ? "transfer" : "settings")}
       >
         <Icon name={app.activeView === "settings" ? "close" : "tune"} size={20} />
       </IconButton>
@@ -590,7 +629,11 @@
   <!-- Content area -->
   <main class="content-area">
     {#if app.activeView === "transfer"}
-      <TransferPage onsnackbar={showSnackbar} onsend={handleSendFiles} onsendtext={handleSendText} />
+      <TransferPage
+        onsnackbar={showSnackbar}
+        onsend={handleSendFiles}
+        onsendtext={handleSendText}
+      />
     {:else}
       <div class="settings-scroll">
         <SettingsPage {appVersion} onsnackbar={showSnackbar} />
@@ -612,7 +655,9 @@
             {/if}
           </span>
           {#if transferRateLabel || transferEtaLabel}
-            <span class="progress-meta">{[transferRateLabel, transferEtaLabel].filter(Boolean).join(" · ")}</span>
+            <span class="progress-meta"
+              >{[transferRateLabel, transferEtaLabel].filter(Boolean).join(" · ")}</span
+            >
           {/if}
         </div>
         {#if progressPct !== null}
@@ -621,13 +666,15 @@
       </div>
     </div>
   {/if}
-
 </div>
 
 <DeviceSettingsDialog
   bind:open={deviceDialogOpen}
   device={editingDevice}
-  onclose={() => { deviceDialogOpen = false; editingDevice = null; }}
+  onclose={() => {
+    deviceDialogOpen = false;
+    editingDevice = null;
+  }}
 />
 
 <Snackbar message={snackbarMsg} bind:visible={snackbarVisible} />
@@ -648,7 +695,8 @@
     display: flex;
     align-items: stretch;
     background: var(--md-sys-color-surface);
-    border-bottom: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 50%, transparent);
+    border-bottom: 1px solid
+      color-mix(in srgb, var(--md-sys-color-outline-variant) 50%, transparent);
     flex-shrink: 0;
   }
   .titlebar-content {
@@ -725,7 +773,6 @@
     font-weight: 600;
     font-size: 11px;
   }
-
 
   /* ── Mica mode — transparent backgrounds ── */
   :global(body.mica-active) {

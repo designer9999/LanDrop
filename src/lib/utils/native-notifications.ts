@@ -1,4 +1,8 @@
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 let permissionResolved = false;
 let permissionGranted = false;
@@ -22,7 +26,7 @@ export async function sendNativeNotification(title: string, body: string): Promi
   // Android receive notifications are emitted from Rust so they still work
   // when the WebView is backgrounded or paused.
   if (/Android/i.test(navigator.userAgent)) return;
-  if (!await ensurePermission()) return;
+  if (!(await ensurePermission())) return;
   await sendNotification({
     id: INCOMING_NOTIFICATION_ID,
     group: INCOMING_NOTIFICATION_GROUP,

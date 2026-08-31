@@ -5,6 +5,7 @@
   import Icon from "$lib/ui/Icon.svelte";
   import { showInExplorer, openFile, downloadFile, isMobile, getVideoSrc } from "$lib/api/bridge";
   import { isVideo } from "$lib/utils/file-utils";
+  import { formatDuration } from "$lib/utils/video-utils";
   import { onMount, onDestroy } from "svelte";
   import { revokeBlobUrl } from "$lib/api/bridge";
 
@@ -28,14 +29,26 @@
   let videoDuration = $state(0);
   let videoPlaying = $state(false);
 
+  let destroyed = false;
+
   onMount(() => {
     if (isVid) {
-      getVideoSrc(path).then(s => { videoSrc = s; });
+      getVideoSrc(path).then((s) => {
+        if (destroyed) {
+          if (s) revokeBlobUrl(s);
+          return;
+        }
+        videoSrc = s;
+      });
     }
   });
 
   onDestroy(() => {
-    if (videoEl) { videoEl.pause(); videoEl.src = ""; }
+    destroyed = true;
+    if (videoEl) {
+      videoEl.pause();
+      videoEl.src = "";
+    }
     if (videoSrc) revokeBlobUrl(videoSrc);
   });
 
@@ -73,13 +86,6 @@
     if (!videoEl) return;
     videoEl.currentTime = Number((e.target as HTMLInputElement).value);
   }
-
-  function formatDuration(s: number): string {
-    if (!s || !isFinite(s)) return "0:00";
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
-  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -89,14 +95,36 @@
     <span class="lightbox-name">{name}</span>
     <div class="lightbox-actions">
       {#if mobile}
-        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); handleDownload(); }} title="Save" disabled={saving}>
+        <button
+          class="lightbox-btn"
+          onclick={(e) => {
+            e.stopPropagation();
+            handleDownload();
+          }}
+          title="Save"
+          disabled={saving}
+        >
           <Icon name={saving ? "hourglass_empty" : "download"} size={18} />
         </button>
-        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); openFile(path); }} title="Open">
+        <button
+          class="lightbox-btn"
+          onclick={(e) => {
+            e.stopPropagation();
+            openFile(path);
+          }}
+          title="Open"
+        >
           <Icon name="open_in_new" size={18} />
         </button>
       {:else}
-        <button class="lightbox-btn" onclick={(e) => { e.stopPropagation(); showInExplorer(path); }} title="Open in folder">
+        <button
+          class="lightbox-btn"
+          onclick={(e) => {
+            e.stopPropagation();
+            showInExplorer(path);
+          }}
+          title="Open in folder"
+        >
           <Icon name="folder_open" size={18} />
         </button>
       {/if}
@@ -109,7 +137,6 @@
   {#if isVid && videoSrc}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <!-- svelte-ignore a11y_media_has_caption -->
     <div class="lightbox-video-container" onclick={(e) => e.stopPropagation()}>
       <video
         bind:this={videoEl}
@@ -118,9 +145,11 @@
         muted={videoMuted}
         playsinline
         ontimeupdate={handleTimeUpdate}
-        onplay={() => videoPlaying = true}
-        onpause={() => videoPlaying = false}
-        onloadedmetadata={() => { if (videoEl) videoDuration = videoEl.duration; }}
+        onplay={() => (videoPlaying = true)}
+        onpause={() => (videoPlaying = false)}
+        onloadedmetadata={() => {
+          if (videoEl) videoDuration = videoEl.duration;
+        }}
         poster={src || undefined}
         autoplay
       ></video>
@@ -139,16 +168,27 @@
           oninput={handleSeek}
         />
         <span class="lightbox-video-time">{formatDuration(videoDuration)}</span>
-        <button class="lightbox-ctrl-btn" onclick={() => { videoMuted = !videoMuted; if (videoEl) videoEl.muted = videoMuted; }}>
+        <button
+          class="lightbox-ctrl-btn"
+          onclick={() => {
+            videoMuted = !videoMuted;
+            if (videoEl) videoEl.muted = videoMuted;
+          }}
+        >
           <Icon name={videoMuted ? "volume_off" : "volume_up"} size={18} />
         </button>
       </div>
     </div>
   {:else}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <img {src} alt={name} class="lightbox-img" class:lightbox-img-loading={loading} onclick={(e) => e.stopPropagation()} />
+    <img
+      {src}
+      alt={name}
+      class="lightbox-img"
+      class:lightbox-img-loading={loading}
+      onclick={(e) => e.stopPropagation()}
+    />
     {#if loading}
       <span class="lightbox-loading">Loading full image...</span>
     {/if}
@@ -169,8 +209,12 @@
     cursor: pointer;
   }
   @keyframes overlay-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
   .lightbox-header {
     position: absolute;
@@ -181,12 +225,12 @@
     align-items: center;
     justify-content: space-between;
     padding: 8px 12px;
-    background: linear-gradient(rgba(0,0,0,0.6), transparent);
+    background: linear-gradient(rgba(0, 0, 0, 0.6), transparent);
     z-index: 2;
   }
   .lightbox-name {
     font-size: 12px;
-    color: rgba(255,255,255,0.8);
+    color: rgba(255, 255, 255, 0.8);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -199,7 +243,8 @@
     gap: 4px;
     flex-shrink: 0;
   }
-  .lightbox-btn, .lightbox-close {
+  .lightbox-btn,
+  .lightbox-close {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -207,14 +252,15 @@
     height: 32px;
     border: none;
     border-radius: 50%;
-    background: rgba(255,255,255,0.15);
+    background: rgba(255, 255, 255, 0.15);
     color: #fff;
     cursor: pointer;
     flex-shrink: 0;
     transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .lightbox-btn:hover, .lightbox-close:hover {
-    background: rgba(255,255,255,0.25);
+  .lightbox-btn:hover,
+  .lightbox-close:hover {
+    background: rgba(255, 255, 255, 0.25);
   }
   .lightbox-img {
     max-width: 90%;
@@ -231,7 +277,7 @@
   .lightbox-loading {
     margin-top: 8px;
     font-size: 11px;
-    color: rgba(255,255,255,0.5);
+    color: rgba(255, 255, 255, 0.5);
   }
 
   /* ── Video lightbox ── */
@@ -265,16 +311,18 @@
     height: 32px;
     border: none;
     border-radius: 50%;
-    background: rgba(255,255,255,0.12);
+    background: rgba(255, 255, 255, 0.12);
     color: #fff;
     cursor: pointer;
     flex-shrink: 0;
     transition: background 0.15s;
   }
-  .lightbox-ctrl-btn:hover { background: rgba(255,255,255,0.25); }
+  .lightbox-ctrl-btn:hover {
+    background: rgba(255, 255, 255, 0.25);
+  }
   .lightbox-video-time {
     font-size: 11px;
-    color: rgba(255,255,255,0.7);
+    color: rgba(255, 255, 255, 0.7);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     min-width: 32px;
@@ -284,7 +332,7 @@
     flex: 1;
     height: 4px;
     appearance: none;
-    background: rgba(255,255,255,0.2);
+    background: rgba(255, 255, 255, 0.2);
     border-radius: 2px;
     outline: none;
     cursor: pointer;

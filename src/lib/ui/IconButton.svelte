@@ -74,9 +74,15 @@
     opacity: 0;
     transition: opacity var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .icon-btn:hover .icon-btn-state { opacity: 0.08; }
-  .icon-btn:focus-visible .icon-btn-state { opacity: 0.1; }
-  .icon-btn:active .icon-btn-state { opacity: 0.1; }
+  .icon-btn:hover .icon-btn-state {
+    opacity: 0.08;
+  }
+  .icon-btn:focus-visible .icon-btn-state {
+    opacity: 0.1;
+  }
+  .icon-btn:active .icon-btn-state {
+    opacity: 0.1;
+  }
 
   /* Icon */
   .icon-btn-icon {
@@ -103,8 +109,12 @@
     color: var(--md-sys-color-on-primary);
     transition: box-shadow var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .icon-btn-filled:hover { box-shadow: var(--shadow-level1); }
-  .icon-btn-filled .icon-btn-state { background: var(--md-sys-color-on-primary); }
+  .icon-btn-filled:hover {
+    box-shadow: var(--shadow-level1);
+  }
+  .icon-btn-filled .icon-btn-state {
+    background: var(--md-sys-color-on-primary);
+  }
 
   /* === Filled Tonal === */
   .icon-btn-filledTonal {
@@ -112,15 +122,21 @@
     color: var(--md-sys-color-on-secondary-container);
     transition: box-shadow var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .icon-btn-filledTonal:hover { box-shadow: var(--shadow-level1); }
-  .icon-btn-filledTonal .icon-btn-state { background: var(--md-sys-color-on-secondary-container); }
+  .icon-btn-filledTonal:hover {
+    box-shadow: var(--shadow-level1);
+  }
+  .icon-btn-filledTonal .icon-btn-state {
+    background: var(--md-sys-color-on-secondary-container);
+  }
 
   /* === Outlined === */
   .icon-btn-outlined {
     color: var(--md-sys-color-on-surface-variant);
     border: 1px solid var(--md-sys-color-outline-variant);
   }
-  .icon-btn-outlined .icon-btn-state { background: var(--md-sys-color-on-surface-variant); }
+  .icon-btn-outlined .icon-btn-state {
+    background: var(--md-sys-color-on-surface-variant);
+  }
 
   /* === Disabled states === */
   .icon-btn-disabled.icon-btn-filled,

@@ -6,6 +6,7 @@
   import { showInExplorer, copyToClipboard } from "$lib/api/bridge";
   import type { FilePreview } from "$lib/api/bridge";
   import hljs from "highlight.js/lib/common";
+  import { fileSizeStr } from "$lib/utils/file-utils";
 
   interface Props {
     preview: FilePreview | null;
@@ -18,45 +19,78 @@
   let { preview, path, loading, onclose, onsnackbar }: Props = $props();
 
   let copied = $state(false);
-  let codeEl = $state<HTMLElement | null>(null);
 
   // Map common extensions to highlight.js language names
   const EXT_MAP: Record<string, string> = {
-    js: "javascript", ts: "typescript", jsx: "javascript", tsx: "typescript",
-    py: "python", rb: "ruby", rs: "rust", go: "go", java: "java",
-    kt: "kotlin", swift: "swift", cs: "csharp", cpp: "cpp", c: "c", h: "c",
-    php: "php", sh: "bash", bash: "bash", zsh: "bash", ps1: "shell",
-    json: "json", yaml: "yaml", yml: "yaml", toml: "ini", xml: "xml",
-    html: "xml", htm: "xml", css: "css", scss: "scss", less: "less",
-    sql: "sql", md: "markdown", txt: "", csv: "", log: "",
-    svelte: "xml", vue: "xml", dockerfile: "bash",
-    makefile: "makefile", gitignore: "", env: "bash",
+    js: "javascript",
+    ts: "typescript",
+    jsx: "javascript",
+    tsx: "typescript",
+    py: "python",
+    rb: "ruby",
+    rs: "rust",
+    go: "go",
+    java: "java",
+    kt: "kotlin",
+    swift: "swift",
+    cs: "csharp",
+    cpp: "cpp",
+    c: "c",
+    h: "c",
+    php: "php",
+    sh: "bash",
+    bash: "bash",
+    zsh: "bash",
+    ps1: "shell",
+    json: "json",
+    yaml: "yaml",
+    yml: "yaml",
+    toml: "ini",
+    xml: "xml",
+    html: "xml",
+    htm: "xml",
+    css: "css",
+    scss: "scss",
+    less: "less",
+    sql: "sql",
+    md: "markdown",
+    txt: "",
+    csv: "",
+    log: "",
+    svelte: "xml",
+    vue: "xml",
+    dockerfile: "bash",
+    makefile: "makefile",
+    gitignore: "",
+    env: "bash",
   };
 
   const ext = $derived((preview?.extension ?? "").replace(".", "").toLowerCase());
   const lang = $derived(EXT_MAP[ext] ?? "");
 
-  // Highlight after the code element is rendered
-  $effect(() => {
-    if (codeEl && preview?.content) {
-      // Reset and re-highlight
-      codeEl.textContent = preview.content;
-      delete (codeEl.dataset as any).highlighted;
-      if (lang) {
-        codeEl.className = `language-${lang}`;
-      } else {
-        codeEl.className = "";
-      }
-      hljs.highlightElement(codeEl);
-    }
-  });
+  /**
+   * Attachment that (re-)highlights the code block whenever the content or
+   * language changes — the canonical replacement for a bind:this + $effect
+   * DOM dance, and it keeps the node out of component state.
+   */
+  function highlight(content: string, language: string) {
+    return (node: HTMLElement) => {
+      node.textContent = content;
+      node.className = language ? `language-${language}` : "";
+      // hljs refuses to re-highlight a node it has already processed.
+      node.removeAttribute("data-highlighted");
+      hljs.highlightElement(node);
+    };
+  }
 
   async function handleCopy() {
     if (!preview?.content) return;
     await copyToClipboard(preview.content);
     copied = true;
     onsnackbar?.("Copied to clipboard");
-    setTimeout(() => { copied = false; }, 1500);
+    setTimeout(() => {
+      copied = false;
+    }, 1500);
   }
 
   function getLines(content: string): number[] {
@@ -72,13 +106,16 @@
   <div class="file-preview-modal" onclick={(e) => e.stopPropagation()}>
     <div class="file-preview-header">
       <div class="file-preview-title">
-        <span class="file-preview-name">{preview?.name ?? '...'}</span>
+        <span class="file-preview-name">{preview?.name ?? "..."}</span>
         {#if preview}
           <span class="file-preview-meta">
-            {preview.size}
-            {#if preview.line_count} &bull; {preview.line_count} lines{/if}
-            {#if lang} &bull; {lang}{/if}
-            {#if preview.truncated} &bull; Truncated{/if}
+            {fileSizeStr(preview.size_bytes)}
+            {#if preview.line_count}
+              &bull; {preview.line_count} lines{/if}
+            {#if lang}
+              &bull; {lang}{/if}
+            {#if preview.truncated}
+              &bull; Truncated{/if}
           </span>
         {/if}
       </div>
@@ -100,11 +137,13 @@
       {:else if preview?.content}
         <div class="code-container">
           <div class="line-numbers" aria-hidden="true">
-            {#each getLines(preview.content) as num}
+            {#each getLines(preview.content) as num (num)}
               <span>{num}</span>
             {/each}
           </div>
-          <pre class="code-block"><code bind:this={codeEl}>{preview.content}</code></pre>
+          <pre class="code-block"><code {@attach highlight(preview.content, lang)}
+              >{preview.content}</code
+            ></pre>
         </div>
       {:else}
         <div class="file-preview-loading">No preview available for this file type.</div>
@@ -126,8 +165,12 @@
     cursor: pointer;
   }
   @keyframes overlay-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
   .file-preview-modal {
     display: flex;
@@ -138,14 +181,20 @@
     border-radius: 16px;
     background: var(--md-sys-color-surface-container);
     color: var(--md-sys-color-on-surface);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     cursor: default;
     overflow: hidden;
     animation: dialog-scale-in var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
   }
   @keyframes dialog-scale-in {
-    from { transform: scale(0.95); opacity: 0; }
-    to   { transform: scale(1); opacity: 1; }
+    from {
+      transform: scale(0.95);
+      opacity: 0;
+    }
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
   }
   .file-preview-header {
     display: flex;
@@ -250,30 +299,51 @@
   }
 
   /* Syntax highlighting — M3 themed */
-  :global(.hljs) { background: transparent; color: var(--md-sys-color-on-surface); }
+  :global(.hljs) {
+    background: transparent;
+    color: var(--md-sys-color-on-surface);
+  }
   :global(.hljs-keyword),
   :global(.hljs-selector-tag),
   :global(.hljs-built_in),
-  :global(.hljs-type) { color: var(--md-sys-color-primary); }
+  :global(.hljs-type) {
+    color: var(--md-sys-color-primary);
+  }
   :global(.hljs-string),
   :global(.hljs-attr),
-  :global(.hljs-attribute) { color: var(--md-sys-color-tertiary); }
+  :global(.hljs-attribute) {
+    color: var(--md-sys-color-tertiary);
+  }
   :global(.hljs-tag),
   :global(.hljs-name),
   :global(.hljs-title),
-  :global(.hljs-title.function_) { color: var(--md-sys-color-secondary); }
+  :global(.hljs-title.function_) {
+    color: var(--md-sys-color-secondary);
+  }
   :global(.hljs-number),
   :global(.hljs-literal),
   :global(.hljs-symbol),
-  :global(.hljs-bullet) { color: var(--md-sys-color-primary); opacity: 0.8; }
+  :global(.hljs-bullet) {
+    color: var(--md-sys-color-primary);
+    opacity: 0.8;
+  }
   :global(.hljs-comment),
   :global(.hljs-quote),
-  :global(.hljs-meta) { color: var(--md-sys-color-outline); font-style: italic; }
+  :global(.hljs-meta) {
+    color: var(--md-sys-color-outline);
+    font-style: italic;
+  }
   :global(.hljs-punctuation),
-  :global(.hljs-operator) { color: var(--md-sys-color-on-surface-variant); }
+  :global(.hljs-operator) {
+    color: var(--md-sys-color-on-surface-variant);
+  }
   :global(.hljs-variable),
   :global(.hljs-template-variable),
-  :global(.hljs-params) { color: var(--md-sys-color-on-surface); }
+  :global(.hljs-params) {
+    color: var(--md-sys-color-on-surface);
+  }
   :global(.hljs-regexp),
-  :global(.hljs-link) { color: var(--md-sys-color-error); }
+  :global(.hljs-link) {
+    color: var(--md-sys-color-error);
+  }
 </style>

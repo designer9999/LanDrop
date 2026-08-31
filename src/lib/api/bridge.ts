@@ -4,7 +4,13 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { fileNameFromPath, imageMimeFromName, isImage, videoMimeFromName } from "$lib/utils/file-utils";
+import {
+  fileNameFromPath,
+  imageMimeFromName,
+  isImage,
+  videoMimeFromName,
+} from "$lib/utils/file-utils";
+import { VideoLruCache, VIDEO_CACHE_BUDGET_BYTES } from "./video-cache";
 
 export interface StatusResponse {
   ok: boolean;
@@ -14,7 +20,8 @@ export interface StatusResponse {
 
 export interface FileInfo {
   name: string;
-  size: string;
+  /** Raw byte count — format with fileSizeStr at render time. */
+  size_bytes: number;
   type: string;
   count?: number;
 }
@@ -115,8 +122,8 @@ export async function setReceiveSortByDate(enabled: boolean): Promise<void> {
   return invoke("set_receive_sort_by_date", { enabled });
 }
 
-export async function setDeviceAlias(alias: string): Promise<void> {
-  return invoke("set_device_alias", { alias });
+export async function setDeviceAlias(alias: string): Promise<string> {
+  return invoke<string>("set_device_alias", { alias });
 }
 
 export async function getDeviceIdentity(): Promise<DeviceIdentity> {
@@ -163,7 +170,9 @@ export async function downloadFile(path: string): Promise<string> {
   try {
     const dirExists = await exists(targetDir);
     if (!dirExists) await mkdir(targetDir, { recursive: true });
-  } catch { /* dir might already exist */ }
+  } catch {
+    /* dir might already exist */
+  }
 
   const targetPath = `${targetDir}/${name}`;
   const data = await readFile(path);
@@ -171,7 +180,9 @@ export async function downloadFile(path: string): Promise<string> {
   // Tell Android to scan the file so it appears in Gallery / Files app
   try {
     await invoke("plugin:file-helper|saveToDownloads", { path: targetPath });
-  } catch { /* scan is best-effort */ }
+  } catch {
+    /* scan is best-effort */
+  }
   return targetPath;
 }
 
@@ -184,9 +195,13 @@ export async function deleteHistoryFiles(paths: string[]): Promise<void> {
   }
 }
 
-export async function getContentFileName(uri: string): Promise<{ name: string; mimeType: string } | null> {
+export async function getContentFileName(
+  uri: string,
+): Promise<{ name: string; mimeType: string } | null> {
   try {
-    return await invoke<{ name: string; mimeType: string }>("plugin:file-helper|getFileName", { uri });
+    return await invoke<{ name: string; mimeType: string }>("plugin:file-helper|getFileName", {
+      uri,
+    });
   } catch {
     return null;
   }
@@ -210,9 +225,15 @@ export async function getFullImage(path: string, maxPx: number = 800): Promise<s
   return invoke<string | null>("get_thumbnail", { path, maxPx });
 }
 
-/** Get a playable video source URL (reads file → blob URL) */
-const videoSrcCache = new Map<string, Promise<string | null>>();
-const cachedVideoBlobUrls = new Set<string>();
+/** Byte-budgeted, refcounted store of video blob URLs (each is the whole file). */
+const videoCache = new VideoLruCache(VIDEO_CACHE_BUDGET_BYTES, (url) => {
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    /* ignore */
+  }
+});
+const pendingVideoLoads = new Map<string, Promise<string | null>>();
 
 function toBlobPart(data: Uint8Array): ArrayBuffer {
   const buffer = new ArrayBuffer(data.byteLength);
@@ -220,36 +241,52 @@ function toBlobPart(data: Uint8Array): ArrayBuffer {
   return buffer;
 }
 
+/**
+ * Get a playable video source URL. Every resolved URL holds one cache
+ * reference — pass it back to revokeBlobUrl() when the consumer unmounts.
+ */
 export async function getVideoSrc(path: string): Promise<string | null> {
-  const cached = videoSrcCache.get(path);
+  const cached = videoCache.acquire(path);
   if (cached) return cached;
 
-  const source = loadVideoSrc(path);
-  videoSrcCache.set(path, source);
-  return source;
-}
-
-async function loadVideoSrc(path: string): Promise<string | null> {
-  try {
-    const data = await readFileBytes(path);
-    const blob = new Blob([toBlobPart(data)], { type: videoMimeFromName(path) });
-    const url = URL.createObjectURL(blob);
-    cachedVideoBlobUrls.add(url);
-    return url;
-  } catch {
-    videoSrcCache.delete(path);
-    return null;
+  const pending = pendingVideoLoads.get(path);
+  if (pending) {
+    // Piggyback on the in-flight read, then take our own reference.
+    return pending.then(() => videoCache.acquire(path));
   }
+
+  const load = (async () => {
+    try {
+      const data = await readFileBytes(path);
+      const blob = new Blob([toBlobPart(data)], { type: videoMimeFromName(path) });
+      const url = URL.createObjectURL(blob);
+      videoCache.insert(path, url, blob.size);
+      return url;
+    } catch {
+      return null;
+    } finally {
+      pendingVideoLoads.delete(path);
+    }
+  })();
+  pendingVideoLoads.set(path, load);
+  return load;
 }
 
 async function readFileBytes(path: string): Promise<Uint8Array> {
-  try {
-    const { readFile } = await import("@tauri-apps/plugin-fs");
-    return await readFile(path);
-  } catch {
-    const data = await invoke<number[] | Uint8Array>("read_file_bytes", { path });
-    return data instanceof Uint8Array ? data : new Uint8Array(data);
+  // Desktop has no fs-plugin grants (see capabilities/default.json) — the
+  // scoped plugin read could never cover arbitrary receive folders anyway, so
+  // desktop uses the Rust command outright. Android keeps the plugin path
+  // because it is the only reader that understands content:// URIs.
+  if (isMobile()) {
+    try {
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      return await readFile(path);
+    } catch {
+      /* fall through to the Rust command */
+    }
   }
+  const data = await invoke<number[] | Uint8Array>("read_file_bytes", { path });
+  return data instanceof Uint8Array ? data : new Uint8Array(data);
 }
 
 async function mobileImageSrc(path: string): Promise<string | null> {
@@ -263,11 +300,20 @@ async function mobileImageSrc(path: string): Promise<string | null> {
   }
 }
 
-/** Revoke a blob URL to free memory. Safe to call on non-blob URLs (no-op). */
+/**
+ * Release a blob URL obtained from this module. Video URLs drop one cache
+ * reference (revoked for real once unreferenced and over the byte budget);
+ * any other blob URL is revoked immediately. Safe on non-blob URLs (no-op).
+ */
 export function revokeBlobUrl(url: string): void {
-  if (cachedVideoBlobUrls.has(url)) return;
-  if (url && url.startsWith("blob:")) {
-    try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+  if (!url) return;
+  if (videoCache.release(url)) return;
+  if (url.startsWith("blob:")) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -306,7 +352,8 @@ export async function getClipboardFiles(): Promise<string[]> {
 
 export interface FilePreview {
   name: string;
-  size: string;
+  /** Raw byte count — format with fileSizeStr at render time. */
+  size_bytes: number;
   extension: string;
   content: string | null;
   line_count: number;
@@ -329,7 +376,9 @@ export async function setMica(enabled: boolean): Promise<void> {
 export type UnlistenFn = () => void;
 
 export async function onLanLog(cb: (level: string, text: string) => void): Promise<UnlistenFn> {
-  return listen<{ level: string; text: string }>("lan_log", (e) => cb(e.payload.level, e.payload.text));
+  return listen<{ level: string; text: string }>("lan_log", (e) =>
+    cb(e.payload.level, e.payload.text),
+  );
 }
 
 export async function onLanPeerDiscovered(cb: (peer: DiscoveredPeer) => void): Promise<UnlistenFn> {
@@ -340,17 +389,26 @@ export async function onLanPeerLost(cb: (peerId: string) => void): Promise<Unlis
   return listen<{ id: string }>("lan_peer_lost", (e) => cb(e.payload.id));
 }
 
-export async function onLanTextReceived(cb: (peerId: string, text: string) => void): Promise<UnlistenFn> {
-  return listen<{ peer_id: string; text: string }>("lan_text_received", (e) => cb(e.payload.peer_id, e.payload.text));
+export async function onLanTextReceived(
+  cb: (peerId: string, text: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ peer_id: string; text: string }>("lan_text_received", (e) =>
+    cb(e.payload.peer_id, e.payload.text),
+  );
 }
 
 export async function onLanFilesReceived(
-  cb: (peerId: string, files: string[], details: Array<{ name: string; path: string; size: number }>) => void
+  cb: (
+    peerId: string,
+    files: string[],
+    details: Array<{ name: string; path: string; size: number }>,
+  ) => void,
 ): Promise<UnlistenFn> {
-  return listen<{ peer_id: string; files: string[]; file_details: Array<{ name: string; path: string; size: number }> }>(
-    "lan_files_received",
-    (e) => cb(e.payload.peer_id, e.payload.files, e.payload.file_details)
-  );
+  return listen<{
+    peer_id: string;
+    files: string[];
+    file_details: Array<{ name: string; path: string; size: number }>;
+  }>("lan_files_received", (e) => cb(e.payload.peer_id, e.payload.files, e.payload.file_details));
 }
 
 export interface TransferProgress {
@@ -365,7 +423,9 @@ export interface TransferProgress {
   current_file?: string;
 }
 
-export async function onTransferProgress(cb: (progress: TransferProgress) => void): Promise<UnlistenFn> {
+export async function onTransferProgress(
+  cb: (progress: TransferProgress) => void,
+): Promise<UnlistenFn> {
   return listen<TransferProgress>("lan_transfer_progress", (e) => cb(e.payload));
 }
 
@@ -386,10 +446,18 @@ export async function onDragDrop(
 }
 
 // Window controls
-export async function windowMinimize() { await getCurrentWindow().minimize(); }
-export async function windowToggleMaximize() { await getCurrentWindow().toggleMaximize(); }
-export async function windowClose() { await getCurrentWindow().hide(); }
-export async function windowStartDrag() { await getCurrentWindow().startDragging(); }
+export async function windowMinimize() {
+  await getCurrentWindow().minimize();
+}
+export async function windowToggleMaximize() {
+  await getCurrentWindow().toggleMaximize();
+}
+export async function windowClose() {
+  await getCurrentWindow().hide();
+}
+export async function windowStartDrag() {
+  await getCurrentWindow().startDragging();
+}
 export async function windowShow() {
   const win = getCurrentWindow();
   await win.show();
@@ -410,7 +478,10 @@ async function prepareSendPaths(paths: string[]): Promise<PreparedSendPath[]> {
         // Get real filename via Android ContentResolver (Kotlin plugin)
         let name = `file_${Date.now()}`;
         try {
-          const info = await invoke<{ name: string; mimeType: string }>("plugin:file-helper|getFileName", { uri: p });
+          const info = await invoke<{ name: string; mimeType: string }>(
+            "plugin:file-helper|getFileName",
+            { uri: p },
+          );
           if (info.name) name = info.name;
         } catch {
           // Fallback: extract type hint from URI

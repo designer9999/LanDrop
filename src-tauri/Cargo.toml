@@ -2,7 +2,7 @@
 name = "landrop"
 version = "1.6.13"
 edition = "2021"
-rust-version = "1.97"
+rust-version = "1.98"
 
 [lib]
 name = "landrop_lib"
@@ -23,16 +23,17 @@ tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros", "fs"] }
+tokio-util = { version = "0.7", default-features = false }
 base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
 walkdir = "2"
 local-ip-address = "0.6"
 directories = "6"
-mdns-sd = "0.20"
-uuid = { version = "1", features = ["v4"] }
+mdns-sd = "0.21.1"
+uuid = { version = "1", features = ["v4", "serde"] }
 hostname = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tauri-plugin-updater = "2.10.1"
+tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2.5.3"
 tauri-plugin-single-instance = "2.4.1"
@@ -46,9 +47,9 @@ tauri-plugin-window-state = "2"
 
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_System_Variant",
@@ -61,3 +62,25 @@ window-vibrancy = "0.8"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.186"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+# Deliberately "unwind", not "abort". Every inbound LAN connection is handled in
+# a detached `tokio::spawn` task (lan/discovery.rs) that parses frames supplied
+# by an arbitrary peer on the network. With unwinding, a panic in that parser
+# kills only that one session -- tokio catches it, the concurrency permit is
+# released by its Drop guard, and other in-flight transfers survive. With
+# `panic = "abort"` the same panic would terminate the whole app, turning any
+# parser bug into a remote, unauthenticated crash of the entire process.
+panic = "unwind"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

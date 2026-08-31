@@ -8,13 +8,20 @@
     max?: number;
     step?: number;
     value?: number;
+    "aria-label"?: string;
     oninput?: (value: number) => void;
   }
 
-  let { min = 0, max = 100, step = 1, value = $bindable(50), oninput }: Props = $props();
+  let {
+    min = 0,
+    max = 100,
+    step = 1,
+    value = $bindable(50),
+    "aria-label": ariaLabel,
+    oninput,
+  }: Props = $props();
 
   let trackEl: HTMLDivElement | undefined = $state();
-  let dragging = $state(false);
   let pressed = $state(false);
 
   const pct = $derived(((value - min) / (max - min)) * 100);
@@ -46,7 +53,6 @@
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
     pressed = true;
-    dragging = true;
     updateFromEvent(e);
     (e.target as HTMLElement)?.setPointerCapture?.(e.pointerId);
     window.addEventListener("pointermove", onPointerMove);
@@ -60,14 +66,13 @@
 
   function onPointerUp() {
     pressed = false;
-    dragging = false;
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("pointercancel", onPointerUp);
   }
 
   function onKeydown(e: KeyboardEvent) {
-    let newVal = value;
+    let newVal: number;
     if (e.key === "ArrowRight" || e.key === "ArrowUp") {
       newVal = clampValue(value + step);
     } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
@@ -87,7 +92,6 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="m3-slider"
   bind:this={trackEl}
@@ -95,6 +99,7 @@
   onkeydown={onKeydown}
   role="slider"
   tabindex="0"
+  aria-label={ariaLabel}
   aria-orientation="horizontal"
   aria-valuemin={min}
   aria-valuemax={max}
@@ -185,7 +190,10 @@
     height: 44px;
     border-radius: 2px;
     background: var(--md-sys-color-primary);
-    transition: width var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial), height var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial), border-radius var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial);
+    transition:
+      width var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial),
+      height var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial),
+      border-radius var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial);
   }
   .handle-pressed {
     width: 2px;

@@ -25,7 +25,9 @@
 
 <div
   class="shrink-0 rounded-full flex items-center justify-center font-medium text-white select-none"
-  style="width: {px}px; height: {px}px; font-size: {fs}px; background-color: {bg};{selected ? ` box-shadow: inset 0 0 0 2px rgba(255,255,255,0.7);` : ''}"
+  style="width: {px}px; height: {px}px; font-size: {fs}px; background-color: {bg};{selected
+    ? ` box-shadow: inset 0 0 0 2px rgba(255,255,255,0.7);`
+    : ''}"
 >
   {#if icon}
     <Icon name={icon} size={iconSize} />

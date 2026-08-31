@@ -20,19 +20,13 @@ export function playReceiveSound() {
   playTone(ctx, 783.99, now + 0.12, 0.15, 0.18);
 }
 
-/** Single soft tone — sent confirmation */
-export function playSendSound() {
-  const ctx = getCtx();
-  playTone(ctx, 523.25, ctx.currentTime, 0.1, 0.12);
-}
-
-/** Quick low thud — error / disconnect */
-export function playErrorSound() {
-  const ctx = getCtx();
-  playTone(ctx, 220, ctx.currentTime, 0.08, 0.15);
-}
-
-function playTone(ctx: AudioContext, freq: number, start: number, duration: number, volume: number) {
+function playTone(
+  ctx: AudioContext,
+  freq: number,
+  start: number,
+  duration: number,
+  volume: number,
+) {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
 

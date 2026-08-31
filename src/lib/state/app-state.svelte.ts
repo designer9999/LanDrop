@@ -1,70 +1,35 @@
 import type { FileInfo } from "$lib/api/bridge";
-import { fileNameFromPath } from "$lib/utils/file-utils";
+import {
+  devicesForPersistence,
+  loadArray,
+  loadJson,
+  loadString,
+  normalizeHydratedDevices,
+  sanitizeAttachments,
+  sanitizeMessages,
+} from "$lib/persistence/sanitize";
+import { DEFAULT_HOTKEYS, PEER_COLORS } from "./model";
+import type {
+  DiscoveredDevice,
+  HotkeySettings,
+  LogEntry,
+  MessageEntry,
+  PersistedAppState,
+  ReceiveOptions,
+  SelectedFile,
+} from "./model";
 
-// ── Device (auto-discovered via mDNS) ──
-
-export interface DiscoveredDevice {
-  id: string;          // UUID from remote device (persistent)
-  alias: string;       // display name from mDNS
-  deviceType: string;  // "desktop" or "mobile"
-  ip: string;          // current IP address
-  online: boolean;     // currently discovered on LAN
-  color: number;       // auto-assigned avatar color
-  avatarIcon?: string; // optional user-selected avatar icon
-  outFolder?: string;  // user-configured per-device output folder
-}
-
-export interface LogEntry {
-  level: "info" | "warn" | "error" | "success";
-  text: string;
-  time: string;
-}
-
-export interface ActivityEntry {
-  id: string;
-  peerId: string;
-  direction: "sent" | "received";
-  type: "files" | "text";
-  items: string[];
-  timestamp: string;
-  success: boolean;
-  outFolder?: string;
-}
-
-export interface MessageAttachment {
-  name: string;
-  path: string;
-  size?: string;
-  type: "image" | "video" | "file" | "folder";
-  fileCount?: number;
-  children?: MessageAttachment[];
-}
-
-export interface MessageEntry {
-  id: string;
-  peerId: string;
-  direction: "sent" | "received";
-  text: string;
-  timestamp: string;
-  starred?: boolean;
-  attachments?: MessageAttachment[];
-}
-
-export interface SelectedFile {
-  path: string;
-  info: FileInfo | null;
-}
-
-export const PEER_COLORS = [
-  "#6750A4",
-  "#00897B",
-  "#E65100",
-  "#1565C0",
-  "#AD1457",
-  "#558B2F",
-  "#6D4C41",
-  "#546E7A",
-];
+export { PEER_COLORS } from "./model";
+export type {
+  DiscoveredDevice,
+  HotkeySettings,
+  LogEntry,
+  MessageAttachment,
+  MessageEntry,
+  PersistedAppState,
+  ReceiveOptions,
+  SelectedFile,
+} from "./model";
 
 const DEVICES_KEY = "landrop-devices";
 const ACTIVE_DEVICE_KEY = "landrop-active-device";
@@ -73,204 +38,6 @@ const ACTIVITY_KEY = "landrop-activity";
 const SETTINGS_KEY = "landrop-settings";
 const RECEIVE_KEY = "landrop-receive-options";
 const HOTKEYS_KEY = "landrop-hotkeys";
-const MAX_FOLDER_CHILDREN_IN_HISTORY = 100;
-
-export interface HotkeySettings {
-  quickSend: string;
-  enabled: boolean;
-}
-
-const DEFAULT_HOTKEYS: HotkeySettings = { quickSend: "F3", enabled: false };
-
-export interface PersistedAppState {
-  version: number;
-  devices: DiscoveredDevice[];
-  activeDeviceId: string | null;
-  activity: ActivityEntry[];
-  messages: MessageEntry[];
-  notificationsEnabled: boolean;
-  popOnReceive: boolean;
-  receiveOptions: ReceiveOptions;
-  hotkeys: HotkeySettings;
-}
-
-function loadJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function loadArray<T>(key: string): T[] {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function loadString(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isMessageDirection(value: unknown): value is MessageEntry["direction"] {
-  return value === "sent" || value === "received";
-}
-
-function isAttachmentType(value: unknown): value is MessageAttachment["type"] {
-  return value === "image" || value === "video" || value === "file" || value === "folder";
-}
-
-function stringValue(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
-}
-
-function numberValue(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function sanitizeAttachment(raw: unknown, depth = 0): MessageAttachment | null {
-  if (!isRecord(raw)) return null;
-
-  const path = stringValue(raw.path);
-  const name = stringValue(raw.name, fileNameFromPath(path, "item"));
-  let type: MessageAttachment["type"] = isAttachmentType(raw.type) ? raw.type : "file";
-  const rawChildren = Array.isArray(raw.children)
-    ? raw.children
-    : isRecord(raw.children)
-      ? [raw.children]
-      : [];
-
-  if (rawChildren.length > 0) type = "folder";
-  if (!name && !path) return null;
-
-  const attachment: MessageAttachment = {
-    name,
-    path,
-    type,
-  };
-
-  const size = stringValue(raw.size);
-  if (size) attachment.size = size;
-
-  const fileCount = numberValue(raw.fileCount);
-  if (fileCount !== undefined) attachment.fileCount = fileCount;
-
-  if (type === "folder" && depth < 1) {
-    const children = rawChildren
-      .slice(0, MAX_FOLDER_CHILDREN_IN_HISTORY)
-      .map((child) => sanitizeAttachment(child, depth + 1))
-      .filter((child): child is MessageAttachment => child !== null);
-
-    if (children.length > 0) attachment.children = children;
-    attachment.fileCount = Math.max(fileCount ?? 0, rawChildren.length, children.length);
-  }
-
-  return attachment;
-}
-
-function sanitizeAttachments(raw: unknown): MessageAttachment[] | undefined {
-  const values = Array.isArray(raw)
-    ? raw
-    : isRecord(raw)
-      ? [raw]
-      : [];
-  const attachments = values
-    .map((attachment) => sanitizeAttachment(attachment))
-    .filter((attachment): attachment is MessageAttachment => attachment !== null);
-  return attachments.length > 0 ? attachments : undefined;
-}
-
-function sanitizeMessage(raw: unknown): MessageEntry | null {
-  if (!isRecord(raw)) return null;
-
-  const peerId = stringValue(raw.peerId);
-  const direction = isMessageDirection(raw.direction) ? raw.direction : null;
-  if (!peerId || !direction) return null;
-
-  const id = stringValue(raw.id, crypto.randomUUID());
-  const timestamp = stringValue(raw.timestamp, new Date().toISOString());
-  const text = stringValue(raw.text);
-  const attachments = sanitizeAttachments(raw.attachments);
-
-  const message: MessageEntry = {
-    id,
-    peerId,
-    direction,
-    text,
-    timestamp,
-  };
-  if (raw.starred === true) message.starred = true;
-  if (attachments) message.attachments = attachments;
-  return message;
-}
-
-function sanitizeMessages(raw: unknown): MessageEntry[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((message) => sanitizeMessage(message))
-    .filter((message): message is MessageEntry => message !== null);
-}
-
-function placeholderDevice(peerId: string, color: number): DiscoveredDevice {
-  return {
-    id: peerId,
-    alias: `Device-${peerId.slice(0, 8)}`,
-    deviceType: "desktop",
-    ip: "",
-    online: false,
-    color,
-  };
-}
-
-function normalizeHydratedDevices(
-  rawDevices: unknown,
-  messages: MessageEntry[],
-): DiscoveredDevice[] {
-  const devices: DiscoveredDevice[] = Array.isArray(rawDevices) ? rawDevices.filter(isRecord).map((device, index) => ({
-    id: stringValue(device.id),
-    alias: stringValue(device.alias, stringValue(device.id).slice(0, 8) || "Device"),
-    deviceType: stringValue(device.deviceType, stringValue(device.device_type, "desktop")),
-    ip: stringValue(device.ip),
-    online: false,
-    color: numberValue(device.color) ?? index % PEER_COLORS.length,
-    avatarIcon: stringValue(device.avatarIcon) || undefined,
-    outFolder: stringValue(device.outFolder) || undefined,
-  })).filter((device) => device.id) : [];
-
-  const seen = new Set(devices.map((device) => device.id));
-  for (const message of messages) {
-    if (seen.has(message.peerId)) continue;
-    seen.add(message.peerId);
-    devices.push(placeholderDevice(message.peerId, devices.length % PEER_COLORS.length));
-  }
-
-  return devices;
-}
-
-function devicesForPersistence(devices: DiscoveredDevice[]): DiscoveredDevice[] {
-  return devices.map((device) => ({
-    ...device,
-    online: false,
-  }));
-}
-
-export interface ReceiveOptions {
-  outFolder?: string;
-  overwrite?: boolean;
-  sortByDate?: boolean;
-}
 
 class AppState {
   activeView = $state<"transfer" | "settings">("transfer");
@@ -289,9 +56,8 @@ class AppState {
   // Network
   localIp = $state<string>("...");
 
-  // Logs, activity, messages
+  // Logs and messages
   logs = $state<LogEntry[]>([]);
-  activity = $state<ActivityEntry[]>([]);
   messages = $state<MessageEntry[]>([]);
 
   // Message search & filter
@@ -340,7 +106,7 @@ class AppState {
       this.devices = this.devices.map((d) =>
         d.id === peer.id
           ? { ...d, alias: peer.alias, deviceType: peer.device_type, ip: peer.ip, online: true }
-          : d
+          : d,
       );
     } else {
       // New device — auto-assign color
@@ -365,9 +131,7 @@ class AppState {
 
   /** Called when mDNS reports a device left */
   markDeviceOffline(id: string) {
-    this.devices = this.devices.map((d) =>
-      d.id === id ? { ...d, online: false } : d
-    );
+    this.devices = this.devices.map((d) => (d.id === id ? { ...d, online: false } : d));
   }
 
   /** Clear all offline devices (used by refresh button) */
@@ -386,10 +150,11 @@ class AppState {
     this.activeDeviceId = id;
   }
 
-  updateDeviceSettings(id: string, updates: Partial<Pick<DiscoveredDevice, "color" | "avatarIcon" | "outFolder">>) {
-    this.devices = this.devices.map((d) =>
-      d.id === id ? { ...d, ...updates } : d
-    );
+  updateDeviceSettings(
+    id: string,
+    updates: Partial<Pick<DiscoveredDevice, "color" | "avatarIcon" | "outFolder">>,
+  ) {
+    this.devices = this.devices.map((d) => (d.id === id ? { ...d, ...updates } : d));
   }
 
   removeDevice(id: string) {
@@ -426,20 +191,6 @@ class AppState {
     this.logs = [];
   }
 
-  // ── Activity ──
-
-  addActivity(entry: Omit<ActivityEntry, "id" | "timestamp">) {
-    this.activity = [
-      ...this.activity,
-      { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString() },
-    ];
-    if (this.activity.length > 200) this.activity = this.activity.slice(-200);
-  }
-
-  clearActivity() {
-    this.activity = [];
-  }
-
   // ── Messages ──
 
   addMessage(entry: Omit<MessageEntry, "id" | "timestamp">) {
@@ -473,7 +224,7 @@ class AppState {
 
   toggleStar(messageId: string) {
     this.messages = this.messages.map((m) =>
-      m.id === messageId ? { ...m, starred: !m.starred } : m
+      m.id === messageId ? { ...m, starred: !m.starred } : m,
     );
   }
 
@@ -503,8 +254,6 @@ class AppState {
 
       return changed ? { ...m, attachments } : m;
     });
-
-    if (changed) this.messages = [...this.messages];
   }
 
   clearMessages(peerId: string) {
@@ -518,10 +267,10 @@ class AppState {
   deleteOldMessages(peerId: string, daysOld: number): MessageEntry[] {
     const cutoff = new Date(Date.now() - daysOld * 86400000).toISOString();
     const deletedMessages = this.messages.filter(
-      (m) => m.peerId === peerId && !m.starred && m.timestamp < cutoff
+      (m) => m.peerId === peerId && !m.starred && m.timestamp < cutoff,
     );
     this.messages = this.messages.filter(
-      (m) => m.peerId !== peerId || m.starred || m.timestamp >= cutoff
+      (m) => m.peerId !== peerId || m.starred || m.timestamp >= cutoff,
     );
     return deletedMessages;
   }
@@ -533,7 +282,7 @@ class AppState {
     const keep = Math.max(0, 500 - starred.length);
     const recentUnstarred = keep > 0 ? unstarred.slice(-keep) : [];
     this.messages = [...recentUnstarred, ...starred].sort((a, b) =>
-      a.timestamp.localeCompare(b.timestamp)
+      a.timestamp.localeCompare(b.timestamp),
     );
   }
 
@@ -561,14 +310,21 @@ class AppState {
     const activeDeviceId = snapshot.activeDeviceId ?? null;
 
     this.devices = devices;
-    this.activeDeviceId = activeDeviceId && devices.some((device) => device.id === activeDeviceId)
-      ? activeDeviceId
-      : null;
-    this.activity = Array.isArray(snapshot.activity) ? snapshot.activity : [];
+    this.activeDeviceId =
+      activeDeviceId && devices.some((device) => device.id === activeDeviceId)
+        ? activeDeviceId
+        : null;
     this.messages = messages;
     this.notificationsEnabled = snapshot.notificationsEnabled ?? true;
     this.popOnReceive = snapshot.popOnReceive ?? false;
-    this.receiveOptions = snapshot.receiveOptions ?? {};
+    // outFolder/sortByDate are owned by the Rust backend; drop any stale
+    // copies carried in older persisted snapshots.
+    const {
+      outFolder: _outFolder,
+      sortByDate: _sortByDate,
+      ...receiveOptions
+    } = snapshot.receiveOptions ?? {};
+    this.receiveOptions = receiveOptions;
     this.hotkeys = { ...DEFAULT_HOTKEYS, ...(snapshot.hotkeys ?? {}) };
   }
 
@@ -577,11 +333,12 @@ class AppState {
       version: 1,
       devices: devicesForPersistence(this.devices),
       activeDeviceId: this.activeDevice ? this.activeDeviceId : null,
-      activity: this.activity,
       messages: sanitizeMessages(this.messages),
       notificationsEnabled: this.notificationsEnabled,
       popOnReceive: this.popOnReceive,
-      receiveOptions: this.receiveOptions,
+      // Receive routing (outFolder/sortByDate) lives in Rust's
+      // receive_folders.json — never persisted on the frontend side.
+      receiveOptions: {},
       hotkeys: this.hotkeys,
     };
   }
@@ -589,20 +346,19 @@ class AppState {
   loadLegacyPersistedState(): PersistedAppState | null {
     const devices = loadArray<DiscoveredDevice>(DEVICES_KEY);
     const activeDeviceId = loadString(ACTIVE_DEVICE_KEY);
-    const activity = loadArray<ActivityEntry>(ACTIVITY_KEY);
     const messages = loadArray<MessageEntry>(MESSAGES_KEY);
     const notifications = loadJson<{ n: boolean }>(SETTINGS_KEY, { n: true });
     const popOnReceive = loadJson<{ pop: boolean }>(SETTINGS_KEY, { pop: false });
     const receiveOptions = loadJson<ReceiveOptions>(RECEIVE_KEY, {});
     const hotkeys = loadJson<HotkeySettings>(HOTKEYS_KEY, DEFAULT_HOTKEYS);
 
-    const hasLegacyState = devices.length > 0
-      || activity.length > 0
-      || messages.length > 0
-      || activeDeviceId !== null
-      || loadString(SETTINGS_KEY) !== null
-      || loadString(RECEIVE_KEY) !== null
-      || loadString(HOTKEYS_KEY) !== null;
+    const hasLegacyState =
+      devices.length > 0 ||
+      messages.length > 0 ||
+      activeDeviceId !== null ||
+      loadString(SETTINGS_KEY) !== null ||
+      loadString(RECEIVE_KEY) !== null ||
+      loadString(HOTKEYS_KEY) !== null;
 
     if (!hasLegacyState) return null;
 
@@ -610,7 +366,6 @@ class AppState {
       version: 1,
       devices,
       activeDeviceId,
-      activity,
       messages: sanitizeMessages(messages),
       notificationsEnabled: notifications.n,
       popOnReceive: popOnReceive.pop,

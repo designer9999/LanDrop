@@ -20,10 +20,12 @@
     children: Snippet;
   }
 
+  const uid = $props.id();
+
   let {
     open = $bindable(false),
     headline,
-    id = `dialog-${Math.random().toString(36).slice(2, 8)}`,
+    id = uid,
     onclose,
     onconfirm,
     confirmLabel = "Confirm",
@@ -37,9 +39,15 @@
   let exiting = $state(false);
   let exitTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function handleScrimClick() { startExit(); }
-  function handleDismiss() { startExit(); }
-  function handleConfirm() { onconfirm?.(); }
+  function handleScrimClick() {
+    startExit();
+  }
+  function handleDismiss() {
+    startExit();
+  }
+  function handleConfirm() {
+    onconfirm?.();
+  }
 
   function startExit() {
     if (exiting) return;
@@ -103,10 +111,7 @@
 
 {#if open}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="fixed inset-0 z-50 flex items-center justify-center"
-    onkeydown={handleKeydown}
-  >
+  <div class="fixed inset-0 z-50 flex items-center justify-center" onkeydown={handleKeydown}>
     <div
       class="absolute inset-0 bg-scrim/32"
       class:dialog-scrim-enter={!exiting}
@@ -149,10 +154,12 @@
 
 <style>
   .dialog-scrim-enter {
-    animation: scrim-fade-in var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects) forwards;
+    animation: scrim-fade-in var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects)
+      forwards;
   }
   .dialog-scrim-exit {
-    animation: scrim-fade-out var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects) forwards;
+    animation: scrim-fade-out var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects)
+      forwards;
   }
   .dialog-enter {
     animation:
@@ -164,12 +171,54 @@
       dialog-scale-out var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) forwards,
       dialog-fade-out var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects) forwards;
   }
-  @keyframes scrim-fade-in { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes scrim-fade-out { from { opacity: 1; } to { opacity: 0; } }
-  @keyframes dialog-scale-in { from { transform: scale(0.85); } to { transform: scale(1); } }
-  @keyframes dialog-fade-in { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes dialog-scale-out { from { transform: scale(1); } to { transform: scale(0.85); } }
-  @keyframes dialog-fade-out { from { opacity: 1; } to { opacity: 0; } }
+  @keyframes scrim-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes scrim-fade-out {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+  @keyframes dialog-scale-in {
+    from {
+      transform: scale(0.85);
+    }
+    to {
+      transform: scale(1);
+    }
+  }
+  @keyframes dialog-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes dialog-scale-out {
+    from {
+      transform: scale(1);
+    }
+    to {
+      transform: scale(0.85);
+    }
+  }
+  @keyframes dialog-fade-out {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
 
   .dialog-content-area {
     max-height: 60vh;
@@ -177,8 +226,12 @@
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--md-sys-color-on-surface) 20%, transparent) transparent;
   }
-  .dialog-content-area::-webkit-scrollbar { width: 6px; }
-  .dialog-content-area::-webkit-scrollbar-track { background: transparent; }
+  .dialog-content-area::-webkit-scrollbar {
+    width: 6px;
+  }
+  .dialog-content-area::-webkit-scrollbar-track {
+    background: transparent;
+  }
   .dialog-content-area::-webkit-scrollbar-thumb {
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 20%, transparent);
     border-radius: 3px;

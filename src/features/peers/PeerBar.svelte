@@ -4,7 +4,6 @@
 <script lang="ts">
   import { getAppState } from "$lib/state/app-state.svelte";
   import { refreshLanDiscovery } from "$lib/api/bridge";
-  import IconButton from "$lib/ui/IconButton.svelte";
   import Icon from "$lib/ui/Icon.svelte";
   import PeerChip from "./PeerChip.svelte";
 
@@ -16,7 +15,7 @@
 
   const app = getAppState();
   const visibleDevices = $derived(
-    [...app.devices].sort((a, b) => Number(b.online) - Number(a.online))
+    [...app.devices].sort((a, b) => Number(b.online) - Number(a.online)),
   );
 
   let scrollEl: HTMLDivElement | undefined = $state();
@@ -34,7 +33,12 @@
   }
 
   $effect(() => {
-    visibleDevices.length;
+    // Re-measure the scroll affordances whenever the chip row changes length.
+    if (visibleDevices.length === 0) {
+      canScrollLeft = false;
+      canScrollRight = false;
+      return;
+    }
     requestAnimationFrame(checkScroll);
   });
 
@@ -46,7 +50,9 @@
       app.markAllDevicesOffline();
       await refreshLanDiscovery();
     } catch {}
-    setTimeout(() => { refreshing = false; }, 1500);
+    setTimeout(() => {
+      refreshing = false;
+    }, 1500);
   }
 </script>
 
@@ -57,11 +63,7 @@
     </button>
   {/if}
 
-  <div
-    bind:this={scrollEl}
-    class="peer-bar"
-    onscroll={checkScroll}
-  >
+  <div bind:this={scrollEl} class="peer-bar" onscroll={checkScroll}>
     {#each visibleDevices as device (device.id)}
       <PeerChip
         {device}
@@ -90,7 +92,13 @@
     </button>
   {/if}
 
-  <button class="refresh-btn" class:refreshing onclick={handleRefresh} title="Rescan for devices" disabled={refreshing}>
+  <button
+    class="refresh-btn"
+    class:refreshing
+    onclick={handleRefresh}
+    title="Rescan for devices"
+    disabled={refreshing}
+  >
     <Icon name="refresh" size={16} />
   </button>
 </div>
@@ -118,9 +126,18 @@
     cursor: pointer;
     transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
-  .refresh-btn:hover { background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent); }
-  .refresh-btn.refreshing { animation: spin 0.8s linear infinite; color: var(--md-sys-color-primary); }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .refresh-btn:hover {
+    background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
+  }
+  .refresh-btn.refreshing {
+    animation: spin 0.8s linear infinite;
+    color: var(--md-sys-color-primary);
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
   .peer-bar {
     display: flex;
     align-items: center;
@@ -169,7 +186,11 @@
     opacity: 0.7;
   }
   @keyframes fade-in {
-    from { opacity: 0; }
-    to   { opacity: 1; }
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 </style>

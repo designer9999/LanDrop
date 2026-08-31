@@ -13,7 +13,10 @@
 
   $effect(() => {
     if (visible) {
-      const timer = setTimeout(() => { visible = false; ondismiss?.(); }, 4000);
+      const timer = setTimeout(() => {
+        visible = false;
+        ondismiss?.();
+      }, 4000);
       return () => clearTimeout(timer);
     }
   });
@@ -43,7 +46,7 @@
     font-weight: 500;
     white-space: nowrap;
     max-width: 90%;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     animation: toast-in var(--md-spring-fast-spatial-dur) var(--md-spring-fast-spatial) both;
     pointer-events: none;
   }
@@ -52,7 +55,13 @@
     text-overflow: ellipsis;
   }
   @keyframes toast-in {
-    from { opacity: 0; transform: translateX(-50%) translateY(8px); }
-    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   }
 </style>

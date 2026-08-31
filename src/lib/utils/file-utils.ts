@@ -1,4 +1,13 @@
-export const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".svg"]);
+export const IMAGE_EXTS = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".ico",
+  ".svg",
+]);
 export const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".avi", ".mkv", ".m4v", ".ogv"]);
 
 export function fileNameFromPath(path: string, fallback = ""): string {
@@ -62,6 +71,33 @@ export function videoMimeFromName(nameOrExt: string): string {
     default:
       return "video/mp4";
   }
+}
+
+/**
+ * Walk up from a received file's absolute path to the on-disk folder that
+ * corresponds to the transfer's top-level folder attachment
+ * (`relativeName` counts the nesting depth).
+ */
+export function getReceivedFolderPath(filePath: string, relativeName: string): string {
+  let folderPath = filePath;
+  const segmentCount = relativeName.split("/").filter(Boolean).length;
+  for (let i = 1; i < segmentCount; i += 1) {
+    folderPath = folderPath.replace(/[\\/][^\\/]+$/, "");
+  }
+  return folderPath;
+}
+
+/** Join a base folder and a relative name using the base's separator style. */
+export function joinReceivePath(baseFolder: string, name: string): string {
+  const trimmedBase = baseFolder.replace(/[\\/]+$/, "");
+  if (!trimmedBase) return name;
+  const separator = trimmedBase.includes("\\") ? "\\" : "/";
+  const normalizedName = name.replace(/^[/\\]+/, "").replace(/[\\/]+/g, separator);
+  return `${trimmedBase}${separator}${normalizedName}`;
+}
+
+export function limitHistoryItems<T>(items: T[], maxItems: number): T[] {
+  return items.length > maxItems ? items.slice(0, maxItems) : items;
 }
 
 export function fileSizeStr(bytes: number): string {

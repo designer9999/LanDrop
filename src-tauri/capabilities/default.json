@@ -32,23 +32,6 @@
     "opener:default",
     "opener:allow-open-path",
     "opener:allow-open-url",
-    "opener:allow-reveal-item-in-dir",
-    "fs:allow-read",
-    "fs:allow-read-file",
-    "fs:allow-write",
-    "fs:allow-write-file",
-    "fs:allow-exists",
-    "fs:allow-mkdir",
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        { "path": "$APPCACHE/**" },
-        { "path": "$DOWNLOAD/**" },
-        { "path": "$PICTURE/**" },
-        { "path": "$TEMP/**" },
-        { "path": "content://**" },
-        { "path": "/storage/**" }
-      ]
-    }
+    "opener:allow-reveal-item-in-dir"
   ]
 }

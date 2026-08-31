@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - "**"
+      - main
   pull_request:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 24.18.0
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
@@ -41,6 +41,15 @@ jobs:
 
       - name: Type-check Svelte and TypeScript
         run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Run frontend tests
+        run: npm test
 
       - name: Build frontend
         run: npm run build
@@ -77,7 +86,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.0
           components: clippy, rustfmt
 
       - name: Cache Rust build
@@ -110,10 +119,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.0
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-audit@0.22.2
 
       - name: Audit Rust dependencies
         run: cargo audit --file src-tauri/Cargo.lock
