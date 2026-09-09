@@ -28,7 +28,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 walkdir = "2"
 local-ip-address = "0.6"
 directories = "6"
-mdns-sd = "0.20"
+mdns-sd = "0.21"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
