@@ -53,6 +53,7 @@ export class AppState {
 
   // Transfer state
   transferActive = $state(false);
+  receivingTransferActive = $state(false);
 
   // Network
   localIp = $state<string>("...");

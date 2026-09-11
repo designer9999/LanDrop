@@ -79,6 +79,14 @@ The [September audit](documentation/technical-audit-2026-09.md) covers current
 architecture, dependencies, UX, Tailscale, and remaining work. UI changes follow
 the supplied [Material 3 component conventions](documentation/material-3-components.md).
 
+The [Windows experience report](documentation/windows-experience-research.md)
+covers current Windows servicing, native actionable notifications, application
+identity, and the consent-based updater. Installed Windows notifications open the
+sender's conversation or the update screen. Update checks never install by
+themselves; **Update now** is an explicit action and waits for transfers and
+drafts to be cleared. The new desktop icon's source and regeneration instructions
+are in [assets/branding](assets/branding/README.md).
+
 ## Tech stack
 
 - Svelte 5, TypeScript 6, Vite 8, and Tailwind CSS 4

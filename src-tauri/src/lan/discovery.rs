@@ -1194,6 +1194,20 @@ async fn handle_incoming_session(
             }
             super::protocol::Message::File { name, size } => {
                 allow_legacy_text_eof = false;
+                // Legacy single-file sessions must participate in the same
+                // start/terminal activity contract as batches. The frontend
+                // uses it to avoid closing the app for an update mid-receive.
+                let _ = context.handle.emit(
+                    "lan_transfer_progress",
+                    serde_json::json!({
+                        "direction": "receive",
+                        "phase": "start",
+                        "total_bytes": size,
+                        "total_files": 1,
+                        "received_bytes": 0,
+                        "received_files": 0,
+                    }),
+                );
                 let path = match super::transfer::receive_file(
                     &conn,
                     &name,

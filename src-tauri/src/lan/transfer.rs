@@ -713,14 +713,9 @@ pub async fn receive_batch(
     sort_by_date: bool,
     handle: Option<&AppHandle>,
 ) -> Result<Vec<(String, String, u64)>, String> {
-    if count > MAX_BATCH_FILES {
-        return Err(format!(
-            "Batch contains too many files: {count} (maximum {MAX_BATCH_FILES})"
-        ));
-    }
-
-    let mut files = Vec::with_capacity(count as usize);
-
+    // Emit before validation: the caller emits a terminal error even for an
+    // invalid batch. Every terminal event must have its own matching start,
+    // otherwise it can incorrectly decrement a different active receive.
     if let Some(h) = handle {
         let _ = h.emit(
             "lan_transfer_progress",
@@ -732,6 +727,13 @@ pub async fn receive_batch(
             }),
         );
     }
+
+    if count > MAX_BATCH_FILES {
+        return Err(format!(
+            "Batch contains too many files: {count} (maximum {MAX_BATCH_FILES})"
+        ));
+    }
+    let mut files = Vec::with_capacity(count as usize);
 
     for file_index in 0..count {
         let msg = recv_required_message(conn, "batch item").await?;

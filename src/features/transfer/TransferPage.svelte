@@ -19,12 +19,12 @@
   const hasOnlineDevices = $derived(app.onlineDevices.length > 0);
 </script>
 
-{#if !hasOnlineDevices && !app.messageViewAll}
+{#if !hasOnlineDevices && !app.messageViewAll && !app.activeDevice}
   <div class="welcome-wrapper">
     <div class="welcome-card">
       <div class="welcome-icon-ring">
         <div class="welcome-icon">
-          <Icon name="swap_horiz" size={32} />
+          <img src="/app-icon.png" alt="" width="48" height="48" />
         </div>
       </div>
 

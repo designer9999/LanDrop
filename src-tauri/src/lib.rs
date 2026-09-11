@@ -1,5 +1,6 @@
 mod commands;
 mod lan;
+mod notifications;
 mod path_utils;
 
 use tauri::Manager;
@@ -32,13 +33,14 @@ pub fn run() {
         }
     }
 
-    let mut builder = tauri::Builder::default();
+    let mut builder = tauri::Builder::default().manage(notifications::NotificationState::default());
 
     // Single instance — desktop only and must be first plugin. If app is already
     // running, focus the existing window instead of opening a second instance.
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            notifications::handle_launch_args(app, args);
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.unminimize();
@@ -98,6 +100,12 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("app data dir");
             let identity = lan::identity::DeviceIdentity::load_or_create(&data_dir);
             app.manage(lan::LanState::new(handle, identity, data_dir));
+            notifications::handle_launch_args(
+                app.handle(),
+                std::env::args_os()
+                    .skip(1)
+                    .filter_map(|arg| arg.into_string().ok()),
+            );
 
             #[cfg(target_os = "android")]
             {
@@ -211,6 +219,8 @@ pub fn run() {
             commands::save_history_file,
             commands::delete_history_files,
             commands::cleanup_send_cache,
+            notifications::show_native_notification,
+            notifications::take_notification_activations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LanDrop");

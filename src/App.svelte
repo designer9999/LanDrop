@@ -32,6 +32,7 @@
     getFileInfo,
     getExplorerSelection,
     getClipboardFiles,
+    isMobile,
   } from "$lib/api/bridge";
   import type { PreparedSendPath, TransferProgress } from "$lib/api/bridge";
   import { loadPersistedAppState, savePersistedAppState } from "$lib/persistence/app-store";
@@ -44,10 +45,17 @@
     joinReceivePath,
     limitHistoryItems,
   } from "$lib/utils/file-utils";
-  import { sendNativeNotification } from "$lib/utils/native-notifications";
+  import {
+    sendNativeNotification,
+    onNotificationActivation,
+    type NotificationTarget,
+  } from "$lib/utils/native-notifications";
+  import { getUpdaterState } from "$lib/state/updater-state.svelte";
+  import { openNotificationPeer } from "$lib/utils/notification-routing";
   import { playReceiveSound } from "$lib/utils/notification-sound";
 
   import Icon from "$lib/ui/Icon.svelte";
+  import Dialog from "$lib/ui/Dialog.svelte";
   import IconButton from "$lib/ui/IconButton.svelte";
   import Snackbar from "$lib/ui/Snackbar.svelte";
   import PeerBar from "./features/peers/PeerBar.svelte";
@@ -57,6 +65,32 @@
 
   const theme = getThemeState();
   const app = getAppState();
+  const updater = getUpdaterState();
+  let pendingNotificationPeer = $state<string | null>(null);
+  let notificationDialogOpen = $state(false);
+
+  function openNotificationConversation(peerId: string) {
+    const result = openNotificationPeer(app, peerId);
+    if (result === "missing") {
+      showSnackbar("This conversation is no longer in your saved history.");
+    } else if (result === "busy") {
+      showSnackbar("Finish the current transfer before switching conversations.");
+    } else if (result === "draft") {
+      pendingNotificationPeer = peerId;
+      notificationDialogOpen = true;
+    }
+  }
+
+  function handleNotificationActivation(target: NotificationTarget) {
+    void windowShow();
+    if (target.kind === "updates") {
+      app.activeView = "settings";
+      updater.openDetails();
+      void updater.check();
+      return;
+    }
+    openNotificationConversation(target.peerId);
+  }
 
   let snackbarMsg = $state("");
   let snackbarVisible = $state(false);
@@ -173,6 +207,10 @@
   });
 
   let persistedStateSaveTimer: ReturnType<typeof setTimeout>;
+  updater.prepareToExit = async () => {
+    clearTimeout(persistedStateSaveTimer);
+    await savePersistedAppState(app.exportPersistedState());
+  };
   let previousPersistedState = "";
   $effect(() => {
     if (!persistedStateReady) return;
@@ -191,6 +229,7 @@
   onMount(() => {
     let unlisteners: Array<() => void> = [];
     let disposed = false;
+    let activeReceives = 0;
 
     function cleanupListeners() {
       for (const unlisten of unlisteners.splice(0)) unlisten();
@@ -211,6 +250,17 @@
       }
       previousPersistedState = JSON.stringify(app.exportPersistedState());
       persistedStateReady = true;
+
+      try {
+        const unlisten = await onNotificationActivation(handleNotificationActivation);
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlisteners.push(unlisten);
+      } catch (error) {
+        app.addLog("warn", `Notification activation unavailable: ${error}`);
+      }
 
       const status = await getStatus();
       if (disposed) return;
@@ -283,7 +333,8 @@
             sendNativeNotification(
               app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop",
               text || "New message received",
-            ).catch(() => {});
+              { kind: "peer", peerId },
+            ).catch((error) => app.addLog("warn", `Notification unavailable: ${error}`));
           }
           if (app.popOnReceive) windowShow();
         }),
@@ -353,11 +404,20 @@
               app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop";
             const body =
               files.length === 1 ? `Received ${files[0]}` : `Received ${files.length} items`;
-            sendNativeNotification(peerAlias, body).catch(() => {});
+            sendNativeNotification(peerAlias, body, { kind: "peer", peerId }).catch((error) =>
+              app.addLog("warn", `Notification unavailable: ${error}`),
+            );
           }
           if (app.popOnReceive) windowShow();
         }),
         onTransferProgress((progress) => {
+          if (progress.direction === "receive") {
+            if (progress.phase === "start") activeReceives += 1;
+            if (progress.phase === "done" || progress.phase === "error") {
+              activeReceives = Math.max(0, activeReceives - 1);
+            }
+            app.receivingTransferActive = activeReceives > 0;
+          }
           const completedBytes = progress.sent_bytes ?? progress.received_bytes ?? 0;
           const totalBytes = progress.total_bytes ?? 0;
           if (progress.phase === "start") {
@@ -429,6 +489,46 @@
     };
   });
 
+  onMount(() => {
+    if (isMobile()) return;
+    let disposed = false;
+    // Session-only deduplication, never rendered.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const announced = new Set<string>();
+    async function checkForUpdatesQuietly() {
+      if (disposed) return;
+      await updater.check(async (version) => {
+        if (disposed || !app.notificationsEnabled || announced.has(version)) return;
+        announced.add(version);
+        try {
+          await sendNativeNotification(
+            `LanDrop ${version} is available`,
+            "View the update and choose when to install it.",
+            { kind: "updates" },
+          );
+        } catch (error) {
+          announced.delete(version);
+          app.addLog("warn", `Update notification unavailable: ${error}`);
+        }
+      });
+    }
+    const startup = setTimeout(() => {
+      void checkForUpdatesQuietly();
+    }, 30_000);
+    const periodic = setInterval(
+      () => {
+        void checkForUpdatesQuietly();
+      },
+      6 * 60 * 60 * 1000,
+    );
+    return () => {
+      disposed = true;
+      clearTimeout(startup);
+      clearInterval(periodic);
+      updater.dispose();
+    };
+  });
+
   // ── Global hotkeys ──
   async function quickSendHandler() {
     let paths = await getExplorerSelection().catch(() => [] as string[]);
@@ -475,6 +575,10 @@
   });
 
   async function handleSendFiles() {
+    if (updater.phase === "downloading" || updater.phase === "installing") {
+      showSnackbar("Wait for the app update to finish before sending.");
+      return;
+    }
     if (!app.hasFiles || app.transferActive) return;
     const device = app.activeDevice;
     if (!device) {
@@ -531,6 +635,10 @@
   }
 
   async function handleSendText() {
+    if (updater.phase === "downloading" || updater.phase === "installing") {
+      showSnackbar("Wait for the app update to finish before sending.");
+      return;
+    }
     if (!app.sendTextContent.trim() || app.transferActive) return;
     const device = app.activeDevice;
     if (!device) {
@@ -694,6 +802,30 @@
 />
 
 <Snackbar message={snackbarMsg} bind:visible={snackbarVisible} />
+
+<Dialog
+  bind:open={notificationDialogOpen}
+  headline="Keep your current draft?"
+  dismissLabel="Keep editing"
+  confirmLabel="Discard draft and open"
+  confirmDisabled={app.transferActive}
+  onclose={() => {
+    pendingNotificationPeer = null;
+  }}
+  onconfirm={() => {
+    if (app.transferActive || !pendingNotificationPeer) return;
+    app.sendTextContent = "";
+    app.files = [];
+    openNotificationConversation(pendingNotificationPeer);
+    notificationDialogOpen = false;
+    pendingNotificationPeer = null;
+  }}
+>
+  <p>
+    You have unsent text or attachments. Keep editing them, or discard them to open the
+    notification's conversation.
+  </p>
+</Dialog>
 
 <style>
   .app-shell {

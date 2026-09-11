@@ -9,6 +9,7 @@
   import Slider from "$lib/ui/Slider.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { getAppState } from "$lib/state/app-state.svelte";
+  import { getUpdaterState } from "$lib/state/updater-state.svelte";
   import {
     pickSaveFolder,
     copyToClipboard,
@@ -34,6 +35,7 @@
   let { appVersion, onsnackbar }: Props = $props();
 
   const app = getAppState();
+  const updater = getUpdaterState();
   const theme = getThemeState();
 
   let deviceOpen = $state(false);
@@ -43,9 +45,15 @@
   let debugOpen = $state(false);
   let sortingOpen = $state(false);
   let debugEl: HTMLDivElement | undefined = $state();
-  let updateStatus = $state<
-    "idle" | "checking" | "available" | "downloading" | "uptodate" | "error"
-  >("idle");
+  $effect(() => {
+    if (updater.detailsRequested) {
+      aboutOpen = true;
+      updater.detailsRequested = false;
+      void tick().then(() =>
+        document.getElementById("app-update-panel")?.scrollIntoView({ block: "nearest" }),
+      );
+    }
+  });
   const androidApkUrl =
     "https://github.com/designer9999/LanDrop/releases/latest/download/landrop-android-arm64-release.apk";
   const androidReleaseUrl = "https://github.com/designer9999/LanDrop/releases/latest";
@@ -56,7 +64,7 @@
   let aliasEditing = $state(false);
   let platform = $state<PlatformInfo | null>(null);
 
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   onMount(async () => {
     try {
       const identity = await getDeviceIdentity();
@@ -92,39 +100,10 @@
       }
       return;
     }
-    updateStatus = "checking";
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (update) {
-        updateStatus = "available";
-        onsnackbar?.(`Update v${update.version} available — downloading...`);
-        updateStatus = "downloading";
-        await update.downloadAndInstall();
-        onsnackbar?.("Update installed — restart to apply");
-        const { relaunch } = await import("@tauri-apps/plugin-process");
-        await relaunch();
-      } else {
-        updateStatus = "uptodate";
-        onsnackbar?.("You're on the latest version");
-        setTimeout(() => {
-          updateStatus = "idle";
-        }, 3000);
-      }
-    } catch (e) {
-      // 2.11 surfaces Windows installer-launch failures from downloadAndInstall,
-      // so name the phase that actually failed instead of always "check".
-      const failedWhileInstalling = updateStatus === "downloading";
-      updateStatus = "error";
-      onsnackbar?.(
-        failedWhileInstalling
-          ? `Update install failed: ${String(e)}`
-          : `Update check failed: ${String(e)}`,
-      );
-      setTimeout(() => {
-        updateStatus = "idle";
-      }, 5000);
-    }
+    await updater.check();
+    if (updater.error) onsnackbar?.(updater.error);
+    else if (updater.phase === "available") onsnackbar?.(`Update v${updater.version} available`);
+    else if (updater.phase === "idle") onsnackbar?.("You're on the latest version");
   }
 
   // Hex input — writable $derived: follows the theme seed, but accepts
@@ -591,11 +570,7 @@
     {#if aboutOpen}
       <div class="flex flex-col gap-3 mt-4 section-enter">
         <div class="flex items-center gap-3 p-4 rounded-xl bg-surface-container">
-          <div
-            class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary text-on-primary"
-          >
-            <Icon name="swap_horiz" size={20} />
-          </div>
+          <img src="/app-icon.png" alt="" width="40" height="40" />
           <div class="flex-1">
             <div class="text-sm text-on-surface font-medium">LanDrop v{appVersion}</div>
             <div class="text-xs text-on-surface-variant font-mono">{app.localIp}</div>
@@ -611,29 +586,26 @@
           variant="elevated"
           full
           onclick={checkForUpdates}
-          disabled={!isMobile() && (updateStatus === "checking" || updateStatus === "downloading")}
+          disabled={!isMobile() &&
+            (updater.busy || updater.phase === "downloaded" || updater.phase === "ready")}
         >
           <Icon
             name={isMobile()
               ? "download"
-              : updateStatus === "uptodate"
+              : updater.hasChecked && updater.phase === "idle"
                 ? "check_circle"
-                : updateStatus === "error"
+                : updater.phase === "error"
                   ? "error"
                   : "system_update"}
             size={18}
           />
           {isMobile()
             ? "Download latest Android APK"
-            : updateStatus === "checking"
+            : updater.phase === "checking"
               ? "Checking..."
-              : updateStatus === "downloading"
-                ? "Downloading..."
-                : updateStatus === "uptodate"
-                  ? "Up to date!"
-                  : updateStatus === "error"
-                    ? "Check failed"
-                    : "Check for updates"}
+              : updater.phase === "error" && updater.errorPhase === "check"
+                ? "Retry update check"
+                : "Check for updates"}
         </Button>
 
         {#if isMobile()}
@@ -643,6 +615,71 @@
               >After download, open the APK from Downloads or the browser notification, then tap
               Update or Install.</span
             >
+          </div>
+        {:else}
+          <div
+            id="app-update-panel"
+            class="flex flex-col gap-3 text-sm text-on-surface-variant"
+            aria-live="polite"
+          >
+            {#if updater.phase === "available" || updater.phase === "downloaded" || updater.phase === "downloading" || updater.phase === "installing" || (updater.phase === "error" && updater.errorPhase === "install")}
+              <p class="text-on-surface font-medium">LanDrop v{updater.version} is available</p>
+              <p>
+                Choose Update now to download and install. On Windows, LanDrop closes and the
+                installer restarts it.
+              </p>
+              {#if updater.phase === "downloading"}
+                <p>
+                  Downloading update{updater.progressPercent !== null
+                    ? `: ${updater.progressPercent}%`
+                    : "..."}
+                </p>
+                <progress
+                  class="w-full"
+                  max="100"
+                  value={updater.progressPercent ?? undefined}
+                  aria-label="Update download progress"
+                ></progress>
+              {:else if updater.phase === "installing"}
+                <p>Installing update...</p>
+              {:else}
+                <Button
+                  full
+                  onclick={() => void updater.install()}
+                  disabled={!!updater.blockedReason || updater.busy}
+                >
+                  <Icon name="system_update" size={18} />
+                  {updater.phase === "error"
+                    ? "Retry update"
+                    : updater.phase === "downloaded"
+                      ? "Install downloaded update"
+                      : "Update now"}
+                </Button>
+              {/if}
+              {#if updater.releaseNotes}
+                <details>
+                  <summary class="cursor-pointer">Release notes</summary>
+                  <p class="mt-2 whitespace-pre-wrap break-words">{updater.releaseNotes}</p>
+                </details>
+              {/if}
+            {:else if updater.phase === "ready"}
+              <p>Update installed. Restart LanDrop when you're ready.</p>
+              <Button full onclick={() => void updater.restart()} disabled={!!updater.blockedReason}
+                >Restart now</Button
+              >
+            {:else if updater.hasChecked && updater.phase === "idle"}
+              <p>You're on the latest version.</p>
+            {/if}
+            {#if updater.blockedReason && (updater.version || updater.phase === "ready")}
+              <p>{updater.blockedReason}</p>
+            {/if}
+            {#if updater.error}
+              <p class="text-error" role="alert">{updater.error}</p>
+            {/if}
+            <p class="text-xs">
+              LanDrop checks for updates automatically. Installation always starts with your
+              approval.
+            </p>
           </div>
         {/if}
 
