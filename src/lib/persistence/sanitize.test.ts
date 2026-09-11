@@ -184,11 +184,16 @@ describe("devicesForPersistence", () => {
         online: true,
         color: 0,
         outFolder: "C:\\x",
+        network: "tailscale",
+        tailscaleIp: "100.64.0.2",
       },
     ] as DiscoveredDevice[];
     const persisted = devicesForPersistence(devices);
     expect(persisted[0].online).toBe(false);
     expect(persisted[0].outFolder).toBeUndefined();
+    expect(persisted[0].ip).toBe("");
+    expect(persisted[0].network).toBeUndefined();
+    expect(persisted[0].tailscaleIp).toBeUndefined();
     expect(persisted[0].alias).toBe("A");
   });
 });

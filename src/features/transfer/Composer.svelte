@@ -105,9 +105,9 @@
   });
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      onsend();
+      if (canSend) onsend();
     }
   }
 

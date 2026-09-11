@@ -4,6 +4,7 @@
 <script lang="ts">
   import type { DiscoveredDevice } from "$lib/state/app-state.svelte";
   import PeerAvatar from "./PeerAvatar.svelte";
+  import { peerRouteDescription, peerRouteLabel } from "$lib/utils/peer-utils";
 
   interface Props {
     device: DiscoveredDevice;
@@ -18,7 +19,11 @@
   class="peer-chip"
   class:peer-selected={selected}
   {onclick}
-  title="{device.alias}{device.online ? '' : ' (offline)'}"
+  title="{device.alias} · {peerRouteDescription(device)}{selected ? ' · Open device settings' : ''}"
+  aria-label="{device.alias}, {peerRouteDescription(device)}{selected
+    ? ', open device settings'
+    : ''}"
+  aria-pressed={selected}
 >
   <PeerAvatar
     name={device.alias}
@@ -32,17 +37,24 @@
   {:else}
     <span class="status-dot offline"></span>
   {/if}
+  <span class="peer-label">
+    <span class="peer-name">{device.alias}</span>
+    <span class="peer-route">{peerRouteLabel(device)}</span>
+  </span>
 </button>
 
 <style>
   .peer-chip {
     position: relative;
+    flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 4px;
-    border-radius: 50%;
-    border: none;
+    min-height: 48px;
+    padding: 8px;
+    gap: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--md-sys-color-outline);
     background: transparent;
     cursor: pointer;
     transition: background var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
@@ -50,13 +62,48 @@
   .peer-chip:hover {
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
   }
+  .peer-selected {
+    background: var(--md-sys-color-secondary-container);
+    border-color: transparent;
+  }
+  .peer-selected .peer-label,
+  .peer-selected .peer-route {
+    color: var(--md-sys-color-on-secondary-container);
+  }
+  .peer-selected:hover {
+    background: color-mix(
+      in srgb,
+      var(--md-sys-color-on-secondary-container) 8%,
+      var(--md-sys-color-secondary-container)
+    );
+  }
+  .peer-label {
+    display: flex;
+    flex-direction: column;
+    text-align: left;
+    color: var(--md-sys-color-on-surface);
+    max-width: 100px;
+  }
+  .peer-name {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 20px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .peer-route {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--md-sys-color-on-surface-variant);
+  }
   .peer-chip:active {
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent);
   }
   .status-dot {
     position: absolute;
-    bottom: 2px;
-    right: 2px;
+    bottom: 10px;
+    left: 26px;
     width: 8px;
     height: 8px;
     border-radius: 50%;

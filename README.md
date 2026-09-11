@@ -1,7 +1,8 @@
 # LanDrop
 
-LanDrop sends files and text directly between devices on the same local network.
-There is no account, cloud storage, or relay server.
+LanDrop sends files and text between devices on the same local network or, on
+desktop, through your existing Tailscale network. LanDrop has no account or cloud
+storage. Tailscale may relay its encrypted connections when a direct path is unavailable.
 
 > [!IMPORTANT]
 > LanDrop's current transfer protocol is plaintext and does not cryptographically
@@ -12,11 +13,13 @@ There is no account, cloud storage, or relay server.
 
 - Direct file, folder, and text transfer over TCP
 - Automatic peer discovery with mDNS
+- Desktop Tailscale discovery, with LAN preferred when both routes are available
+- A live device list; saved conversations remain available through **View all history**
 - Windows, macOS, Linux, and Android builds
 - Transfer history, image previews, and desktop video previews
 - Per-peer receive folders
 - Desktop system tray, global shortcut, and signed Tauri updater artifacts
-- No telemetry, account, cloud storage, or internet relay
+- No LanDrop telemetry, account, cloud storage, or application relay
 
 ## Download
 
@@ -42,9 +45,39 @@ notarization or Windows Authenticode.
 4. LanDrop opens a direct TCP connection and writes received files to the selected
    receive folder.
 
+Saved devices do not appear in the live peer list after a restart until rediscovered.
+Messages and device customizations are preserved. LAN and Tailscale addresses for
+the same LanDrop device are combined into one peer, with a visible route label.
+
+### Using an existing Tailscale network
+
+1. Run the updated LanDrop on both Windows, macOS, or Linux desktops.
+2. Keep both installed Tailscale clients connected to your existing tailnet.
+3. Allow the intended devices to connect on TCP **29171** in your tailnet policy
+   and host firewalls.
+4. Select the discovered peer and send text, files, or folders as usual.
+
+LanDrop reads `tailscale status --json` from the installed desktop client and checks
+which peers actually run LanDrop. It does not change your Tailscale configuration
+or require a LanDrop server. Both devices must be online and running the app;
+there is no offline message queue. This integration currently discovers Tailscale
+IPv4 endpoints on desktop; automatic Android Tailscale discovery is not included.
+
+When both routes exist, LanDrop prefers LAN and can fall back to Tailscale during
+connection establishment. Interrupted transfers are reported as failed rather
+than automatically replayed. Tailscale encrypts its tunnel; the direct LAN route
+still uses the plaintext LanDrop protocol described below.
+
+See the [desktop Tailscale guide](documentation/tailscale.md) for troubleshooting,
+limits, and a two-device acceptance check.
+
 The current wire protocol is intentionally simple, but it has no pairing, encryption,
 receiver approval, integrity digest, resume, or final acknowledgement. Those are
 prioritized in the [technical audit](documentation/technical-audit-2026-07.md).
+
+The [September audit](documentation/technical-audit-2026-09.md) covers current
+architecture, dependencies, UX, Tailscale, and remaining work. UI changes follow
+the supplied [Material 3 component conventions](documentation/material-3-components.md).
 
 ## Tech stack
 
@@ -98,11 +131,12 @@ Keep the version identical in all three manifests:
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-Then create and push an annotated version tag:
+Add release notes at `documentation/releases/vMAJOR.MINOR.PATCH.md`, then create
+and push an annotated version tag after the source commit has passed CI on `main`:
 
 ```bash
-git tag -a v1.6.13 -m "LanDrop v1.6.13"
-git push origin v1.6.13
+git tag -a v1.7.0 -m "LanDrop v1.7.0"
+git push origin v1.7.0
 ```
 
 The release workflow accepts stable `vMAJOR.MINOR.PATCH` tags, verifies the versions

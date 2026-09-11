@@ -92,19 +92,25 @@
         first.focus();
       }
     } else if (e.key === "Enter" && !confirmDisabled) {
-      if ((e.target as HTMLElement)?.tagName === "TEXTAREA") return;
+      if (e.isComposing || (e.target as HTMLElement)?.closest("textarea, button, a, select"))
+        return;
       e.preventDefault();
       handleConfirm();
     }
   }
 
   $effect(() => {
-    if (open && !exiting) {
+    if (open) {
+      const previousFocus =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
       tick().then(() => {
         if (!dialogEl) return;
         const focusable = dialogEl.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
         focusable?.focus();
       });
+      return () => {
+        if (previousFocus?.isConnected) previousFocus.focus();
+      };
     }
   });
 </script>

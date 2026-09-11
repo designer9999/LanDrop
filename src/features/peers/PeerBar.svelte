@@ -6,17 +6,17 @@
   import { refreshLanDiscovery } from "$lib/api/bridge";
   import Icon from "$lib/ui/Icon.svelte";
   import PeerChip from "./PeerChip.svelte";
+  import { onMount } from "svelte";
 
   interface Props {
     onedit: (id: string) => void;
+    onsnackbar: (message: string) => void;
   }
 
-  let { onedit }: Props = $props();
+  let { onedit, onsnackbar }: Props = $props();
 
   const app = getAppState();
-  const visibleDevices = $derived(
-    [...app.devices].sort((a, b) => Number(b.online) - Number(a.online)),
-  );
+  const visibleDevices = $derived(app.onlineDevices);
 
   let scrollEl: HTMLDivElement | undefined = $state();
   let canScrollLeft = $state(false);
@@ -31,6 +31,12 @@
   function scrollBy(dir: number) {
     scrollEl?.scrollBy({ left: dir * 120, behavior: "smooth" });
   }
+
+  onMount(() => {
+    const observer = new ResizeObserver(checkScroll);
+    if (scrollEl) observer.observe(scrollEl);
+    return () => observer.disconnect();
+  });
 
   $effect(() => {
     // Re-measure the scroll affordances whenever the chip row changes length.
@@ -47,18 +53,25 @@
     if (refreshing) return;
     refreshing = true;
     try {
-      app.markAllDevicesOffline();
       await refreshLanDiscovery();
-    } catch {}
-    setTimeout(() => {
+      app.discoveryError = "";
+    } catch (error) {
+      app.discoveryError = "Device scan failed. Try again or check the debug log in Settings.";
+      app.addLog("error", `Discovery refresh failed: ${error}`);
+      onsnackbar(app.discoveryError);
+    } finally {
       refreshing = false;
-    }, 1500);
+    }
   }
 </script>
 
 <div class="peer-bar-outer">
   {#if canScrollLeft}
-    <button class="scroll-arrow scroll-arrow-left" onclick={() => scrollBy(-1)}>
+    <button
+      class="scroll-arrow scroll-arrow-left"
+      aria-label="Scroll devices left"
+      onclick={() => scrollBy(-1)}
+    >
       <Icon name="chevron_left" size={18} />
     </button>
   {/if}
@@ -79,15 +92,19 @@
     {/each}
 
     {#if visibleDevices.length === 0}
-      <div class="discovering">
+      <div class="discovering" role="status">
         <Icon name="radar" size={16} />
-        <span>Searching for devices...</span>
+        <span>{app.discoveryError ? "Discovery unavailable" : "Searching for devices..."}</span>
       </div>
     {/if}
   </div>
 
   {#if canScrollRight}
-    <button class="scroll-arrow scroll-arrow-right" onclick={() => scrollBy(1)}>
+    <button
+      class="scroll-arrow scroll-arrow-right"
+      aria-label="Scroll devices right"
+      onclick={() => scrollBy(1)}
+    >
       <Icon name="chevron_right" size={18} />
     </button>
   {/if}
@@ -97,6 +114,7 @@
     class:refreshing
     onclick={handleRefresh}
     title="Rescan for devices"
+    aria-label="Rescan LAN and Tailscale devices"
     disabled={refreshing}
   >
     <Icon name="refresh" size={16} />
@@ -117,8 +135,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: 48px;
+    height: 48px;
     border-radius: 50%;
     border: none;
     background: transparent;
@@ -139,6 +157,7 @@
     }
   }
   .peer-bar {
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -155,7 +174,7 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 32px;
+    width: 48px;
     z-index: 2;
     display: flex;
     align-items: center;
@@ -171,7 +190,7 @@
     padding-right: 8px;
   }
   .scroll-arrow-right {
-    right: 0;
+    right: 52px;
     background: linear-gradient(to left, var(--md-sys-color-surface) 60%, transparent);
     padding-left: 8px;
   }

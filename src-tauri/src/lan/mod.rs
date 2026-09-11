@@ -1,6 +1,7 @@
 pub mod discovery;
 pub mod identity;
 pub mod protocol;
+pub mod tailscale;
 pub mod transfer;
 
 use serde::{Deserialize, Serialize};
@@ -146,10 +147,18 @@ impl LanService {
     }
 
     pub async fn stop(&self) {
-        if let Some(active) = self.run.lock().await.as_ref() {
+        let mut run = self.run.lock().await;
+        if let Some(active) = run.take() {
             active.cancel.cancel();
+            let _ = active.join.await;
         }
-        self.discovered_peers.lock().await.clear();
+        let mut peers = self.discovered_peers.lock().await;
+        for id in peers.keys() {
+            let _ = self
+                .handle
+                .emit("lan_peer_lost", serde_json::json!({"id": id}));
+        }
+        peers.clear();
     }
 
     pub async fn send_text(
@@ -158,64 +167,11 @@ impl LanService {
         peer_ip_hint: Option<&str>,
         text: &str,
     ) -> Result<bool, String> {
-        let expected_peer_uuid = peer_uuid_bytes(peer_id)?;
-        let mut peer_ips = self.resolve_peer_ips(peer_id, peer_ip_hint).await;
-        if peer_ips.is_empty() {
-            if let Some(ip) = self.find_peer_on_lan(peer_id).await {
-                peer_ips.push(ip);
-            }
-        }
-        if peer_ips.is_empty() {
-            return Err(format!("Peer {} not found or offline", peer_id));
-        }
-
-        let uuid = self.identity.id_bytes();
-        let mut last_err = String::new();
-
-        for ip in &peer_ips {
-            // Retry once on failure (TCP listener may have recovered)
-            for attempt in 0..2 {
-                match transfer::send_text_to_peer(ip, &uuid, &expected_peer_uuid, text).await {
-                    Ok(()) => {
-                        self.remember_peer_ip(peer_id, ip).await;
-                        return Ok(true);
-                    }
-                    Err(err) => {
-                        last_err = err;
-                        if attempt == 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        }
-                    }
-                }
-            }
-
-            let _ = self.handle.emit(
-                "lan_log",
-                serde_json::json!({
-                    "level": "warn",
-                    "text": format!("Text send to {} via {} failed: {}", peer_id, ip, last_err),
-                }),
-            );
-        }
-
-        if let Some(ip) = self.find_peer_on_lan(peer_id).await {
-            if !peer_ips.iter().any(|existing| existing == &ip) {
-                match transfer::send_text_to_peer(&ip, &uuid, &expected_peer_uuid, text).await {
-                    Ok(()) => {
-                        self.remember_peer_ip(peer_id, &ip).await;
-                        return Ok(true);
-                    }
-                    Err(err) => last_err = err,
-                }
-            }
-        }
-
-        Err(format!(
-            "Failed to send to peer {} via {}: {}",
-            peer_id,
-            peer_ips.join(", "),
-            last_err
-        ))
+        let connection = self.resolve_available_peer(peer_id, peer_ip_hint).await?;
+        // Route fallback happens before any payload. Once sending starts, an
+        // error is ambiguous; automatic retries could deliver duplicates.
+        transfer::send_text_on_connection(&connection, text).await?;
+        Ok(true)
     }
 
     pub async fn send_files(
@@ -224,81 +180,58 @@ impl LanService {
         peer_ip_hint: Option<&str>,
         paths: &[String],
     ) -> Result<bool, String> {
-        let expected_peer_uuid = peer_uuid_bytes(peer_id)?;
-        let mut peer_ips = self.resolve_peer_ips(peer_id, peer_ip_hint).await;
-        if peer_ips.is_empty() {
-            if let Some(ip) = self.find_peer_on_lan(peer_id).await {
-                peer_ips.push(ip);
+        peer_uuid_bytes(peer_id)?;
+        match transfer::send_files_on_connection(
+            paths,
+            Some(&self.handle),
+            self.resolve_available_peer(peer_id, peer_ip_hint),
+        )
+        .await
+        {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let _ = self.handle.emit(
+                    "lan_transfer_progress",
+                    serde_json::json!({"direction":"send","phase":"error"}),
+                );
+                Err(error)
             }
         }
-        if peer_ips.is_empty() {
-            return Err(format!("Peer {} not found or offline", peer_id));
-        }
+    }
 
-        let uuid = self.identity.id_bytes();
-        let mut last_err = String::new();
-
-        for ip in &peer_ips {
-            match transfer::send_files_to_peer(
-                ip,
-                &uuid,
-                &expected_peer_uuid,
-                paths,
-                Some(&self.handle),
-            )
-            .await
+    async fn resolve_available_peer(
+        &self,
+        peer_id: &str,
+        hint: Option<&str>,
+    ) -> Result<Arc<transfer::Connection>, String> {
+        let expected = normalize_uuid(peer_id).ok_or("Invalid peer UUID")?;
+        let expected_uuid = peer_uuid_bytes(&expected)?;
+        let ips = self.resolve_peer_ips(&expected, hint).await;
+        for ip in ips {
+            let checked_at = std::time::Instant::now();
+            if let Ok(connection) =
+                transfer::connect_to_peer(&ip, &self.identity.id_bytes(), &expected_uuid).await
             {
-                Ok(()) => {
-                    self.remember_peer_ip(peer_id, ip).await;
-                    return Ok(true);
-                }
-                Err(err) => {
-                    last_err = err;
-                }
+                self.remember_peer_ip(&expected, &ip).await;
+                return Ok(connection);
             }
-
-            let _ = self.handle.emit(
-                "lan_log",
-                serde_json::json!({
-                    "level": "warn",
-                    "text": format!("File send to {} via {} failed: {}", peer_id, ip, last_err),
-                }),
-            );
-        }
-
-        if let Some(ip) = self.find_peer_on_lan(peer_id).await {
-            if !peer_ips.iter().any(|existing| existing == &ip) {
-                match transfer::send_files_to_peer(
-                    &ip,
-                    &uuid,
-                    &expected_peer_uuid,
-                    paths,
-                    Some(&self.handle),
-                )
-                .await
-                {
-                    Ok(()) => {
-                        self.remember_peer_ip(peer_id, &ip).await;
-                        return Ok(true);
-                    }
-                    Err(err) => last_err = err,
+            let mut peers = self.discovered_peers.lock().await;
+            if let Some(peer) = peers.get_mut(&expected) {
+                peer.forget_route_before(&ip, checked_at);
+                if peer.ip.is_empty() {
+                    peers.remove(&expected);
+                    let _ = self
+                        .handle
+                        .emit("lan_peer_lost", serde_json::json!({"id":expected}));
+                } else {
+                    let _ = self.handle.emit("lan_peer_discovered", peer.clone());
                 }
             }
         }
-
-        let _ = self.handle.emit(
-            "lan_transfer_progress",
-            serde_json::json!({
-                "direction": "send",
-                "phase": "error",
-            }),
-        );
-        Err(format!(
-            "Failed to send to peer {} via {}: {}",
-            peer_id,
-            peer_ips.join(", "),
-            last_err
-        ))
+        let ip = self.find_peer_on_lan(&expected).await.ok_or_else(|| {
+            format!("Peer {peer_id} is offline or unreachable on LAN and Tailscale")
+        })?;
+        transfer::connect_to_peer(&ip, &self.identity.id_bytes(), &expected_uuid).await
     }
 
     pub async fn set_peer_folder(&self, peer_id: &str, folder: &str) {
@@ -351,77 +284,37 @@ impl LanService {
         identity
     }
 
-    async fn get_peer_ip(&self, peer_id: &str) -> Option<String> {
-        let normalized = normalize_uuid(peer_id);
-        let peers = self.discovered_peers.lock().await;
-        peers
-            .get(peer_id)
-            .or_else(|| normalized.as_ref().and_then(|id| peers.get(id)))
-            .map(|p| p.ip.clone())
-    }
-
     async fn resolve_peer_ips(&self, peer_id: &str, peer_ip_hint: Option<&str>) -> Vec<String> {
-        let backend_ip = self.get_peer_ip(peer_id).await;
-
-        let hinted_ip = peer_ip_hint
+        let normalized = normalize_uuid(peer_id).unwrap_or_else(|| peer_id.to_string());
+        let peers = self.discovered_peers.lock().await;
+        let mut ips = peers
+            .get(&normalized)
+            .map(DiscoveredPeer::route_ips)
+            .unwrap_or_default();
+        // Tailnet routes originate only from the local authenticated CLI and
+        // successful app probes. An arbitrary UI hint cannot authorize one.
+        if let Some(ip) = peer_ip_hint
             .map(str::trim)
-            .filter(|ip| !ip.is_empty())
-            .map(str::to_string);
-
-        let mut ips = Vec::new();
-
-        if let Some(ip) = backend_ip {
-            ips.push(ip);
-        }
-
-        if let Some(ip) = hinted_ip {
-            if !ips.iter().any(|existing| existing == &ip) {
-                ips.push(ip);
+            .filter(|ip| discovery::is_current_lan_peer_ip(ip))
+        {
+            if !ips.iter().any(|existing| existing == ip) {
+                ips.insert(0, ip.to_string());
             }
         }
-
-        let before_filter = ips.clone();
-        ips.retain(|ip| discovery::is_current_lan_peer_ip(ip));
-        for rejected in before_filter
-            .iter()
-            .filter(|ip| !ips.iter().any(|accepted| accepted == *ip))
-        {
-            let _ = self.handle.emit(
-                "lan_log",
-                serde_json::json!({
-                    "level": "warn",
-                    "text": format!(
-                        "Ignoring non-LAN peer IP {} for {}; only same LAN as this PC is allowed",
-                        rejected, peer_id
-                    ),
-                }),
-            );
-        }
-
-        if ips.len() > 1 {
-            let _ = self.handle.emit(
-                "lan_log",
-                serde_json::json!({
-                    "level": "info",
-                    "text": format!(
-                        "Peer {} has multiple candidate IPs: {}",
-                        peer_id,
-                        ips.join(", ")
-                    ),
-                }),
-            );
-        }
-
+        ips.retain(|ip| {
+            discovery::is_current_lan_peer_ip(ip)
+                || ip.parse().is_ok_and(tailscale::is_tailscale_ipv4)
+        });
+        ips.sort_by_key(|ip| ip.parse().is_ok_and(tailscale::is_tailscale_ipv4));
         ips
     }
 
     async fn remember_peer_ip(&self, peer_id: &str, ip: &str) {
-        let normalized = normalize_uuid(peer_id);
+        let normalized = normalize_uuid(peer_id).unwrap_or_else(|| peer_id.to_string());
         let mut peers = self.discovered_peers.lock().await;
-        if let Some(peer) = peers.get_mut(peer_id) {
-            peer.ip = ip.to_string();
-        } else if let Some(peer) = normalized.as_ref().and_then(|id| peers.get_mut(id)) {
-            peer.ip = ip.to_string();
+        if let Some(peer) = peers.get_mut(&normalized) {
+            peer.observe_route(ip);
+            let _ = self.handle.emit("lan_peer_discovered", peer.clone());
         }
     }
 
@@ -441,22 +334,24 @@ impl LanService {
             }),
         );
 
-        for host in 1..=254 {
-            if host == own_host {
-                continue;
+        let mut candidates = (1..=254).filter(|host| *host != own_host);
+        loop {
+            while probes.len() < 16 {
+                let Some(host) = candidates.next() else {
+                    break;
+                };
+                let ip = Ipv4Addr::new(a, b, c, host).to_string();
+                let uuid = my_uuid;
+                probes.spawn(async move {
+                    transfer::probe_peer_id(&ip, &uuid)
+                        .await
+                        .ok()
+                        .map(|found_id| (found_id, ip))
+                });
             }
-
-            let ip = Ipv4Addr::new(a, b, c, host).to_string();
-            let uuid = my_uuid;
-            probes.spawn(async move {
-                transfer::probe_peer_id(&ip, &uuid)
-                    .await
-                    .ok()
-                    .map(|found_id| (found_id, ip))
-            });
-        }
-
-        while let Some(result) = probes.join_next().await {
+            let Some(result) = probes.join_next().await else {
+                break;
+            };
             let Ok(Some((found_id, ip))) = result else {
                 continue;
             };

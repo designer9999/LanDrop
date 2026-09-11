@@ -61,6 +61,20 @@ export interface DiscoveredPeer {
   device_type: string;
   ip: string;
   port: number;
+  network?: "lan" | "tailscale";
+  lan_ip?: string | null;
+  tailscale_ip?: string | null;
+}
+
+export interface TailscaleStatus {
+  state: "available" | "unavailable" | "stopped";
+  message: string;
+}
+
+export async function onTailscaleStatus(
+  cb: (status: TailscaleStatus) => void,
+): Promise<() => void> {
+  return listen<TailscaleStatus>("tailscale_status", (event) => cb(event.payload));
 }
 
 export async function getStatus(): Promise<StatusResponse> {

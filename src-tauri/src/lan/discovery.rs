@@ -1,6 +1,6 @@
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::identity::{normalize_uuid, DeviceIdentity};
 use super::protocol::{MDNS_SERVICE_TYPE, TCP_PORT};
+use super::tailscale;
 use super::transfer::{probe_peer_id, Connection};
 
 const MAX_INCOMING_SESSIONS: usize = 32;
@@ -133,6 +134,7 @@ fn notification_text_preview(text: &str) -> String {
 }
 
 const BAD_INTERFACE_KEYWORDS: &[&str] = &[
+    "tailscale",
     "tun",
     "tap",
     "wg",
@@ -161,7 +163,8 @@ fn is_bad_interface(name: &str) -> bool {
 
 fn is_usable_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
-    !(ip.is_loopback()
+    !(tailscale::is_tailscale_ipv4(ip)
+        || ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || octets[0] == 169 && octets[1] == 254)
@@ -277,6 +280,78 @@ pub struct DiscoveredPeer {
     pub device_type: String,
     pub ip: String,
     pub port: u16,
+    pub network: String,
+    pub lan_ip: Option<String>,
+    pub tailscale_ip: Option<String>,
+    #[serde(skip)]
+    lan_seen: Option<Instant>,
+    #[serde(skip)]
+    tailscale_seen: Option<Instant>,
+}
+
+impl DiscoveredPeer {
+    pub fn new(id: String, alias: String, device_type: String, ip: String) -> Self {
+        let mut peer = Self {
+            id,
+            alias,
+            device_type,
+            ip: String::new(),
+            port: TCP_PORT,
+            network: String::new(),
+            lan_ip: None,
+            tailscale_ip: None,
+            lan_seen: None,
+            tailscale_seen: None,
+        };
+        peer.observe_route(&ip);
+        peer
+    }
+
+    pub fn observe_route(&mut self, ip: &str) {
+        if ip.parse().is_ok_and(tailscale::is_tailscale_ipv4) {
+            self.tailscale_ip = Some(ip.to_string());
+            self.tailscale_seen = Some(Instant::now());
+        } else {
+            self.lan_ip = Some(ip.to_string());
+            self.lan_seen = Some(Instant::now());
+        }
+        self.select_preferred_route();
+    }
+
+    fn select_preferred_route(&mut self) {
+        if let Some(ip) = &self.lan_ip {
+            self.ip = ip.clone();
+            self.network = "lan".into();
+        } else if let Some(ip) = &self.tailscale_ip {
+            self.ip = ip.clone();
+            self.network = "tailscale".into();
+        } else {
+            self.ip.clear();
+        }
+    }
+
+    pub fn route_ips(&self) -> Vec<String> {
+        self.lan_ip
+            .iter()
+            .chain(self.tailscale_ip.iter())
+            .cloned()
+            .collect()
+    }
+
+    pub fn forget_route_before(&mut self, ip: &str, checked_at: Instant) {
+        if self.lan_ip.as_deref() == Some(ip) && self.lan_seen.is_none_or(|seen| seen <= checked_at)
+        {
+            self.lan_ip = None;
+            self.lan_seen = None;
+        }
+        if self.tailscale_ip.as_deref() == Some(ip)
+            && self.tailscale_seen.is_none_or(|seen| seen <= checked_at)
+        {
+            self.tailscale_ip = None;
+            self.tailscale_seen = None;
+        }
+        self.select_preferred_route();
+    }
 }
 
 #[derive(Clone)]
@@ -291,6 +366,10 @@ struct IncomingSessionContext<'a> {
     receive_routing: &'a ReceiveRoutingState,
     discovered_peers: &'a Mutex<HashMap<String, DiscoveredPeer>>,
     pending_removals: &'a Mutex<HashMap<String, (Instant, String, u16)>>,
+    tailnet_ips: &'a Mutex<HashSet<Ipv4Addr>>,
+    alias_rx: &'a tokio::sync::watch::Receiver<String>,
+    device_type: &'a str,
+    cancel: &'a CancellationToken,
 }
 
 /// Run mDNS-based discovery: register this device, browse for others, accept TCP transfers.
@@ -303,24 +382,14 @@ pub async fn run_discovery(
     mut alias_rx: tokio::sync::watch::Receiver<String>,
 ) {
     // Get our local LAN IP
-    let local_ip = match get_local_ipv4() {
-        Some(ip) => ip,
-        None => {
-            emit_log(
-                &handle,
-                "error",
-                "No LAN IPv4 address found — cannot start discovery",
-            );
-            return;
-        }
-    };
+    let local_ip = get_local_ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED);
     emit_log(&handle, "info", &format!("Local IP: {}", local_ip));
 
     // Create mDNS daemon
     let mdns = match ServiceDaemon::new() {
         Ok(d) => {
             emit_log(&handle, "success", "mDNS daemon started");
-            d
+            Some(d)
         }
         Err(e) => {
             let err_msg = format!("Failed to create mDNS daemon: {}", e);
@@ -338,37 +407,39 @@ pub async fn run_discovery(
                      has connection.mdns=2 (or install avahi-daemon).",
                 );
             }
-            return;
+            None
         }
     };
 
     // Register our service
     let my_id = identity.id.to_string();
     let current_alias = alias_rx.borrow_and_update().clone();
-    register_landrop_service(
-        &handle,
-        &mdns,
-        &my_id,
-        &current_alias,
-        &identity.device_type,
-        local_ip,
-    );
+    if let Some(mdns) = mdns.as_ref().filter(|_| !local_ip.is_unspecified()) {
+        register_landrop_service(
+            &handle,
+            mdns,
+            &my_id,
+            &current_alias,
+            &identity.device_type,
+            local_ip,
+        );
+    }
 
     // Browse for other instances
-    let browse_receiver = match mdns.browse(MDNS_SERVICE_TYPE) {
-        Ok(r) => {
+    let browse_receiver = match mdns.as_ref().map(|mdns| mdns.browse(MDNS_SERVICE_TYPE)) {
+        Some(Ok(r)) => {
             emit_log(
                 &handle,
                 "success",
                 "Browsing for LanDrop devices on network...",
             );
-            r
+            Some(r)
         }
-        Err(e) => {
+        Some(Err(e)) => {
             emit_log(&handle, "error", &format!("Failed to browse mDNS: {}", e));
-            let _ = mdns.shutdown();
-            return;
+            None
         }
+        None => None,
     };
 
     // Bind TCP listener — retry up to 5 times if port is held by previous instance
@@ -402,13 +473,17 @@ pub async fn run_discovery(
                             TCP_PORT, e
                         ),
                     );
-                    let _ = mdns.shutdown();
+                    if let Some(mdns) = &mdns {
+                        let _ = mdns.shutdown();
+                    }
                     return;
                 }
             }
         }
         let Some(listener) = listener_opt else {
-            let _ = mdns.shutdown();
+            if let Some(mdns) = &mdns {
+                let _ = mdns.shutdown();
+            }
             return;
         };
         listener
@@ -421,11 +496,13 @@ pub async fn run_discovery(
     // We defer removal and verify with a TCP check before marking offline.
     type PendingRemovalMap = Arc<Mutex<HashMap<String, (Instant, String, u16)>>>;
     let pending_removals: PendingRemovalMap = Arc::new(Mutex::new(HashMap::new()));
+    let tailnet_ips = Arc::new(Mutex::new(HashSet::new()));
 
     let cancel_mdns = cancel.clone();
     let handle_mdns = handle.clone();
     let peers_mdns = discovered_peers.clone();
     let my_id_mdns = my_id.clone();
+    let my_uuid_mdns = identity.id_bytes();
     let pending_mdns = pending_removals.clone();
     let local_ip_mdns = local_ip;
     let mdns_task = mdns.clone();
@@ -448,6 +525,7 @@ pub async fn run_discovery(
                         continue;
                     }
                     let new_alias = alias_rx_mdns.borrow_and_update().clone();
+                    let Some(mdns_task) = &mdns_task else { continue; };
                     if let Err(e) = mdns_task.unregister(&service_fullname(&my_id_mdns)) {
                         emit_log(
                             &handle_mdns,
@@ -457,7 +535,7 @@ pub async fn run_discovery(
                     }
                     register_landrop_service(
                         &handle_mdns,
-                        &mdns_task,
+                        mdns_task,
                         &my_id_mdns,
                         &new_alias,
                         &device_type_mdns,
@@ -473,42 +551,26 @@ pub async fn run_discovery(
                         .filter(|(_, (at, _, _))| at.elapsed() >= grace_period)
                         .map(|(id, (_, ip, port))| (id.clone(), ip.clone(), *port))
                         .collect();
-                    for (id, ip, port) in expired {
+                    for (id, _, _) in expired {
                         pending.remove(&id);
-                        // TCP liveness check — try to connect before marking offline
-                        let addr = format!("{}:{}", ip, port);
-                        let alive = matches!(
-                            tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
-                                .await,
-                            Ok(Ok(_))
-                        );
-                        if alive {
-                            // Peer is still alive — mDNS lied. Re-add to discovered.
-                            emit_log(
-                                &handle_mdns,
-                                "info",
-                                &format!("Peer {} still alive (mDNS removal was false)", &id[..8]),
-                            );
-                        } else {
-                            // Peer is genuinely gone
-                            let mut peers = peers_mdns.lock().await;
-                            peers.remove(&id);
-                            drop(peers);
-                            let _ = handle_mdns.emit("lan_peer_lost", serde_json::json!({"id": id}));
-                            emit_log(
-                                &handle_mdns,
-                                "warn",
-                                &format!("Peer {} confirmed offline after TCP check", &id[..8]),
-                            );
-                        }
+                        // The route monitor verifies every peer independently of
+                        // mDNS goodbyes, including peers learned by TCP scans.
                     }
                 }
 
                 // ── mDNS browse events, natively async (no blocking-pool churn) ──
-                event = browse_receiver.recv_async() => {
+                event = async {
+                    match &browse_receiver {
+                        Some(receiver) => receiver.recv_async().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     let Ok(event) = event else { break };
                     match event {
                         ServiceEvent::ServiceResolved(info) => {
+                            // The current wire protocol uses one fixed service
+                            // port; do not silently route an incompatible record.
+                            if info.get_port() != TCP_PORT { continue; }
                             // Extract peer info from TXT records
                             let props = info.get_properties();
                             let raw_peer_id = props.get_property_val_str("id").unwrap_or_default();
@@ -598,16 +660,18 @@ pub async fn run_discovery(
                                 }
                             }
 
-                            let peer = DiscoveredPeer {
-                                id: peer_id.clone(),
-                                alias: peer_alias,
-                                device_type: peer_dtype,
-                                ip,
-                                port: info.get_port(),
-                            };
-
+                            // A multicast advertisement is only a candidate;
+                            // verify its UUID before exposing it as online.
+                            if probe_peer_id(&ip, &my_uuid_mdns).await.as_deref() != Ok(peer_id.as_str()) {
+                                continue;
+                            }
                             let mut peers = peers_mdns.lock().await;
-                            peers.insert(peer_id.clone(), peer.clone());
+                            let peer = peers.entry(peer_id.clone()).or_insert_with(|| DiscoveredPeer::new(
+                                peer_id.clone(), peer_alias.clone(), peer_dtype.clone(), ip.clone()));
+                            peer.alias = peer_alias;
+                            peer.device_type = peer_dtype;
+                            peer.observe_route(&ip);
+                            let peer = peer.clone();
                             drop(peers);
 
                             let _ = handle_mdns.emit("lan_peer_discovered", &peer);
@@ -649,6 +713,9 @@ pub async fn run_discovery(
     let my_uuid = identity.id_bytes();
     let peers_tcp = discovered_peers.clone();
     let pending_tcp = pending_removals.clone();
+    let tailnet_tcp = tailnet_ips.clone();
+    let alias_tcp = alias_rx.clone();
+    let device_type_tcp = identity.device_type.clone();
     let incoming_session_slots = Arc::new(Semaphore::new(MAX_INCOMING_SESSIONS));
     let tcp_acceptor = tokio::spawn(async move {
         let mut listener: Arc<TcpListener> = tcp_listener;
@@ -707,6 +774,10 @@ pub async fn run_discovery(
                     let receive_routing = receive_routing.clone();
                     let peers_ref = peers_tcp.clone();
                     let pending_ref = pending_tcp.clone();
+                    let tailnet_ref = tailnet_tcp.clone();
+                    let alias_ref = alias_tcp.clone();
+                    let device_type = device_type_tcp.clone();
+                    let cancel_session = cancel_tcp.clone();
 
                     tokio::spawn(async move {
                         let _permit = permit;
@@ -715,6 +786,10 @@ pub async fn run_discovery(
                             receive_routing: &receive_routing,
                             discovered_peers: &peers_ref,
                             pending_removals: &pending_ref,
+                            tailnet_ips: &tailnet_ref,
+                            alias_rx: &alias_ref,
+                            device_type: &device_type,
+                            cancel: &cancel_session,
                         };
                         match handle_incoming_session(stream, &my_uuid, &context).await {
                             Ok(_) => {}
@@ -760,18 +835,28 @@ pub async fn run_discovery(
             };
 
             let mut probes = JoinSet::new();
-            for ip in same_lan_probe_ips(local_ip) {
-                let ip_string = ip.to_string();
-                let uuid = my_uuid_scan;
-                probes.spawn(async move {
-                    probe_peer_id(&ip_string, &uuid)
-                        .await
-                        .ok()
-                        .map(|peer_id| (peer_id, ip_string))
-                });
-            }
-
-            while let Some(result) = probes.join_next().await {
+            let mut candidates = same_lan_probe_ips(local_ip).into_iter();
+            loop {
+                while probes.len() < 16 {
+                    let Some(ip) = candidates.next() else {
+                        break;
+                    };
+                    let ip_string = ip.to_string();
+                    let uuid = my_uuid_scan;
+                    probes.spawn(async move {
+                        probe_peer_id(&ip_string, &uuid)
+                            .await
+                            .ok()
+                            .map(|peer_id| (peer_id, ip_string))
+                    });
+                }
+                let result = tokio::select! {
+                    _ = cancel_scan.cancelled() => return,
+                    result = probes.join_next() => result,
+                };
+                let Some(result) = result else {
+                    break;
+                };
                 let Ok(Some((raw_peer_id, ip))) = result else {
                     continue;
                 };
@@ -783,21 +868,19 @@ pub async fn run_discovery(
                 }
 
                 let mut peers = peers_scan.lock().await;
-                let changed = peers.get(&peer_id).is_none_or(|peer| peer.ip != ip);
-                let peer = DiscoveredPeer {
-                    id: peer_id.clone(),
-                    alias: peers
-                        .get(&peer_id)
-                        .map(|p| p.alias.clone())
-                        .unwrap_or_else(|| format!("Device-{}", &peer_id[..8])),
-                    device_type: peers
-                        .get(&peer_id)
-                        .map(|p| p.device_type.clone())
-                        .unwrap_or_else(|| "desktop".to_string()),
-                    ip: ip.clone(),
-                    port: TCP_PORT,
-                };
-                peers.insert(peer_id.clone(), peer.clone());
+                let changed = peers
+                    .get(&peer_id)
+                    .is_none_or(|peer| peer.lan_ip.as_deref() != Some(&ip));
+                let peer = peers.entry(peer_id.clone()).or_insert_with(|| {
+                    DiscoveredPeer::new(
+                        peer_id.clone(),
+                        format!("Device-{}", &peer_id[..8]),
+                        "desktop".into(),
+                        ip.clone(),
+                    )
+                });
+                peer.observe_route(&ip);
+                let peer = peer.clone();
                 drop(peers);
 
                 if changed {
@@ -812,10 +895,177 @@ pub async fn run_discovery(
         }
     });
 
-    let _ = tokio::join!(mdns_processor, tcp_acceptor, lan_scanner);
+    let tailnet_scanner = tokio::spawn(run_tailnet_discovery(
+        handle.clone(),
+        cancel.clone(),
+        identity.id_bytes(),
+        my_id.clone(),
+        discovered_peers.clone(),
+        tailnet_ips,
+    ));
+    let route_monitor = tokio::spawn(monitor_routes(
+        handle.clone(),
+        cancel.clone(),
+        identity.id_bytes(),
+        discovered_peers,
+    ));
+    let _ = tokio::join!(
+        mdns_processor,
+        tcp_acceptor,
+        lan_scanner,
+        tailnet_scanner,
+        route_monitor
+    );
 
     // Graceful shutdown — send mDNS goodbye
-    let _ = mdns.shutdown();
+    if let Some(mdns) = &mdns {
+        let _ = mdns.shutdown();
+    }
+}
+
+async fn run_tailnet_discovery(
+    handle: AppHandle,
+    cancel: CancellationToken,
+    my_uuid: [u8; 16],
+    my_id: String,
+    peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    tailnet_ips: Arc<Mutex<HashSet<Ipv4Addr>>>,
+) {
+    let mut interval = time::interval(Duration::from_secs(15));
+    interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut last_status = String::new();
+    loop {
+        tokio::select! { _ = cancel.cancelled() => break, _ = interval.tick() => {} }
+        let result = tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = tailscale::online_peers() => result,
+        };
+        let (ips, state, message) = match result {
+            Ok(ips) => (
+                ips,
+                "available",
+                "Tailscale connected; discovering running LanDrop devices".to_string(),
+            ),
+            Err(error) => (HashSet::new(), "unavailable", error),
+        };
+        if message != last_status {
+            let _ = handle.emit(
+                "tailscale_status",
+                serde_json::json!({"state": state, "message": message}),
+            );
+            emit_log(&handle, "info", &message);
+            last_status = message;
+        }
+        *tailnet_ips.lock().await = ips.clone();
+        // Bounded concurrency and bounded per-probe time keep large tailnets
+        // responsive without opening hundreds of simultaneous sessions.
+        let mut candidates = ips.into_iter();
+        let mut probes = JoinSet::new();
+        loop {
+            while probes.len() < 16 {
+                let Some(ip) = candidates.next() else {
+                    break;
+                };
+                probes.spawn(async move {
+                    let ip = ip.to_string();
+                    super::transfer::probe_peer_info(&ip, &my_uuid)
+                        .await
+                        .ok()
+                        .map(|info| (ip, info))
+                });
+            }
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = probes.join_next() => result,
+            };
+            let Some(result) = result else {
+                break;
+            };
+            let Ok(Some((ip, (id, alias, dtype)))) = result else {
+                continue;
+            };
+            if id == my_id {
+                continue;
+            }
+            let mut peers = peers.lock().await;
+            let peer = peers.entry(id.clone()).or_insert_with(|| {
+                DiscoveredPeer::new(id, alias.clone(), dtype.clone(), ip.clone())
+            });
+            peer.alias = alias;
+            peer.device_type = dtype;
+            peer.observe_route(&ip);
+            let peer = peer.clone();
+            drop(peers);
+            let _ = handle.emit("lan_peer_discovered", peer);
+        }
+    }
+    let _ = handle.emit(
+        "tailscale_status",
+        serde_json::json!({"state":"stopped", "message":"Discovery stopped"}),
+    );
+}
+
+/// TCP-scan-only peers also expire, even if no mDNS goodbye ever arrives.
+async fn monitor_routes(
+    handle: AppHandle,
+    cancel: CancellationToken,
+    my_uuid: [u8; 16],
+    peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+) {
+    let mut interval = time::interval(Duration::from_secs(15));
+    interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! { _ = cancel.cancelled() => return, _ = interval.tick() => {} }
+        let checked_at = Instant::now();
+        let snapshot: Vec<_> = peers
+            .lock()
+            .await
+            .values()
+            .flat_map(|peer| peer.route_ips().into_iter().map(|ip| (peer.id.clone(), ip)))
+            .collect();
+        let mut candidates = snapshot.into_iter();
+        let mut probes = JoinSet::new();
+        loop {
+            while probes.len() < 16 {
+                let Some((id, ip)) = candidates.next() else {
+                    break;
+                };
+                probes.spawn(async move {
+                    let alive = if ip.parse().is_ok_and(tailscale::is_tailscale_ipv4) {
+                        super::transfer::probe_peer_info(&ip, &my_uuid)
+                            .await
+                            .is_ok_and(|(found, _, _)| found == id)
+                    } else {
+                        probe_peer_id(&ip, &my_uuid)
+                            .await
+                            .is_ok_and(|found| found == id)
+                    };
+                    (id, ip, alive)
+                });
+            }
+            let result = tokio::select! { _ = cancel.cancelled() => return, result = probes.join_next() => result };
+            let Some(result) = result else {
+                break;
+            };
+            let Ok((id, ip, alive)) = result else {
+                continue;
+            };
+            if alive {
+                continue;
+            }
+            let mut peers = peers.lock().await;
+            let Some(peer) = peers.get_mut(&id) else {
+                continue;
+            };
+            peer.forget_route_before(&ip, checked_at);
+            if peer.ip.is_empty() {
+                peers.remove(&id);
+                let _ = handle.emit("lan_peer_lost", serde_json::json!({"id": id}));
+            } else {
+                let _ = handle.emit("lan_peer_discovered", peer.clone());
+            }
+        }
+    }
 }
 
 /// Handle a single incoming TCP session: identify the peer, receive messages, close.
@@ -830,24 +1080,37 @@ async fn handle_incoming_session(
         .map_err(|e| format!("Failed to read peer address: {}", e))?;
     let sender_ip = sender_addr.ip().to_string();
 
-    match (get_local_ipv4(), sender_addr.ip()) {
-        (Some(local_ip), IpAddr::V4(sender_v4)) if is_same_lan_ipv4(local_ip, sender_v4) => {}
-        (Some(local_ip), IpAddr::V4(sender_v4)) => {
-            return Err(format!(
-                "Rejected non-LAN incoming connection from {} (local LAN is {})",
-                sender_v4, local_ip
-            ));
-        }
-        (Some(local_ip), other) => {
-            return Err(format!(
-                "Rejected non-IPv4 incoming connection from {} (local LAN is {})",
-                other, local_ip
-            ));
-        }
-        (None, _) => return Err("Rejected incoming connection: no local LAN IPv4".into()),
+    let allowed_tailnet = match sender_addr.ip() {
+        IpAddr::V4(ip) => context.tailnet_ips.lock().await.contains(&ip),
+        _ => false,
+    };
+    if !is_current_lan_peer_ip(&sender_ip) && !allowed_tailnet {
+        return Err(format!(
+            "Rejected connection from {sender_ip}: outside the current LAN and connected tailnet"
+        ));
     }
 
     let (conn, sender_id) = Connection::from_incoming(stream, my_uuid).await?;
+    // Probes must never manufacture a visible sender: a UUID handshake does
+    // not prove that the initiating device has a running listener.
+    let first_message = match conn.recv_message().await? {
+        None => return Ok(()),
+        Some(super::protocol::Message::Discover) => {
+            let alias = context.alias_rx.borrow().clone();
+            conn.send_message(&super::protocol::Message::Identity {
+                app: "LanDrop".into(),
+                alias,
+                device_type: context.device_type.to_string(),
+            })
+            .await?;
+            return Ok(());
+        }
+        Some(super::protocol::Message::Identity { .. }) => {
+            return Err("Unexpected identity response".into())
+        }
+        Some(super::protocol::Message::Done) => return Ok(()),
+        Some(message) => message,
+    };
 
     {
         let mut pending = context.pending_removals.lock().await;
@@ -875,21 +1138,20 @@ async fn handle_incoming_session(
     // Always update the IP — mDNS might have stale data or never discovered them.
     let sender_alias = {
         let mut peers = context.discovered_peers.lock().await;
-        let peer = DiscoveredPeer {
-            id: sender_id.clone(),
-            alias: peers
-                .get(&sender_id)
-                .map(|p| p.alias.clone())
-                .unwrap_or_else(|| format!("Device-{}", &sender_id[..8])),
-            device_type: peers
-                .get(&sender_id)
-                .map(|p| p.device_type.clone())
-                .unwrap_or_else(|| "desktop".to_string()),
-            ip: sender_ip.clone(),
-            port: TCP_PORT,
-        };
+        if context.cancel.is_cancelled() {
+            return Err("Discovery stopped before the incoming session started".into());
+        }
+        let peer = peers.entry(sender_id.clone()).or_insert_with(|| {
+            DiscoveredPeer::new(
+                sender_id.clone(),
+                format!("Device-{}", &sender_id[..8]),
+                "desktop".into(),
+                sender_ip.clone(),
+            )
+        });
+        peer.observe_route(&sender_ip);
         let alias = peer.alias.clone();
-        peers.insert(sender_id.clone(), peer.clone());
+        let peer = peer.clone();
         drop(peers);
         // Always emit the peer to the frontend on inbound traffic.
         // This rehydrates the UI if discovery is stale or the user removed the chip locally.
@@ -903,8 +1165,13 @@ async fn handle_incoming_session(
     // legacy clean-EOF case during the protocol-v1 compatibility window.
     let mut received_control_message = false;
     let mut allow_legacy_text_eof = false;
+    let mut first_message = Some(first_message);
     loop {
-        let msg = match conn.recv_message().await? {
+        let next = match first_message.take() {
+            Some(message) => Some(message),
+            None => conn.recv_message().await?,
+        };
+        let msg = match next {
             Some(msg) => msg,
             None if !received_control_message => return Ok(()),
             None if allow_legacy_text_eof => return Ok(()),
@@ -1011,12 +1278,16 @@ async fn handle_incoming_session(
             super::protocol::Message::Dir { .. } => {
                 return Err("Unexpected directory marker outside a batch".into());
             }
+            super::protocol::Message::Discover | super::protocol::Message::Identity { .. } => {
+                return Err("Unexpected discovery message during a transfer".into());
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::DiscoveredPeer;
     use super::{
         choose_peer_ipv4, is_bad_interface, is_same_lan_ipv4, is_usable_ipv4,
         local_interface_score, notification_text_preview, peer_address_score, private_ipv4_score,
@@ -1027,6 +1298,65 @@ mod tests {
 
     fn scoped(a: u8, b: u8, c: u8, d: u8) -> ScopedIp {
         ScopedIp::from(IpAddr::V4(Ipv4Addr::new(a, b, c, d)))
+    }
+
+    #[test]
+    fn same_device_merges_routes_and_prefers_lan_in_either_discovery_order() {
+        for routes in [
+            ["100.100.1.2", "192.168.1.2"],
+            ["192.168.1.2", "100.100.1.2"],
+        ] {
+            let mut peer = DiscoveredPeer::new(
+                "device-id".into(),
+                "Colleague".into(),
+                "desktop".into(),
+                routes[0].into(),
+            );
+            peer.observe_route(routes[1]);
+            assert_eq!(peer.route_ips(), ["192.168.1.2", "100.100.1.2"]);
+            assert_eq!(peer.ip, "192.168.1.2");
+            assert_eq!(peer.network, "lan");
+            assert_eq!(peer.id, "device-id");
+        }
+    }
+
+    #[test]
+    fn losing_lan_preserves_tailnet_then_last_route_expires() {
+        let mut peer = DiscoveredPeer::new(
+            "device-id".into(),
+            "Colleague".into(),
+            "desktop".into(),
+            "192.168.1.2".into(),
+        );
+        peer.observe_route("100.100.1.2");
+        peer.forget_route_before("192.168.1.2", std::time::Instant::now());
+        assert_eq!(peer.network, "tailscale");
+        assert_eq!(peer.ip, "100.100.1.2");
+        assert_eq!(peer.lan_ip, None);
+        peer.forget_route_before("100.100.1.2", std::time::Instant::now());
+        assert!(peer.ip.is_empty());
+        assert!(peer.route_ips().is_empty());
+    }
+
+    #[test]
+    fn stale_probe_result_does_not_remove_a_newly_rediscovered_route() {
+        let mut peer = DiscoveredPeer::new(
+            "device-id".into(),
+            "Colleague".into(),
+            "desktop".into(),
+            "192.168.1.2".into(),
+        );
+        let old_probe = std::time::Instant::now();
+        peer.observe_route("192.168.1.2");
+        peer.forget_route_before("192.168.1.2", old_probe);
+        assert_eq!(peer.ip, "192.168.1.2");
+    }
+
+    #[test]
+    fn tailnet_address_is_not_a_lan_scan_interface() {
+        assert!(!is_usable_ipv4(Ipv4Addr::new(100, 100, 1, 2)));
+        assert!(is_bad_interface("Tailscale"));
+        assert!(is_bad_interface("tailscale0"));
     }
 
     #[test]

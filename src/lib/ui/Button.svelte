@@ -13,7 +13,7 @@
 </script>
 
 <button
-  class="group relative inline-flex items-center justify-center gap-2 h-10 px-4
+  class="group relative inline-flex items-center justify-center gap-2 min-h-12 px-4
          rounded-full text-sm font-medium tracking-[0.1px] cursor-pointer select-none overflow-hidden
          disabled:cursor-not-allowed disabled:pointer-events-none
          {variant === 'filled'

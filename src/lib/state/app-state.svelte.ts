@@ -1,4 +1,5 @@
-import type { FileInfo } from "$lib/api/bridge";
+import type { DiscoveredPeer, FileInfo, TailscaleStatus } from "$lib/api/bridge";
+import { SvelteDate } from "svelte/reactivity";
 import {
   devicesForPersistence,
   loadArray,
@@ -39,7 +40,7 @@ const SETTINGS_KEY = "landrop-settings";
 const RECEIVE_KEY = "landrop-receive-options";
 const HOTKEYS_KEY = "landrop-hotkeys";
 
-class AppState {
+export class AppState {
   activeView = $state<"transfer" | "settings">("transfer");
 
   // Devices (auto-discovered + persisted)
@@ -55,6 +56,8 @@ class AppState {
 
   // Network
   localIp = $state<string>("...");
+  tailscaleStatus = $state<TailscaleStatus | null>(null);
+  discoveryError = $state("");
 
   // Logs and messages
   logs = $state<LogEntry[]>([]);
@@ -98,14 +101,26 @@ class AppState {
 
   // ── Device management (auto-discovered) ──
 
-  /** Called when mDNS discovers or updates a device */
-  upsertDevice(peer: { id: string; alias: string; device_type: string; ip: string }) {
+  /** Merge routes by persistent identity, retaining history and device preferences. */
+  upsertDevice(peer: Omit<DiscoveredPeer, "port">) {
+    const routes = {
+      network: peer.network,
+      lanIp: peer.lan_ip ?? undefined,
+      tailscaleIp: peer.tailscale_ip ?? undefined,
+    };
     const existing = this.devices.find((d) => d.id === peer.id);
     if (existing) {
       // Update existing — preserve user settings (color, outFolder)
       this.devices = this.devices.map((d) =>
         d.id === peer.id
-          ? { ...d, alias: peer.alias, deviceType: peer.device_type, ip: peer.ip, online: true }
+          ? {
+              ...d,
+              ...routes,
+              alias: peer.alias,
+              deviceType: peer.device_type,
+              ip: peer.ip,
+              online: true,
+            }
           : d,
       );
     } else {
@@ -120,11 +135,18 @@ class AppState {
           ip: peer.ip,
           online: true,
           color,
+          ...routes,
         },
       ];
     }
     // Auto-select if no active device
-    if (!this.activeDeviceId) {
+    if (
+      !this.activeDeviceId &&
+      !this.sendTextContent &&
+      !this.hasFiles &&
+      !this.transferActive &&
+      !this.messageViewAll
+    ) {
       this.setActiveDevice(peer.id);
     }
   }
@@ -132,22 +154,18 @@ class AppState {
   /** Called when mDNS reports a device left */
   markDeviceOffline(id: string) {
     this.devices = this.devices.map((d) => (d.id === id ? { ...d, online: false } : d));
-  }
-
-  /** Clear all offline devices (used by refresh button) */
-  clearOfflineDevices() {
-    this.devices = this.devices.filter((d) => d.online);
-    if (this.activeDeviceId && !this.devices.some((device) => device.id === this.activeDeviceId)) {
-      this.activeDeviceId = this.onlineDevices[0]?.id ?? null;
-    }
+    if (this.activeDeviceId === id) this.activeDeviceId = null;
   }
 
   markAllDevicesOffline() {
     this.devices = this.devices.map((device) => ({ ...device, online: false }));
+    this.activeDeviceId = null;
   }
 
   setActiveDevice(id: string | null) {
-    this.activeDeviceId = id;
+    this.activeDeviceId = this.onlineDevices.some((device) => device.id === id) ? id : null;
+    this.messageViewAll = false;
+    this.messageSearch = "";
   }
 
   updateDeviceSettings(
@@ -160,7 +178,7 @@ class AppState {
   removeDevice(id: string) {
     this.devices = this.devices.filter((d) => d.id !== id);
     if (this.activeDeviceId === id) {
-      this.activeDeviceId = this.onlineDevices[0]?.id ?? null;
+      this.activeDeviceId = null;
     }
   }
 
@@ -175,6 +193,14 @@ class AppState {
     this.files = this.files.filter((f) => f.path !== path);
   }
 
+  removeSentFiles(files: readonly SelectedFile[]) {
+    // Match queue entries so removing and re-adding the same path creates a new draft item.
+    // This local membership set is discarded after filtering, never rendered.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const sentFiles = new Set(files);
+    this.files = this.files.filter((file) => !sentFiles.has(file));
+  }
+
   clearFiles() {
     this.files = [];
   }
@@ -182,7 +208,7 @@ class AppState {
   // ── Logs ──
 
   addLog(level: LogEntry["level"], text: string) {
-    const time = new Date().toLocaleTimeString("en-GB", { hour12: false });
+    const time = new SvelteDate().toLocaleTimeString("en-GB", { hour12: false });
     this.logs = [...this.logs, { level, text, time }];
     if (this.logs.length > 500) this.logs = this.logs.slice(-500);
   }
@@ -197,7 +223,7 @@ class AppState {
     const attachments = sanitizeAttachments(entry.attachments);
     this.messages = [
       ...this.messages,
-      { ...entry, attachments, id: crypto.randomUUID(), timestamp: new Date().toISOString() },
+      { ...entry, attachments, id: crypto.randomUUID(), timestamp: new SvelteDate().toISOString() },
     ];
     this._pruneMessages();
   }
@@ -265,7 +291,7 @@ class AppState {
   }
 
   deleteOldMessages(peerId: string, daysOld: number): MessageEntry[] {
-    const cutoff = new Date(Date.now() - daysOld * 86400000).toISOString();
+    const cutoff = new SvelteDate(Date.now() - daysOld * 86400000).toISOString();
     const deletedMessages = this.messages.filter(
       (m) => m.peerId === peerId && !m.starred && m.timestamp < cutoff,
     );
@@ -307,13 +333,11 @@ class AppState {
   hydratePersistedState(snapshot: PersistedAppState) {
     const messages = sanitizeMessages(snapshot.messages);
     const devices = normalizeHydratedDevices(snapshot.devices, messages);
-    const activeDeviceId = snapshot.activeDeviceId ?? null;
-
     this.devices = devices;
-    this.activeDeviceId =
-      activeDeviceId && devices.some((device) => device.id === activeDeviceId)
-        ? activeDeviceId
-        : null;
+    // A saved conversation does not establish current availability.
+    this.activeDeviceId = null;
+    this.messageViewAll = false;
+    this.messageSearch = "";
     this.messages = messages;
     this.notificationsEnabled = snapshot.notificationsEnabled ?? true;
     this.popOnReceive = snapshot.popOnReceive ?? false;
@@ -332,7 +356,7 @@ class AppState {
     return {
       version: 1,
       devices: devicesForPersistence(this.devices),
-      activeDeviceId: this.activeDevice ? this.activeDeviceId : null,
+      activeDeviceId: null,
       messages: sanitizeMessages(this.messages),
       notificationsEnabled: this.notificationsEnabled,
       popOnReceive: this.popOnReceive,

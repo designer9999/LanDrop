@@ -16,10 +16,10 @@
 
   const app = getAppState();
   const device = $derived(app.activeDevice);
-  const hasKnownDevices = $derived(app.devices.length > 0);
+  const hasOnlineDevices = $derived(app.onlineDevices.length > 0);
 </script>
 
-{#if !hasKnownDevices}
+{#if !hasOnlineDevices && !app.messageViewAll}
   <div class="welcome-wrapper">
     <div class="welcome-card">
       <div class="welcome-icon-ring">
@@ -29,9 +29,10 @@
       </div>
 
       <div class="welcome-text">
-        <h2 class="welcome-title">Welcome to LanDrop</h2>
+        <h2 class="welcome-title">Find your devices</h2>
         <p class="welcome-desc">
-          Transfer files instantly between devices on your local network. No setup required.
+          Send files and messages over your local network or Tailscale. Only devices running LanDrop
+          and discovered now appear above.
         </p>
       </div>
 
@@ -42,18 +43,23 @@
         </div>
         <div class="step">
           <span class="step-num">2</span>
-          <span class="step-text">Devices on the same network appear automatically</span>
+          <span class="step-text"
+            >Connect to the same LAN or sign in to your shared Tailscale network</span
+          >
         </div>
         <div class="step">
           <span class="step-num">3</span>
-          <span class="step-text">Drop files or send messages — instant transfer</span>
+          <span class="step-text">Select a device to send. LAN is preferred when available.</span>
         </div>
       </div>
 
-      <div class="searching-hint">
+      <div class="searching-hint" role="status">
         <Icon name="radar" size={18} />
-        <span>Searching for devices on your network...</span>
+        <span>{app.discoveryError || "Searching for devices running LanDrop..."}</span>
       </div>
+      {#if app.tailscaleStatus}
+        <p class="welcome-desc">Tailscale: {app.tailscaleStatus.message}</p>
+      {/if}
     </div>
   </div>
 {/if}
@@ -63,6 +69,9 @@
 <style>
   .welcome-wrapper {
     padding: 24px 16px 8px;
+    min-height: 0;
+    max-height: calc(100% - 180px);
+    overflow-y: auto;
   }
 
   .welcome-card {
@@ -75,6 +84,19 @@
     border-radius: 28px;
     background: var(--md-sys-color-surface-container);
     animation: welcome-in var(--md-spring-default-spatial-dur) var(--md-spring-default-spatial) both;
+  }
+
+  @media (max-height: 640px) {
+    .welcome-wrapper {
+      padding-top: 12px;
+    }
+    .welcome-card {
+      gap: 12px;
+      padding: 20px 16px;
+    }
+    .welcome-card .welcome-icon-ring {
+      display: none;
+    }
   }
 
   @keyframes welcome-in {

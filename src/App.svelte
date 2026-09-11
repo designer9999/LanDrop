@@ -6,7 +6,7 @@
   import { onMount } from "svelte";
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
-  import { getAppState } from "$lib/state/app-state.svelte";
+  import { getAppState, PEER_COLORS } from "$lib/state/app-state.svelte";
   import type { MessageAttachment } from "$lib/state/app-state.svelte";
   import {
     getStatus,
@@ -16,6 +16,7 @@
     onLanLog,
     onLanPeerDiscovered,
     onLanPeerLost,
+    onTailscaleStatus,
     onLanTextReceived,
     onLanFilesReceived,
     onTransferProgress,
@@ -90,21 +91,32 @@
 
   function ensurePeerVisible(peerId: string) {
     if (app.devices.some((device) => device.id === peerId)) return;
-    app.upsertDevice({
-      id: peerId,
-      alias: `Device-${peerId.slice(0, 8)}`,
-      device_type: "desktop",
-      ip: "",
-    });
+    app.devices = [
+      ...app.devices,
+      {
+        id: peerId,
+        alias: `Device-${peerId.slice(0, 8)}`,
+        deviceType: "desktop",
+        ip: "",
+        online: false,
+        color: app.devices.length % PEER_COLORS.length,
+      },
+    ];
     app.addLog("warn", `Recovered hidden peer ${peerId.slice(0, 8)} from inbound traffic`);
   }
 
   function revealIncomingPeer(peerId: string) {
     ensurePeerVisible(peerId);
-    if (app.activeDeviceId !== peerId) app.setActiveDevice(peerId);
-    app.activeView = "transfer";
-    app.messageViewAll = false;
-    app.messageSearch = "";
+    // Incoming traffic must not change the recipient of a draft or interrupt history/settings.
+    if (
+      !app.activeDeviceId &&
+      !app.sendTextContent &&
+      !app.hasFiles &&
+      !app.transferActive &&
+      !app.messageViewAll
+    ) {
+      app.setActiveDevice(peerId);
+    }
   }
 
   function getConfiguredOutFolder(peerId: string): string {
@@ -259,6 +271,9 @@
           const device = app.devices.find((d) => d.id === peerId);
           app.addLog("warn", `Device offline: ${device?.alias ?? peerId}`);
         }),
+        onTailscaleStatus((status) => {
+          app.tailscaleStatus = status;
+        }),
         onLanTextReceived((peerId, text) => {
           revealIncomingPeer(peerId);
           app.addMessage({ peerId, direction: "received", text });
@@ -404,6 +419,7 @@
       if (disposed) return;
       cleanupListeners();
       app.addLog("error", `Application startup failed: ${error}`);
+      app.discoveryError = "LanDrop could not start. Check the debug log in Settings.";
       showSnackbar("LanDrop could not start. Check the debug log and try again.");
     });
 
@@ -500,7 +516,7 @@
               : ("file" as const),
         }));
         app.addMessage({ peerId: device.id, direction: "sent", text: "", attachments });
-        app.clearFiles();
+        app.removeSentFiles(filesCopy);
       } else {
         showSnackbar(`Send failed — ${device.alias} did not accept the transfer`);
         app.addLog("warn", `File transfer to ${device.alias} was not accepted`);
@@ -599,7 +615,7 @@
     <div class="titlebar-content">
       {#if app.activeView === "transfer"}
         <div class="peer-strip">
-          <PeerBar onedit={openDeviceSettings} />
+          <PeerBar onedit={openDeviceSettings} onsnackbar={showSnackbar} />
         </div>
       {:else}
         <div class="flex items-center gap-2 flex-1 min-w-0">

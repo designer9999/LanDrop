@@ -5,14 +5,17 @@
  */
 import type { FileInfo } from "$lib/api/bridge";
 
-// ── Device (auto-discovered via mDNS) ──
+// ── Device (discovered over LAN or Tailscale) ──
 
 export interface DiscoveredDevice {
   id: string; // UUID from remote device (persistent)
   alias: string; // display name from mDNS
   deviceType: string; // "desktop" or "mobile"
   ip: string; // current IP address
-  online: boolean; // currently discovered on LAN
+  online: boolean; // currently discovered in this session
+  network?: "lan" | "tailscale"; // preferred/last successful route
+  lanIp?: string;
+  tailscaleIp?: string;
   color: number; // auto-assigned avatar color
   avatarIcon?: string; // optional user-selected avatar icon
   outFolder?: string; // per-device output folder (display copy; Rust owns it)

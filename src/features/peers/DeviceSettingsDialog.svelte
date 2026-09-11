@@ -8,6 +8,7 @@
   import PeerAvatar from "./PeerAvatar.svelte";
   import { getAppState, PEER_COLORS, type DiscoveredDevice } from "$lib/state/app-state.svelte";
   import { pickSaveFolder, setPeerOutFolder } from "$lib/api/bridge";
+  import { peerRouteDescription } from "$lib/utils/peer-utils";
 
   interface Props {
     open: boolean;
@@ -101,7 +102,7 @@
           </div>
           <div class="device-status" class:online={device.online}>
             <span class="status-indicator"></span>
-            {device.online ? "Online" : "Offline"}
+            {peerRouteDescription(device)}
           </div>
         </div>
       </div>

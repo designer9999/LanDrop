@@ -599,6 +599,11 @@
           <div class="flex-1">
             <div class="text-sm text-on-surface font-medium">LanDrop v{appVersion}</div>
             <div class="text-xs text-on-surface-variant font-mono">{app.localIp}</div>
+            {#if app.tailscaleStatus}
+              <div class="text-xs text-on-surface-variant">
+                Tailscale: {app.tailscaleStatus.message}
+              </div>
+            {/if}
           </div>
         </div>
 
@@ -645,9 +650,10 @@
           <p class="font-medium text-on-surface mb-1">How it works</p>
           <ol class="list-decimal list-inside flex flex-col gap-1">
             <li>Install LanDrop on your devices</li>
-            <li>Devices on the same network are discovered automatically</li>
+            <li>Devices running LanDrop on your LAN or Tailscale network appear automatically</li>
             <li>Drop files or type messages — transferred instantly</li>
-            <li>No internet, no passwords — everything stays on your LAN</li>
+            <li>LAN is preferred; Tailscale connects colleagues on other networks</li>
+            <li>Tailscale must be connected on both devices and allow LanDrop traffic</li>
           </ol>
         </div>
       </div>

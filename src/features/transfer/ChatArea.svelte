@@ -115,7 +115,7 @@
         ? app.getPeerMessages(app.activeDevice.id)
         : [],
   );
-  const showToolbar = $derived(currentPeerMessages.length > 0 || showStarredOnly || searchOpen);
+  const showToolbar = $derived(app.messages.length > 0 || showStarredOnly || searchOpen);
 
   // ── Auto-scroll ──
   let wasAtBottom = true;
@@ -364,14 +364,16 @@
       <button
         class="chip"
         class:chip-active={app.messageViewAll}
+        aria-pressed={app.messageViewAll}
         onclick={() => (app.messageViewAll = !app.messageViewAll)}
       >
-        {app.messageViewAll ? "All peers" : "This peer"}
+        {app.messageViewAll ? "All history" : "View all history"}
       </button>
 
       <button
         class="chip"
         class:chip-active={showStarredOnly}
+        aria-pressed={showStarredOnly}
         onclick={() => (showStarredOnly = !showStarredOnly)}
       >
         <Icon name={showStarredOnly ? "star" : "star_border"} size={11} />
@@ -401,6 +403,7 @@
           class="toolbar-icon hover:text-error"
           onclick={() => (showClearMenu = !showClearMenu)}
           title="Clear messages"
+          disabled={!app.activeDevice || app.messageViewAll}
         >
           <Icon name="delete_outline" size={15} />
         </button>
@@ -449,16 +452,18 @@
         <Icon name={showStarredOnly ? "star_border" : "search_off"} size={32} />
         <span>{showStarredOnly ? "No saved messages" : "No results"}</span>
       </div>
-    {:else}
+    {:else if app.onlineDevices.length > 0 || app.messageViewAll}
       <div class="chat-empty">
         <div class="chat-empty-icon">
           <Icon name={peerName ? "forum" : "person_search"} size={28} />
         </div>
-        <span class="chat-empty-title">{peerName ? `Chat with ${peerName}` : "Select a peer"}</span>
+        <span class="chat-empty-title"
+          >{peerName ? `Chat with ${peerName}` : "Select an available device"}</span
+        >
         <span class="chat-empty-hint">
           {peerName
             ? "Drop files, attach with the clip icon, or type a message"
-            : "Add or select a peer to start transferring"}
+            : "Devices appear above when LanDrop discovers them. Your history is kept."}
         </span>
       </div>
     {/if}
@@ -526,23 +531,30 @@
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    font-size: 11px;
-    padding: 2px 9px;
-    border-radius: 99px;
-    border: none;
+    gap: 8px;
+    min-height: 48px;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 20px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--md-sys-color-outline);
     cursor: pointer;
     background: var(--md-sys-color-surface-container-high);
     color: var(--md-sys-color-on-surface-variant);
     transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   .chip-active {
-    background: var(--md-sys-color-primary);
-    color: var(--md-sys-color-on-primary);
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+    border-color: transparent;
   }
   .toolbar-icon {
     display: flex;
     align-items: center;
+    justify-content: center;
+    min-width: 48px;
+    min-height: 48px;
     background: transparent;
     border: none;
     cursor: pointer;
@@ -553,6 +565,10 @@
   }
   .toolbar-icon-active {
     color: var(--md-sys-color-primary);
+  }
+  .toolbar-icon:disabled {
+    opacity: 0.38;
+    cursor: default;
   }
 
   .chat-messages {

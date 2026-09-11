@@ -221,6 +221,13 @@ impl Connection {
 
 fn validate_message(msg: &Message) -> Result<(), String> {
     match msg {
+        Message::Identity {
+            app,
+            alias,
+            device_type,
+        } if app.len() > 32 || alias.len() > 256 || device_type.len() > 32 => {
+            Err("Discovery identity fields exceed their size limits".into())
+        }
         Message::Text { text } if text.len() > MAX_TEXT_BYTES => Err(format!(
             "Text message too large: {} bytes (maximum {MAX_TEXT_BYTES})",
             text.len()
@@ -279,23 +286,35 @@ async fn write_file_chunk(w: &mut OwnedWriteHalf, bytes: &[u8]) -> Result<(), St
 
 // ─── On-demand send functions ───
 
-/// Open a TCP connection to a peer, verify the expected public UUID, send text, close.
-pub async fn send_text_to_peer(
+/// Establish and verify a route before any transfer payload is sent.
+pub async fn connect_to_peer(
     peer_ip: &str,
     my_uuid: &[u8; 16],
     expected_peer_uuid: &[u8; 16],
-    text: &str,
-) -> Result<(), String> {
+) -> Result<Arc<Connection>, String> {
     let addr: SocketAddr = format!("{}:{}", peer_ip, TCP_PORT)
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
 
-    let stream = time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
-        .await
-        .map_err(|_| format!("Connection timeout to {}", addr))?
-        .map_err(|e| format!("Cannot connect to {}: {}", addr, e))?;
+    connect_at(addr, my_uuid, expected_peer_uuid).await
+}
 
-    let conn = Connection::from_outgoing(stream, my_uuid, expected_peer_uuid).await?;
+async fn connect_at(
+    addr: SocketAddr,
+    my_uuid: &[u8; 16],
+    expected_peer_uuid: &[u8; 16],
+) -> Result<Arc<Connection>, String> {
+    time::timeout(Duration::from_secs(3), async {
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("Cannot connect to {addr}: {e}"))?;
+        Connection::from_outgoing(stream, my_uuid, expected_peer_uuid).await
+    })
+    .await
+    .map_err(|_| format!("Connection timeout to {addr}"))?
+}
+
+pub async fn send_text_on_connection(conn: &Connection, text: &str) -> Result<(), String> {
     conn.send_message(&Message::Text {
         text: text.to_string(),
     })
@@ -329,14 +348,58 @@ pub async fn probe_peer_id(peer_ip: &str, my_uuid: &[u8; 16]) -> Result<String, 
     .map_err(|_| format!("Probe timeout to {}", addr))?
 }
 
-/// Open a TCP connection to a peer, verify the expected public UUID, send files, close.
-pub async fn send_files_to_peer(
+/// Confirm that a tailnet node actually runs LanDrop, including its application
+/// response rather than treating arbitrary UUID-shaped bytes as discovery.
+pub async fn probe_peer_info(
     peer_ip: &str,
     my_uuid: &[u8; 16],
-    expected_peer_uuid: &[u8; 16],
+) -> Result<(String, String, String), String> {
+    let addr: SocketAddr = format!("{peer_ip}:{TCP_PORT}")
+        .parse()
+        .map_err(|e: std::net::AddrParseError| e.to_string())?;
+    probe_peer_info_at(addr, my_uuid).await
+}
+
+async fn probe_peer_info_at(
+    addr: SocketAddr,
+    my_uuid: &[u8; 16],
+) -> Result<(String, String, String), String> {
+    time::timeout(Duration::from_secs(3), async {
+        let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        stream.write_all(my_uuid).await.map_err(|e| e.to_string())?;
+        let mut remote = [0; 16];
+        stream
+            .read_exact(&mut remote)
+            .await
+            .map_err(|e| e.to_string())?;
+        let conn = Connection::from_stream(stream);
+        conn.send_message(&Message::Discover).await?;
+        match conn.recv_message().await? {
+            Some(Message::Identity {
+                app,
+                alias,
+                device_type,
+            }) if app == "LanDrop" => Ok((
+                uuid::Uuid::from_bytes(remote).to_string(),
+                super::identity::sanitize_alias(&alias),
+                device_type,
+            )),
+            _ => Err("Peer did not identify as LanDrop".into()),
+        }
+    })
+    .await
+    .map_err(|_| format!("LanDrop discovery timed out at {addr}"))?
+}
+
+/// Prepare files before opening a verified connection, then send exactly once.
+pub async fn send_files_on_connection<F>(
     paths: &[String],
     handle: Option<&AppHandle>,
-) -> Result<(), String> {
+    connect: F,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<Arc<Connection>, String>>,
+{
     // Collect all files to send (skip symlinks for security)
     let mut file_entries: Vec<(String, PathBuf)> = Vec::new();
 
@@ -417,17 +480,7 @@ pub async fn send_files_to_peer(
     };
     let total_files = file_entries.len();
 
-    // Connect to peer
-    let addr: SocketAddr = format!("{}:{}", peer_ip, TCP_PORT)
-        .parse()
-        .map_err(|e: std::net::AddrParseError| e.to_string())?;
-
-    let stream = time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
-        .await
-        .map_err(|_| "Connection timeout".to_string())?
-        .map_err(|e| e.to_string())?;
-
-    let conn = Connection::from_outgoing(stream, my_uuid, expected_peer_uuid).await?;
+    let conn = connect.await?;
 
     if let Some(h) = handle {
         let _ = h.emit(
@@ -832,6 +885,8 @@ fn message_kind(message: &Message) -> &'static str {
         Message::Dir { .. } => "directory",
         Message::Batch { .. } => "batch",
         Message::Done => "done",
+        Message::Discover => "discovery",
+        Message::Identity { .. } => "identity",
     }
 }
 
@@ -1060,6 +1115,127 @@ mod tests {
             client.expect("connect loopback client"),
             accepted.expect("accept loopback client").0,
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_requires_landrop_application_response() {
+        for app in ["LanDrop", "OtherService"] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let remote_uuid = [2; 16];
+            let server = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (connection, _) = Connection::from_incoming(stream, &remote_uuid)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    connection.recv_message().await.unwrap(),
+                    Some(Message::Discover)
+                ));
+                connection
+                    .send_message(&Message::Identity {
+                        app: app.into(),
+                        alias: "Colleague".into(),
+                        device_type: "desktop".into(),
+                    })
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = tokio::join!(super::probe_peer_info_at(address, &[1; 16]), server);
+            if app == "LanDrop" {
+                let (id, alias, dtype) = result.unwrap();
+                assert_eq!(id, uuid::Uuid::from_bytes(remote_uuid).to_string());
+                assert_eq!(alias, "Colleague");
+                assert_eq!(dtype, "desktop");
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_rejects_uuid_only_services() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut sender = [0; 16];
+            stream.read_exact(&mut sender).await.unwrap();
+            stream.write_all(&[2; 16]).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(super::probe_peer_info_at(address, &[1; 16]), server);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn verified_connection_is_reused_for_text_payload() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            assert!(
+                matches!(connection.recv_message().await.unwrap(), Some(Message::Text { text }) if text == "hello over the selected route")
+            );
+            assert!(matches!(
+                connection.recv_message().await.unwrap(),
+                Some(Message::Done)
+            ));
+        };
+        let client = async {
+            let connection = super::connect_at(address, &[1; 16], &[2; 16])
+                .await
+                .unwrap();
+            super::send_text_on_connection(&connection, "hello over the selected route")
+                .await
+                .unwrap();
+        };
+        tokio::join!(server, client);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn verified_connection_sends_and_receives_a_complete_file_batch() {
+        let source = test_directory("route-source");
+        let destination = test_directory("route-destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let source_file = source.join("hello.txt");
+        std::fs::write(&source_file, b"file payload over selected route").unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            let Some(Message::Batch { count }) = connection.recv_message().await.unwrap() else {
+                panic!("expected file batch");
+            };
+            let files = receive_batch(
+                &connection,
+                count,
+                destination.to_str().unwrap(),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                std::fs::read(&files[0].1).unwrap(),
+                b"file payload over selected route"
+            );
+        };
+        let client = async {
+            super::send_files_on_connection(
+                &[source_file.to_string_lossy().into_owned()],
+                None,
+                super::connect_at(address, &[1; 16], &[2; 16]),
+            )
+            .await
+            .unwrap();
+        };
+        tokio::join!(server, client);
+        std::fs::remove_dir_all(source).unwrap();
+        std::fs::remove_dir_all(destination).unwrap();
     }
 
     fn test_directory(label: &str) -> PathBuf {

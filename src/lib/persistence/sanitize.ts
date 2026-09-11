@@ -156,7 +156,7 @@ export function normalizeHydratedDevices(
           id: stringValue(device.id),
           alias: stringValue(device.alias, stringValue(device.id).slice(0, 8) || "Device"),
           deviceType: stringValue(device.deviceType, stringValue(device.device_type, "desktop")),
-          ip: stringValue(device.ip),
+          ip: "",
           online: false,
           color: numberValue(device.color) ?? index % PEER_COLORS.length,
           avatarIcon: stringValue(device.avatarIcon) || undefined,
@@ -179,6 +179,10 @@ export function devicesForPersistence(devices: DiscoveredDevice[]): DiscoveredDe
   return devices.map((device) => ({
     ...device,
     online: false,
+    ip: "",
+    network: undefined,
+    lanIp: undefined,
+    tailscaleIp: undefined,
     // Receive folders are owned by the Rust backend (receive_folders.json)
     // and hydrated from get_receive_folder_settings at startup.
     outFolder: undefined,

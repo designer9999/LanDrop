@@ -1,7 +1,23 @@
-@import "tailwindcss";
+@import "tailwindcss" source("./");
 @import "@fontsource-variable/roboto-flex";
 @import "@fontsource-variable/roboto-mono";
 @import "@material-symbols/font-400/rounded.css";
+
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 3px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 @theme {
   --color-primary: var(--md-sys-color-primary);
