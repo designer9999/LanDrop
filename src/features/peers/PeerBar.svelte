@@ -135,8 +135,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 48px;
-    height: 48px;
+    width: 28px;
+    height: 28px;
     border-radius: 50%;
     border: none;
     background: transparent;
@@ -174,7 +174,7 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 48px;
+    width: 32px;
     z-index: 2;
     display: flex;
     align-items: center;
@@ -190,7 +190,7 @@
     padding-right: 8px;
   }
   .scroll-arrow-right {
-    right: 52px;
+    right: 32px;
     background: linear-gradient(to left, var(--md-sys-color-surface) 60%, transparent);
     padding-left: 8px;
   }

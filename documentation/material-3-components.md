@@ -35,13 +35,13 @@ to an identified GitHub repository.
 | Input and selection | `src/lib/ui/TextField.svelte`, `Switch.svelte`, `Slider.svelte` | Keep interaction behavior in the primitive. |
 | Confirmation | `src/lib/ui/Dialog.svelte` | Reuse button semantics, Escape dismissal, focus management, and clear action labels. |
 | Feedback | `src/lib/ui/Snackbar.svelte` | Temporary action feedback; persistent failures also belong beside the affected feature. |
-| Device selection | `src/features/peers/PeerChip.svelte` | A domain component composed from shared controls, with visible route and selected state. |
+| Device selection | `src/features/peers/PeerChip.svelte` | Compact avatar with selected state; route text in its tooltip, accessible name, and device settings. |
 | Network labeling | `src/lib/utils/peer-utils.ts` | Share route descriptions between chips, conversations, and settings. |
 
 ## Rules for new work
 
 Use semantic surface/on-surface and container/on-container pairs. A network route
-must have a text label; color alone must not distinguish LAN from Tailscale or
+must have a text description; color alone must not distinguish LAN from Tailscale or
 online from offline. Keep identity stable when a route changes: a peer must not
 become a second chip just because it has two addresses.
 

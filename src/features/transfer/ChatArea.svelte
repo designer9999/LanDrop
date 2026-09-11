@@ -531,30 +531,24 @@
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    min-height: 48px;
-    font-size: 14px;
-    font-weight: 500;
-    line-height: 20px;
-    padding: 8px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--md-sys-color-outline);
+    gap: 3px;
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 99px;
+    border: none;
     cursor: pointer;
     background: var(--md-sys-color-surface-container-high);
     color: var(--md-sys-color-on-surface-variant);
     transition: all var(--md-spring-fast-effects-dur) var(--md-spring-fast-effects);
   }
   .chip-active {
-    background: var(--md-sys-color-secondary-container);
-    color: var(--md-sys-color-on-secondary-container);
-    border-color: transparent;
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
   }
   .toolbar-icon {
     display: flex;
     align-items: center;
     justify-content: center;
-    min-width: 48px;
-    min-height: 48px;
     background: transparent;
     border: none;
     cursor: pointer;

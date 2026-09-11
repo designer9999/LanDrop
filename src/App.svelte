@@ -840,6 +840,7 @@
 
   /* ── Title Bar ── */
   .titlebar {
+    --icon-button-size: 40px;
     display: flex;
     align-items: stretch;
     background: var(--md-sys-color-surface);

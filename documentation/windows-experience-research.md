@@ -318,9 +318,9 @@ Windows Authenticode identity or macOS notarization. SmartScreen reputation and
 certificate management remain separate from this notification implementation.
 Neither the icon refresh nor a successful local build removes that distinction.[^16]
 
-### Local Windows installer
+### Initial local Windows installer (before compact UI restoration)
 
-The final production-mode x64 binary and NSIS package built successfully. The
+The initial production-mode x64 binary and NSIS package built successfully. The
 package includes the final frontend, notification hooks, and explicitly branded
 installer/uninstaller icons. Its local path is
 `src-tauri/target/release/bundle/nsis/LanDrop_1.7.0_x64-setup.exe`, size 4,554,758
@@ -331,9 +331,16 @@ This is an unsigned local test installer: Authenticode reports `NotSigned`, and
 no updater `.sig` was produced. A temporary packaging override disabled signing
 artifacts for this test only; repository updater signing configuration and the
 existing public key were preserved. Neither this installer nor the source changes
-were published to GitHub. The installed app and user registry were not modified.
-Actual installed toast display, button/body activation, Notification Center
-persistence, and cold launch still require the acceptance checks above.
+were published to GitHub. At packaging time, the installed app and user registry
+had not been modified. The user subsequently authorized local installation; the
+installed version and notification protocol registration were verified, and cold
+launch through the updates protocol opened Settings. Actual installed toast
+display, button/body activation, and Notification Center persistence still
+require the acceptance checks above.
+
+This hash identifies the initial package, not the later compact-UI rebuild at
+the same unreleased 1.7.0 path. See [compact UI restoration](compact-ui-restoration.md)
+for the later revision and its verification.
 
 ## Sources
 

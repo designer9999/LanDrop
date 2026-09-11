@@ -51,8 +51,8 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    width: 48px;
-    height: 48px;
+    width: var(--icon-button-size, 48px);
+    height: var(--icon-button-size, 48px);
     border-radius: 50%;
     border: none;
     cursor: pointer;
