@@ -1,5 +1,11 @@
 # LanDrop architecture, experience, and Tailscale audit
 
+Update after installed-device investigation: the Windows polling design described
+below had user/profile lifecycle side effects. Version 1.7.1 disables automatic
+Windows tailnet discovery as containment. The original claim that status reads
+cannot affect connection state was incorrect. See the
+[incident report](tailscale-incident-2026-09.md) for evidence and remaining uncertainty.
+
 ## Assessment
 
 LanDrop has a suitable modern desktop foundation: Tauri 2, Svelte 5 runes,

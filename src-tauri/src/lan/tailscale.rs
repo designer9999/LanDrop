@@ -1,9 +1,81 @@
 //! Desktop discovery uses the already authenticated local Tailscale client.
-//! No login, control-server configuration, or tailnet writes are performed.
+//! Windows discovery is disabled: even LocalAPI status reads can switch profiles.
+#[cfg(any(not(target_os = "windows"), test))]
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::time::{Duration, Instant};
 
+pub const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(30);
+pub const PROBE_CONCURRENCY: usize = 4;
+const SWEEP_BUDGET: usize = 16;
+const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+pub struct ProbeSchedule {
+    attempts: HashMap<Ipv4Addr, Attempt>,
+}
+
+struct Attempt {
+    last: Instant,
+    due: Instant,
+    failures: u32,
+}
+
+impl ProbeSchedule {
+    /// Oldest attempts first: a large tailnet cannot starve later addresses.
+    /// Confirmed live peers are maintained separately by the route monitor.
+    pub fn select(
+        &mut self,
+        eligible: &HashSet<Ipv4Addr>,
+        confirmed: &HashSet<Ipv4Addr>,
+        now: Instant,
+    ) -> Vec<Ipv4Addr> {
+        self.attempts.retain(|ip, _| eligible.contains(ip));
+        let mut candidates: Vec<_> = eligible
+            .iter()
+            .copied()
+            .filter(|ip| !confirmed.contains(ip))
+            .filter(|ip| {
+                self.attempts
+                    .get(ip)
+                    .is_none_or(|attempt| attempt.due <= now)
+            })
+            .collect();
+        candidates.sort_by_key(|ip| (self.attempts.get(ip).map(|a| a.last), *ip));
+        candidates.truncate(SWEEP_BUDGET);
+        // Reserve immediately so an interrupted probe cannot cause a hot retry.
+        for ip in &candidates {
+            let failures = self.attempts.get(ip).map_or(0, |a| a.failures);
+            self.attempts.insert(
+                *ip,
+                Attempt {
+                    last: now,
+                    due: now + DISCOVERY_COOLDOWN,
+                    failures,
+                },
+            );
+        }
+        candidates
+    }
+
+    pub fn record(&mut self, ip: Ipv4Addr, success: bool, now: Instant) {
+        let Some(attempt) = self.attempts.get_mut(&ip) else {
+            return;
+        };
+        attempt.failures = if success {
+            0
+        } else {
+            attempt.failures.saturating_add(1)
+        };
+        let delay = DISCOVERY_COOLDOWN
+            .saturating_mul(1 << attempt.failures.min(5))
+            .min(MAX_BACKOFF);
+        attempt.due = now + delay;
+    }
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Status {
@@ -12,6 +84,7 @@ struct Status {
     peer: Option<HashMap<String, Peer>>,
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Peer {
@@ -19,6 +92,22 @@ struct Peer {
     online: bool,
     #[serde(default, rename = "TailscaleIPs")]
     tailscale_ips: Vec<String>,
+    #[serde(default, rename = "DNSName")]
+    dns_name: String,
+    #[serde(default)]
+    exit_node_option: bool,
+    #[serde(default)]
+    location: Option<serde_json::Value>,
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+impl Peer {
+    fn is_service_node(&self) -> bool {
+        let dns = self.dns_name.trim_end_matches('.').to_ascii_lowercase();
+        dns == "mullvad.ts.net"
+            || dns.ends_with(".mullvad.ts.net")
+            || (self.exit_node_option && self.location.is_some())
+    }
 }
 
 pub fn is_tailscale_ipv4(ip: Ipv4Addr) -> bool {
@@ -26,6 +115,7 @@ pub fn is_tailscale_ipv4(ip: Ipv4Addr) -> bool {
     a == 100 && (64..=127).contains(&b)
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 pub fn parse_status(bytes: &[u8]) -> Result<HashSet<Ipv4Addr>, String> {
     let status: Status = serde_json::from_slice(bytes)
         .map_err(|_| "Tailscale returned an unsupported status response".to_string())?;
@@ -36,14 +126,21 @@ pub fn parse_status(bytes: &[u8]) -> Result<HashSet<Ipv4Addr>, String> {
         .peer
         .unwrap_or_default()
         .values()
-        .filter(|peer| peer.online)
+        .filter(|peer| peer.online && !peer.is_service_node())
         .flat_map(|peer| &peer.tailscale_ips)
         .filter_map(|ip| ip.parse::<Ipv4Addr>().ok())
         .filter(|ip| is_tailscale_ipv4(*ip))
         .collect())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "windows")]
+pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
+    // Do not replace this with a process-presence check: the GUI can exit between
+    // checking and issuing a LocalAPI request, which itself may reset the VPN.
+    Err("Automatic Tailscale discovery is temporarily disabled on Windows for VPN safety; LAN discovery remains available".into())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
 pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
     use std::path::PathBuf;
     use std::process::Stdio;
@@ -52,13 +149,6 @@ pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
 
     #[allow(unused_mut)]
     let mut candidates = vec![PathBuf::from("tailscale")];
-    #[cfg(target_os = "windows")]
-    {
-        // GUI applications often do not inherit the installation's PATH update.
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            candidates.push(PathBuf::from(program_files).join("Tailscale/tailscale.exe"));
-        }
-    }
     #[cfg(target_os = "macos")]
     candidates.extend([
         PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
@@ -74,8 +164,6 @@ pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(target_os = "windows")]
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -127,6 +215,93 @@ pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_discovery_is_disabled_without_querying_client() {
+        let error = online_peers().await.unwrap_err();
+        assert!(error.contains("temporarily disabled on Windows"));
+        assert!(error.contains("LAN discovery remains available"));
+    }
+
+    #[test]
+    fn excludes_service_nodes_but_keeps_colleague_exit_nodes() {
+        let parsed = parse_status(br#"{"BackendState":"Running","Peer":{
+            "mullvad":{"Online":true,"DNSName":"se-sto.MULLVAD.ts.net.","TailscaleIPs":["100.64.0.1"]},
+            "location":{"Online":true,"ExitNodeOption":true,"Location":{"Country":"SE"},"TailscaleIPs":["100.64.0.2"]},
+            "colleague":{"Online":true,"ExitNodeOption":true,"Location":null,"DNSName":"pc.tailnet.ts.net.","TailscaleIPs":["100.64.0.3"]},
+            "suffix_boundary":{"Online":true,"DNSName":"notmullvad.ts.net.","TailscaleIPs":["100.64.0.4"]},
+            "spoofed_suffix":{"Online":true,"DNSName":"mullvad.ts.net.example.org.","TailscaleIPs":["100.64.0.5"]}
+        }}"#).unwrap();
+        assert_eq!(
+            parsed,
+            [3, 4, 5].map(|n| Ipv4Addr::new(100, 64, 0, n)).into()
+        );
+    }
+
+    #[test]
+    fn sweep_budget_is_fair_and_excludes_confirmed_peers() {
+        let now = Instant::now();
+        let eligible: HashSet<_> = (1..=40).map(|n| Ipv4Addr::new(100, 64, 0, n)).collect();
+        let confirmed = HashSet::from([Ipv4Addr::new(100, 64, 0, 1)]);
+        let mut schedule = ProbeSchedule::default();
+        let mut attempted = HashSet::new();
+        for cycle in 0..3 {
+            let selected = schedule.select(&eligible, &confirmed, now + DISCOVERY_COOLDOWN * cycle);
+            assert!(selected.len() <= SWEEP_BUDGET);
+            assert!(selected.iter().all(|ip| !confirmed.contains(ip)));
+            attempted.extend(selected);
+        }
+        assert_eq!(attempted.len(), 39);
+    }
+
+    #[test]
+    fn failures_back_off_exponentially_and_success_resets_delay() {
+        let ip = Ipv4Addr::new(100, 64, 0, 1);
+        let eligible = HashSet::from([ip]);
+        let mut now = Instant::now();
+        let mut schedule = ProbeSchedule::default();
+        for seconds in [60, 120, 240, 480, 900, 900] {
+            assert_eq!(schedule.select(&eligible, &HashSet::new(), now), vec![ip]);
+            schedule.record(ip, false, now);
+            let delay = Duration::from_secs(seconds);
+            assert!(schedule
+                .select(
+                    &eligible,
+                    &HashSet::new(),
+                    now + delay - Duration::from_millis(1)
+                )
+                .is_empty());
+            now += delay;
+        }
+        assert_eq!(schedule.select(&eligible, &HashSet::new(), now), vec![ip]);
+        schedule.record(ip, true, now);
+        assert!(schedule.select(&eligible, &HashSet::new(), now).is_empty());
+        assert_eq!(
+            schedule.select(&eligible, &HashSet::new(), now + DISCOVERY_COOLDOWN),
+            vec![ip]
+        );
+    }
+
+    #[test]
+    fn departed_candidates_are_pruned_and_lost_confirmed_peers_can_retry() {
+        let ip = Ipv4Addr::new(100, 64, 0, 1);
+        let eligible = HashSet::from([ip]);
+        let now = Instant::now();
+        let mut schedule = ProbeSchedule::default();
+        schedule.select(&eligible, &HashSet::new(), now);
+        schedule.record(ip, true, now);
+        assert!(schedule
+            .select(&eligible, &eligible, now + DISCOVERY_COOLDOWN)
+            .is_empty());
+        assert_eq!(
+            schedule.select(&eligible, &HashSet::new(), now + DISCOVERY_COOLDOWN),
+            vec![ip]
+        );
+        schedule.select(&HashSet::new(), &HashSet::new(), now);
+        assert!(schedule.attempts.is_empty());
+        assert_eq!(schedule.select(&eligible, &HashSet::new(), now), vec![ip]);
+    }
+
     #[test]
     fn uses_only_online_tailnet_ipv4_addresses() {
         let parsed = parse_status(
@@ -143,6 +318,7 @@ mod tests {
     fn rejects_disconnected_or_invalid_status() {
         assert!(parse_status(br#"{"BackendState":"Stopped"}"#).is_err());
         assert!(parse_status(br#"{"BackendState":"NeedsLogin"}"#).is_err());
+        assert!(parse_status(br#"{"BackendState":"NoState"}"#).is_err());
         assert!(parse_status(b"invalid").is_err());
         assert!(parse_status(br#"{"BackendState":"Running"}"#)
             .unwrap()

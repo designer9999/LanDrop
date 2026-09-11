@@ -931,11 +931,9 @@ async fn run_tailnet_discovery(
     peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
     tailnet_ips: Arc<Mutex<HashSet<Ipv4Addr>>>,
 ) {
-    let mut interval = time::interval(Duration::from_secs(15));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut schedule = tailscale::ProbeSchedule::default();
     let mut last_status = String::new();
     loop {
-        tokio::select! { _ = cancel.cancelled() => break, _ = interval.tick() => {} }
         let result = tokio::select! {
             _ = cancel.cancelled() => break,
             result = tailscale::online_peers() => result,
@@ -957,21 +955,24 @@ async fn run_tailnet_discovery(
             last_status = message;
         }
         *tailnet_ips.lock().await = ips.clone();
-        // Bounded concurrency and bounded per-probe time keep large tailnets
-        // responsive without opening hundreds of simultaneous sessions.
-        let mut candidates = ips.into_iter();
+        let confirmed = peers
+            .lock()
+            .await
+            .values()
+            .filter_map(|peer| peer.tailscale_ip.as_ref()?.parse().ok())
+            .collect();
+        let mut candidates = schedule
+            .select(&ips, &confirmed, Instant::now())
+            .into_iter();
         let mut probes = JoinSet::new();
         loop {
-            while probes.len() < 16 {
+            while probes.len() < tailscale::PROBE_CONCURRENCY {
                 let Some(ip) = candidates.next() else {
                     break;
                 };
                 probes.spawn(async move {
-                    let ip = ip.to_string();
-                    super::transfer::probe_peer_info(&ip, &my_uuid)
-                        .await
-                        .ok()
-                        .map(|info| (ip, info))
+                    let result = super::transfer::probe_peer_info(&ip.to_string(), &my_uuid).await;
+                    (ip, result)
                 });
             }
             let result = tokio::select! {
@@ -981,12 +982,15 @@ async fn run_tailnet_discovery(
             let Some(result) = result else {
                 break;
             };
-            let Ok(Some((ip, (id, alias, dtype)))) = result else {
+            let Ok((ip, result)) = result else {
                 continue;
             };
-            if id == my_id {
+            let result = result.ok().filter(|(id, _, _)| id != &my_id);
+            schedule.record(ip, result.is_some(), Instant::now());
+            let Some((id, alias, dtype)) = result else {
                 continue;
-            }
+            };
+            let ip = ip.to_string();
             let mut peers = peers.lock().await;
             let peer = peers.entry(id.clone()).or_insert_with(|| {
                 DiscoveredPeer::new(id, alias.clone(), dtype.clone(), ip.clone())
@@ -997,6 +1001,12 @@ async fn run_tailnet_discovery(
             let peer = peer.clone();
             drop(peers);
             let _ = handle.emit("lan_peer_discovered", peer);
+        }
+        // Sleep after all work finishes, including status failures. An interval
+        // can become overdue during a slow sweep and otherwise restart at once.
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = time::sleep(tailscale::DISCOVERY_COOLDOWN) => {}
         }
     }
     let _ = handle.emit(

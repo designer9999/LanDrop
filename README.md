@@ -1,7 +1,7 @@
 # LanDrop
 
 LanDrop sends files and text between devices on the same local network or, on
-desktop, through your existing Tailscale network. LanDrop has no account or cloud
+macOS/Linux, through your existing Tailscale network. LanDrop has no account or cloud
 storage. Tailscale may relay its encrypted connections when a direct path is unavailable.
 
 > [!IMPORTANT]
@@ -13,7 +13,7 @@ storage. Tailscale may relay its encrypted connections when a direct path is una
 
 - Direct file, folder, and text transfer over TCP
 - Automatic peer discovery with mDNS
-- Desktop Tailscale discovery, with LAN preferred when both routes are available
+- macOS/Linux Tailscale discovery, with LAN preferred when both routes are available
 - A live device list; saved conversations remain available through **View all history**
 - Windows, macOS, Linux, and Android builds
 - Transfer history, image previews, and desktop video previews
@@ -51,17 +51,21 @@ the same LanDrop device are combined into one peer, with a visible route label.
 
 ### Using an existing Tailscale network
 
-1. Run the updated LanDrop on both Windows, macOS, or Linux desktops.
+Automatic Windows Tailscale discovery is temporarily disabled in 1.7.1 because
+status polling can affect Windows Tailscale profile lifecycle. LAN functionality
+remains available. See the [incident report](documentation/tailscale-incident-2026-09.md).
+
+1. Run the updated LanDrop on both macOS or Linux desktops.
 2. Keep both installed Tailscale clients connected to your existing tailnet.
 3. Allow the intended devices to connect on TCP **29171** in your tailnet policy
    and host firewalls.
 4. Select the discovered peer and send text, files, or folders as usual.
 
-LanDrop reads `tailscale status --json` from the installed desktop client and checks
-which peers actually run LanDrop. It does not change your Tailscale configuration
-or require a LanDrop server. Both devices must be online and running the app;
+On macOS/Linux, LanDrop reads `tailscale status --json` from the installed client
+and checks which peers actually run LanDrop. It issues no configuration commands
+and does not require a LanDrop server. Both devices must be online and running the app;
 there is no offline message queue. This integration currently discovers Tailscale
-IPv4 endpoints on desktop; automatic Android Tailscale discovery is not included.
+IPv4 endpoints on supported desktops; automatic Android Tailscale discovery is not included.
 
 When both routes exist, LanDrop prefers LAN and can fall back to Tailscale during
 connection establishment. Interrupted transfers are reported as failed rather
@@ -143,8 +147,8 @@ Add release notes at `documentation/releases/vMAJOR.MINOR.PATCH.md`, then create
 and push an annotated version tag after the source commit has passed CI on `main`:
 
 ```bash
-git tag -a v1.7.0 -m "LanDrop v1.7.0"
-git push origin v1.7.0
+git tag -a v1.7.1 -m "LanDrop v1.7.1"
+git push origin v1.7.1
 ```
 
 The release workflow accepts stable `vMAJOR.MINOR.PATCH` tags, verifies the versions

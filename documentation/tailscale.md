@@ -1,8 +1,12 @@
 # Desktop Tailscale guide
 
-LanDrop can discover and communicate with other updated LanDrop desktops through
-an existing Tailscale network. It supports Windows, macOS, and Linux with the
-standard installed Tailscale client. The first implementation uses IPv4.
+Automatic Windows Tailscale discovery is temporarily disabled in 1.7.1 to contain
+a confirmed status-polling lifecycle problem. Windows LAN discovery, text, files,
+and saved history remain available. Do not use the earlier 1.7.0 Windows build for
+automatic Tailscale discovery. See the [incident report](tailscale-incident-2026-09.md).
+
+macOS and Linux can discover other running LanDrop desktops through an existing
+Tailscale network using the standard installed client. Discovery uses IPv4.
 
 ## Requirements
 
@@ -11,11 +15,13 @@ permission to connect to each other on TCP port `29171`. Tailnet access policy a
 each device’s firewall must allow that connection. The devices do not need to be
 in the same country, on the same Wi-Fi, or logged into a new LanDrop service.
 
-The application reads the local desktop client using `tailscale status --json`.
-This is a read-only operation. It does not change login state, control-server
-settings, ACLs/grants, routes, or Tailscale version. CLI location handling covers
-PATH and common Windows/macOS installations. Nonstandard installations may need
-the CLI made available in the graphical application’s environment.
+On macOS/Linux the application reads the local desktop client using
+`tailscale status --json`. It does not issue configuration commands. On Windows,
+even a status request can affect user-profile lifecycle; the 1.7.1 safety build
+does not invoke this CLI or the LocalAPI for automatic discovery at all. This
+corrects the earlier, overly broad claim that status reads cannot affect login
+state. CLI location handling on supported platforms covers PATH and common macOS
+installations.
 
 ## What appears in the app
 
@@ -23,6 +29,12 @@ Only a peer that passes the LanDrop service check becomes a live device. Other
 tailnet devices are not contacts merely because Tailscale reports them online.
 Tailscale discovery refreshes periodically, so a new device may take a short time
 to appear. Use the rescan control to restart discovery when troubleshooting.
+
+On supported platforms, Mullvad service nodes are excluded before probing. A
+discovery cycle tries at most 16 unconfirmed candidates with four concurrent
+probes, then waits 30 seconds after the cycle completes. Failed probes back off
+from 60 seconds to a maximum of 15 minutes; least-recently attempted candidates
+get priority. Confirmed devices are maintained by the separate route monitor.
 
 One LanDrop UUID has one device entry, even when both LAN and Tailscale addresses
 are known. The label names the selected route, and the description indicates an
@@ -38,6 +50,7 @@ delivery; this is not an offline messaging service.
 
 | Symptom | Check |
 | --- | --- |
+| Windows Tailscale discovery paused for safety | Expected in 1.7.1. LAN remains available; do not repeatedly rescan or change VPN settings to work around the safety pause. |
 | Tailscale CLI unavailable | Confirm the desktop client is installed and its CLI can be found. On macOS, check the app bundle or Homebrew installation. |
 | Tailscale disconnected | Connect the existing Tailscale client, then rescan. |
 | Tailscale available but colleague absent | Confirm the colleague runs the updated LanDrop, not just Tailscale; check TCP 29171 policy/firewall access. |
