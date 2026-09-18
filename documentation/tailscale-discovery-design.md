@@ -23,11 +23,49 @@ private directory avoids that interaction. The alternative is administrator-
 authorized, read-only cloud device inventory, which needs credentials and still
 requires application probes.
 
-The assessment is current to September 11, 2026 and checks Tailscale v1.102.4,
-released September 10. It distinguishes upstream facts, observations from the
-LanDrop 1.7.1 codebase, and proposed engineering choices. None of these findings
-establishes that every possible future Tailscale integration has the same
-limitations.[^1]
+Originally researched September 11, 2026; independently rechecked by three
+parallel reviews on September 18 against current official documentation and the
+LanDrop 1.7.1 codebase. Tailscale v1.102.4, released September 10, remains the
+latest stable Windows version in the checked release sources. Reading the local
+executable's file metadata (without executing it) also identified v1.102.4.
+Upstream facts, source observations and proposed engineering choices remain
+separate; this review does not establish that future releases have the same
+limitations.[^1][^22]
+
+## September 18 re-review: findings and corrections
+
+- **No Windows upgrade fixes this integration today.** The latest stable client
+  still wraps ordinary LocalAPI requests in Windows user-ownership lifecycle.
+  Upstream's `TestUserConnectDisconnectOnWindows` explicitly tests that opening a
+  bus watch sets the user and closing it clears the user. No reviewed watch flag
+  offers an ownership-free peer inventory. The September 17 changelog entry is
+  a Kubernetes Operator release, not a newer Windows client.[^22][^23]
+- **Official Rust integration exists, but is experimental.** `tailscale-rs`
+  lists Windows x86_64, while warning against production use and describing
+  unaudited cryptography, DERP-only traffic and unsupported exit-node/Mullvad
+  functionality. It is not a safe replacement for the existing desktop VPN.
+  Keep LanDrop's Rust networking over ordinary sockets rather than adopting this
+  experimental transport for the release.[^24]
+- **OAuth wording below is narrowed.** OAuth Clients use client credentials;
+  the separate alpha OAuth Apps feature now supports authorization-code device
+  provisioning. Its documented single-use `auth_keys:create:once` flow is not a
+  verified read-only desktop inventory login flow.[^25]
+- **The Windows block is not merely cosmetic.** `online_peers` returns before
+  querying Tailscale; the discovery worker therefore has no authorized remote
+  IPs. The incoming-session admission check rejects non-LAN connections outside
+  that set, and arbitrary frontend IP hints cannot authorize remote routes.
+  A replacement must change both discovery and authorization, not just render
+  more chips in the peer bar.[^20]
+- **Onboarding can be simpler than a new account system.** A private directory
+  on an explicitly approved server can authenticate connections using server-side
+  Tailscale identity, with a member policy and application-key enrollment. Each
+  desktop then needs one trusted directory link, not a password database or
+  per-friend addresses. Server-side identity lookup is demonstrated by official
+  `tsnet` documentation; choosing an existing Linux daemon or a separate `tsnet`
+  node still requires deployment-specific review and permission.[^26]
+
+These are research and source-review results, not a deployed replacement. No
+Windows Tailscale CLI/LocalAPI call or VPN configuration change was performed.
 
 ## Private connectivity is not LAN discovery
 
@@ -112,6 +150,14 @@ after network changes. Their documented inputs and outputs do not identify
 remote LanDrop applications; treating a route prefix as a list of participants
 would be an unsupported inference.[^8]
 
+For Windows reconnect wake-ups, the installed `windows` 0.62.2 crate also exposes
+safe WinRT `NetworkInformation::NetworkStatusChanged` registration/removal under
+the `Networking_Connectivity` feature. This avoids introducing application-written
+unsafe FFI. Keep the event token in an owned lifecycle, unregister exactly once,
+signal only a bounded/coalesced worker from the callback, and handle cancellation
+and callbacks already in flight. It remains a wake-up signal, not a proof of
+reachability. This is source-verified feasibility, not a tested integration.[^27]
+
 The local Tailscale web interface is also not a general peer directory. In the
 reviewed release, its data response describes the local device, while its
 exit-node endpoint requires management authorization and filters for exit-node
@@ -121,9 +167,11 @@ that daemon-hosted web requests necessarily have the Windows CLI lifecycle
 problem.[^9]
 
 The cloud API supports listing devices with `devices:core:read`, without requesting
-device configuration permissions.[^10] Tailscale OAuth uses client credentials,
-not a ready-made desktop authorization-code/PKCE login. A long-lived client
-secret must be protected; it must not be embedded in a distributable application,
+device configuration permissions.[^10] Tailscale OAuth Clients use client
+credentials. The separate OAuth Apps authorization-code flow currently documents
+device provisioning, not the required inventory scope or a ready-made desktop
+PKCE inventory login.[^25] A long-lived client secret must be protected; it must
+not be embedded in a distributable application,
 frontend bundle or repository.[^11] Even authorized inventory is not proof that
 LanDrop is running, and administrator visibility can exceed a particular peer's
 permitted connectivity.[^15]
@@ -149,12 +197,16 @@ is approved. It does not require LanDrop to run Tailscale commands, access its
 private state, query LocalAPI, change exit nodes, or manage DNS and firewall rules.
 It uses ordinary application connections through the already configured network.
 
-One private service runs on an existing server reachable through Tailscale. A
-group enrollment link supplies its endpoint and a short-lived invitation, rather
-than addresses for every colleague. Each desktop is enrolled once and receives
-its own revocable identity. Thereafter, any authorized group member running the
-updated LanDrop can become discoverable without exchanging addresses with every
-other participant.
+One private service runs on an existing server reachable through Tailscale.
+A trusted group link supplies its endpoint and server trust information, rather
+than addresses for every colleague. Prefer server-side Tailscale identity and an
+explicit member policy for enrollment where supported; a short-lived invitation
+is a fallback when that identity integration is unavailable, not a mandatory
+second account system. Never trust a client-supplied username or forwarded
+identity header without an authenticated, explicitly trusted proxy boundary.
+Each enrolled desktop receives its own revocable app identity. Thereafter,
+authorized members running the updated LanDrop can become discoverable without
+exchanging addresses with every other participant.[^26]
 
 Each application registers only after its receiver has successfully bound the
 LanDrop listening port. One authenticated persistent connection carries an
@@ -288,6 +340,14 @@ disabled. Simply displaying directory entries in the UI would therefore leave
 incoming remote text and files broken. The replacement must establish authorized
 endpoint membership before handshakes can succeed, while still rejecting
 unrelated sources and expiring revoked membership.[^20]
+
+The September 18 code review additionally found that a cached outgoing tailnet
+route is currently checked for address range and reachability, not a separate
+membership lease. The replacement must revoke that route even if its old peer
+still answers. Directory snapshot/admission ordering must be tested with both
+startup orders and simultaneous starts so that first-contact probes cannot
+deadlock behind empty admission sets. Existing IPv4-only listeners and endpoints
+also require an explicit IPv4 release scope or a deliberate IPv6 implementation.
 
 Bounded messages, bounded queues, handshake deadlines and server session limits
 are necessary on both sides. Logs should report state transitions and aggregate
@@ -458,3 +518,9 @@ place pending the setup decision and implementation.
 [^19]: I. Fette and A. Melnikov, IETF. [RFC 6455: The WebSocket Protocol](https://www.rfc-editor.org/rfc/rfc6455.html). December 2011, sections 5.5.2–5.5.3 and 7.2.3; heartbeat and reconnect mechanisms, not LanDrop-specific timing defaults.
 [^20]: LanDrop local repository, commit `89c1016`, version 1.7.1. [Incident and verification record](tailscale-incident-2026-09.md), [discovery implementation](../src-tauri/src/lan/discovery.rs), [service routing](../src-tauri/src/lan/mod.rs), [Tailscale safety guard](../src-tauri/src/lan/tailscale.rs), [protocol](../src-tauri/src/lan/protocol.rs), [transfer implementation](../src-tauri/src/lan/transfer.rs), and [frontend state](../src/lib/state/app-state.svelte.ts). September 11, 2026. Local source evidence; the new commits are not asserted to be publicly published. Recovery after restart was reported during follow-up; it was not a controlled connected-Mullvad acceptance test.
 [^21]: Tailscale. [libtailscale repository](https://github.com/tailscale/libtailscale), [Windows-port pull request 25](https://github.com/tailscale/libtailscale/pull/25), and [Rust-support pull request 12](https://github.com/tailscale/libtailscale/pull/12). Repository and proposal status reviewed September 11, 2026; open proposals do not establish production support.
+[^22]: Tailscale. [Changelog](https://tailscale.com/changelog), [stable Windows packages](https://pkgs.tailscale.com/stable/#windows), and [latest GitHub release](https://github.com/tailscale/tailscale/releases/latest), checked September 18, 2026. Stable Windows v1.102.4; distinguish Kubernetes Operator releases from desktop releases.
+[^23]: Tailscale. [`ipn/ipnserver/server_test.go`, v1.102.4](https://github.com/tailscale/tailscale/blob/v1.102.4/ipn/ipnserver/server_test.go), `TestUserConnectDisconnectOnWindows`; [`server.go`](https://github.com/tailscale/tailscale/blob/v1.102.4/ipn/ipnserver/server.go) and [`ipn/backend.go`](https://github.com/tailscale/tailscale/blob/v1.102.4/ipn/backend.go). Rechecked September 18, 2026; request lifecycle and watch-mask semantics.
+[^24]: Tailscale. [`tailscale-rs` README](https://github.com/tailscale/tailscale-rs) and [Build with Tailscale. Build on Tailscale.](https://tailscale.com/blog/easier-building-with-tailscale), reviewed September 18, 2026. Experimental support is not a production compatibility guarantee.
+[^25]: Tailscale. [OAuth Apps](https://tailscale.com/docs/features/oauth-apps) and [device provisioning with OAuth Apps](https://tailscale.com/docs/features/oauth-apps/device-provisioning), reviewed September 18, 2026. Alpha authorization-code provisioning, one-use scope, no refresh token, same-tailnet restriction and client-secret exchange.
+[^26]: Tailscale. [`tsnet.Server.LocalClient` identity example](https://tailscale.com/docs/reference/tsnet-server-api#serverlocalclient), reviewed September 18, 2026. Shows server-side `WhoIs` using the connection remote address; does not itself implement LanDrop enrollment, app-key proof, proxy trust or revocation.
+[^27]: Microsoft. [`NetworkInformation` Rust API](https://microsoft.github.io/windows-docs-rs/doc/windows/Networking/Connectivity/struct.NetworkInformation.html) and [`NetworkStatusChanged`](https://learn.microsoft.com/en-us/uwp/api/windows.networking.connectivity.networkinformation.networkstatuschanged?view=winrt-26100), compared with installed `windows` 0.62.2 generated bindings September 18, 2026.

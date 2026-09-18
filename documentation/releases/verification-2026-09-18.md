@@ -29,6 +29,7 @@ source or user dependency tree was changed to accommodate that launcher.
 | ESLint / Prettier | Passed |
 | Windows frontend unit tests | Passed, 87 tests |
 | Windows frontend production build | Passed |
+| Windows optimized native executable and NSIS installer | Passed; local unsigned validation build |
 | Windows Rust tests, locked, all targets/features | Passed, 52 tests |
 | Windows Rust Clippy, warnings denied | Passed |
 | Rust formatting | Passed before dependency-only patches |
@@ -49,3 +50,25 @@ production-data resets, or application restarts were made. Building an installer
 does not imply installing it. Public release and updater availability require a
 successful tagged, signed multi-platform release workflow, not merely a main
 branch push. Android publishing remains disabled unless explicitly configured.
+
+## Completed local packaging, publication held
+
+Windows Tauri CLI 2.11.4 produced the optimized executable and x64 NSIS installer
+after the dependency patches. Rust's release compilation reported 4 minutes
+7 seconds; this is build time, not startup or runtime performance.
+
+- Executable: 15,311,360 bytes; SHA-256
+  `81b4dabbb4e819ecfbb219238cf259c704a80e9cfa08e7db70b375b7eccf39c8`.
+- `LanDrop_1.7.1_x64-setup.exe`: 4,548,388 bytes; SHA-256
+  `8a217f0edfca5fa3724f0768d7831cacf5113a9cb05bd6f1afe453423fafdc9c`.
+
+A temporary, non-repository build override disabled updater-artifact signing for
+this local validation. This installer must not be substituted for a signed
+automatic-update release. Repository signing configuration and embedded public
+key remain unchanged. The new installer has not been run.
+
+Publication was held when the owner clarified the expectation of worldwide
+Windows support. That feature remains unimplemented; the fresh independent
+reviews and required server/deployment decision are in the
+[Tailscale design](../tailscale-discovery-design.md). No release tag or new GitHub
+release was published during this verification.
