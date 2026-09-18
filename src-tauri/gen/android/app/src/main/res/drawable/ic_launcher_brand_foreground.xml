@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Same speed-folder path as the status/TV icon. The 108dp adaptive canvas
+     keeps the mark inside the central safe zone; the background fills the mask. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.07"
+        android:scaleY="0.07"
+        android:translateX="10"
+        android:translateY="10.6">
+        <path
+            android:fillColor="#FFF4DC"
+            android:pathData="M456,526V441Q456,397 500,397H669Q692,397 706,416L727,443Q738,458 758,458H1021Q1076,458 1064,510L1003,750V568Q1003,526 960,526ZM314,563H929Q971,563 971,606V801Q971,843 929,843H308Q285,843 285,821Q285,800 308,800H489Q513,800 513,779Q513,757 489,757H210Q187,757 187,737Q187,717 210,717H546Q569,717 569,698Q569,677 546,677H263Q240,677 240,659Q240,641 263,641H605Q628,641 628,621Q628,601 605,601H314Q294,601 294,582Q294,563 314,563Z" />
+    </group>
+</vector>

@@ -40,6 +40,16 @@ those two Android files, use `-AndroidDensityRepairOnly`. No artwork is redesign
 and desktop assets are not touched in that mode. A CI test guards the density map.
 See the [version-matched generator source](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-cli/src/icon.rs#L393).
 
+Android 8/API 26 and later use native adaptive-icon XML instead of letting the
+launcher shrink the legacy rounded-square bitmap inside a white circle. The
+existing orange background fills the launcher mask; a 108dp vector foreground
+reuses the status/TV speed-folder geometry in cream, inside the central safe zone.
+API 33 adds a monochrome layer for user-enabled themed icons. Older Android keeps
+the generated PNG fallback. The icon generation script deliberately preserves
+these native XML resources; CI guards their references and shared geometry.
+This is the existing logo adapted to the platform, not a new raster/logo design.
+See [Android's adaptive-icon guidance](https://developer.android.com/develop/ui/compose/system/icon_design_adaptive).
+
 The Android TV launcher uses a scalable `tv_banner.xml` with the same speed-folder
 geometry and an outlined LanDrop wordmark, matching Android's 320×180 xhdpi banner
 requirement. This supplies the existing TV launcher's missing metadata; it is not
