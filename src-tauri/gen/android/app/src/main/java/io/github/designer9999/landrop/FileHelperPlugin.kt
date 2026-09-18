@@ -13,6 +13,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.core.content.FileProvider
+import androidx.annotation.RequiresApi
 import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
 import app.tauri.annotation.ActivityCallback
@@ -150,7 +151,7 @@ class FileHelperPlugin(private val activity: Activity) : Plugin(activity) {
     private fun exportMime(source: File): String = getMimeFromExtension(source.extension)
         .let { if (it == "*/*") "application/octet-stream" else it }
 
-    @android.annotation.TargetApi(Build.VERSION_CODES.Q)
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun exportToMediaStore(invoke: Invoke, source: File) {
         var destination: Uri? = null
         try {

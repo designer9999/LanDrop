@@ -423,14 +423,14 @@ jobs:
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Test Android release Kotlin helpers
+      - name: Lint and test Android release
         shell: bash
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           bash src-tauri/gen/android/gradlew --no-daemon \
             -p src-tauri/gen/android \
-            :app:testArm64ReleaseUnitTest -x :app:rustBuildArm64Release
+            :app:lintArm64Release :app:testArm64ReleaseUnitTest -x :app:rustBuildArm64Release
 
       - name: Verify packaged Android ELF 16-KB alignment
         shell: bash
@@ -438,7 +438,7 @@ jobs:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
-          node --test scripts/Verify-AndroidElfAlignment.test.mjs
+          node --test scripts/Verify-AndroidElfAlignment.test.mjs scripts/Verify-AndroidIcons.test.mjs
           mapfile -d '' -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*release-unsigned.apk" -print0)
           test "${#APKS[@]}" -eq 1
           node scripts/Verify-AndroidElfAlignment.mjs \

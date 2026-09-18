@@ -113,8 +113,9 @@ try {
         }
         $sourceVersion = if ($androidConfig.version) { $androidConfig.version } else { $baseConfig.version }
         $unsignedMetadata = Assert-ApkMetadata -Aapt $aapt -Path $Apk -Version $sourceVersion
-        & $zipalign -c -P 16 -v 4 $Apk
+        & $zipalign -c -P 16 4 $Apk
         if ($LASTEXITCODE -ne 0) { throw 'Input APK is not 16-KB ZIP-aligned; do not sign it' }
+        Write-Output 'PASS: unsigned APK 16-KB ZIP alignment'
         if (!$NodePath) {
             $NodePath = (Get-Command -Name node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
         }
@@ -149,8 +150,9 @@ try {
         if ($digests.Count -ne 1 -or $digests[0].Matches[0].Groups[1].Value.ToLowerInvariant() -ne $expected) {
             throw 'APK signer does not match the fresh private release certificate'
         }
-        & $zipalign -c -P 16 -v 4 $stagedOutput
+        & $zipalign -c -P 16 4 $stagedOutput
         if ($LASTEXITCODE -ne 0) { throw 'Signed APK failed 16-KB ZIP alignment verification' }
+        Write-Output 'PASS: signed APK 16-KB ZIP alignment'
         $signedMetadata = Assert-ApkMetadata -Aapt $aapt -Path $stagedOutput -Version $sourceVersion
         if ($signedMetadata -cne $unsignedMetadata) { throw 'APK metadata changed during signing' }
         # Same-directory rename publishes only a verified artifact. File.Move's

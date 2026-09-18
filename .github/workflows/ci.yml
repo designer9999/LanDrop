@@ -51,6 +51,9 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
+      - name: Test release artifact guards
+        run: node --test scripts/Verify-AndroidElfAlignment.test.mjs scripts/Verify-AndroidIcons.test.mjs
+
       - name: Build frontend
         run: npm run build
 
