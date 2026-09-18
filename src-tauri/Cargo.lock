@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "landrop"
-version = "1.8.0-beta.2"
+version = "1.8.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
