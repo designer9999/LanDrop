@@ -52,7 +52,7 @@ jobs:
         run: npm test
 
       - name: Test release artifact guards
-        run: node --test scripts/Verify-AndroidElfAlignment.test.mjs scripts/Verify-AndroidIcons.test.mjs
+        run: node --test scripts/Verify-AndroidElfAlignment.test.mjs scripts/Verify-AndroidIcons.test.mjs scripts/Verify-AndroidReleaseRecovery.test.mjs
 
       - name: Build frontend
         run: npm run build
