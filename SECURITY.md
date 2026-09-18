@@ -51,6 +51,7 @@ On September 18, 2026, the owner approved a separate Android application identit
 It will not replace old installations or migrate their history automatically.
 The replacement certificate fingerprint and custody instructions are published in
 [`android/signing/README.md`](android/signing/README.md). Build/signature checks
-passed, but the replacement APK is not yet published: emulator-only runtime
-qualification is pending, as requested by the owner. Do not treat the historical compromised key as
-trusted while this qualification is pending.
+passed, including scoped emulator-only runtime qualification requested by the
+owner. Publication is tracked in the release verification record; these checks
+do not establish physical-device coverage. Do not treat the historical compromised
+key as trusted.

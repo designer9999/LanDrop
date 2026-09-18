@@ -33,9 +33,9 @@ Download builds from the [GitHub Releases page](https://github.com/designer9999/
 | macOS (Intel) | `LanDrop_x.x.x_x64.dmg` |
 | Linux | `.AppImage` or `.deb` |
 
-The replacement Android 1.8.2 APK is built and privately signed, but publication is
-on hold for runtime qualification. At the owner's request, current testing is
-emulator-only; physical-device coverage is not claimed. It uses the new identity
+The replacement Android 1.8.2 APK is privately signed and has passed the scoped
+two-emulator release checks. At the owner's request, testing is emulator-only;
+physical-device coverage is not claimed. It uses the new identity
 `io.github.designer9999.landrop` and will install separately from the historical
 Android app; old history will not migrate automatically. Do not assume a desktop
 release includes an Android asset. See the
@@ -183,7 +183,7 @@ The Android keystore previously committed to this public repository is compromis
 It was removed from the current tree, but remains recoverable from Git history and
 must never be used again. The owner approved a fresh private key and separate
 Android identity for 1.8.2. The new key is configured securely for releases;
-runtime qualification remains required before Android publication.
+scoped emulator qualification passed before enabling Android publication.
 
 The LAN protocol also does not yet provide cryptographic authentication or encryption.
 There is no evidence from this code audit that either issue has been exploited, but
