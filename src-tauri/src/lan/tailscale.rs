@@ -1,5 +1,5 @@
-//! Desktop discovery uses the already authenticated local Tailscale client.
-//! Windows discovery is disabled: even LocalAPI status reads can switch profiles.
+//! Bounded app-presence probes over the installed Tailscale connection.
+//! Windows inventories OS routes through notifications, never CLI or LocalAPI.
 #[cfg(any(not(target_os = "windows"), test))]
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -14,6 +14,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 #[derive(Default)]
 pub struct ProbeSchedule {
     attempts: HashMap<Ipv4Addr, Attempt>,
+    priority: HashSet<Ipv4Addr>,
 }
 
 struct Attempt {
@@ -23,15 +24,67 @@ struct Attempt {
 }
 
 impl ProbeSchedule {
+    /// A valid inbound app discovery request is a hint, not proof that its
+    /// listener is reachable. Retry it once per reservation window at most.
+    pub fn request_probe(&mut self, ip: Ipv4Addr, now: Instant) -> bool {
+        if let Some(attempt) = self.attempts.get_mut(&ip) {
+            if now.saturating_duration_since(attempt.last) < DISCOVERY_COOLDOWN {
+                return false;
+            }
+            attempt.due = now;
+        }
+        // Match the bounded hint channel; selection also prunes stale entries.
+        if self.priority.len() < 64 {
+            self.priority.insert(ip);
+        }
+        true
+    }
+    /// Continue a bounded backlog promptly, but never spin on an empty sweep.
+    /// A modest in-memory wakeup also notices peers lost by the route monitor;
+    /// this does not query the OS or Tailscale service.
+    pub fn retry_delay(
+        &self,
+        eligible: &HashSet<Ipv4Addr>,
+        confirmed: &HashSet<Ipv4Addr>,
+        now: Instant,
+    ) -> Duration {
+        eligible
+            .iter()
+            .filter(|ip| !confirmed.contains(ip))
+            .map(|ip| {
+                self.attempts
+                    .get(ip)
+                    .map_or(Duration::ZERO, |a| a.due.saturating_duration_since(now))
+            })
+            .min()
+            .unwrap_or(DISCOVERY_COOLDOWN)
+            .clamp(Duration::from_secs(1), DISCOVERY_COOLDOWN)
+    }
+
     /// Oldest attempts first: a large tailnet cannot starve later addresses.
     /// Confirmed live peers are maintained separately by the route monitor.
+    #[cfg(any(not(target_os = "windows"), test))]
     pub fn select(
         &mut self,
         eligible: &HashSet<Ipv4Addr>,
         confirmed: &HashSet<Ipv4Addr>,
         now: Instant,
     ) -> Vec<Ipv4Addr> {
+        self.select_admitted(eligible, confirmed, now, |_| true)
+    }
+
+    /// Admission can separately cap unresolved service-node candidates without
+    /// allowing them to starve known colleague addresses later in the queue.
+    pub fn select_admitted(
+        &mut self,
+        eligible: &HashSet<Ipv4Addr>,
+        confirmed: &HashSet<Ipv4Addr>,
+        now: Instant,
+        mut admit: impl FnMut(Ipv4Addr) -> bool,
+    ) -> Vec<Ipv4Addr> {
         self.attempts.retain(|ip, _| eligible.contains(ip));
+        self.priority
+            .retain(|ip| eligible.contains(ip) && !confirmed.contains(ip));
         let mut candidates: Vec<_> = eligible
             .iter()
             .copied()
@@ -42,10 +95,18 @@ impl ProbeSchedule {
                     .is_none_or(|attempt| attempt.due <= now)
             })
             .collect();
-        candidates.sort_by_key(|ip| (self.attempts.get(ip).map(|a| a.last), *ip));
+        candidates.sort_by_key(|ip| {
+            (
+                !self.priority.contains(ip),
+                self.attempts.get(ip).map(|a| a.last),
+                *ip,
+            )
+        });
+        candidates.retain(|ip| admit(*ip));
         candidates.truncate(SWEEP_BUDGET);
         // Reserve immediately so an interrupted probe cannot cause a hot retry.
         for ip in &candidates {
+            self.priority.remove(ip);
             let failures = self.attempts.get(ip).map_or(0, |a| a.failures);
             self.attempts.insert(
                 *ip,
@@ -133,11 +194,29 @@ pub fn parse_status(bytes: &[u8]) -> Result<HashSet<Ipv4Addr>, String> {
         .collect())
 }
 
-#[cfg(target_os = "windows")]
-pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
-    // Do not replace this with a process-presence check: the GUI can exit between
-    // checking and issuing a LocalAPI request, which itself may reset the VPN.
-    Err("Automatic Tailscale discovery is temporarily disabled on Windows for VPN safety; LAN discovery remains available".into())
+/// Own the inventory worker for this discovery lifetime. Windows deliberately
+/// has no `online_peers` CLI entry point to accidentally call.
+pub async fn run_inventory(
+    cancel: tokio_util::sync::CancellationToken,
+    tx: tokio::sync::watch::Sender<Result<HashSet<Ipv4Addr>, String>>,
+) {
+    #[cfg(target_os = "windows")]
+    super::windows_tailnet::run(cancel, tx).await;
+
+    #[cfg(not(target_os = "windows"))]
+    loop {
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = online_peers() => result,
+        };
+        if tx.send(result).is_err() {
+            return;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(DISCOVERY_COOLDOWN) => {}
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
@@ -215,12 +294,101 @@ pub async fn online_peers() -> Result<HashSet<Ipv4Addr>, String> {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "windows")]
-    #[tokio::test]
-    async fn windows_discovery_is_disabled_without_querying_client() {
-        let error = online_peers().await.unwrap_err();
-        assert!(error.contains("temporarily disabled on Windows"));
-        assert!(error.contains("LAN discovery remains available"));
+    #[test]
+    fn retry_timer_is_bounded_and_new_addresses_take_priority() {
+        let now = Instant::now();
+        let old = Ipv4Addr::new(100, 64, 0, 1);
+        let new = Ipv4Addr::new(100, 64, 0, 2);
+        let mut eligible = HashSet::from([old]);
+        let confirmed = HashSet::new();
+        let mut schedule = ProbeSchedule::default();
+        assert_eq!(
+            schedule.retry_delay(&eligible, &confirmed, now),
+            Duration::from_secs(1)
+        );
+        schedule.select(&eligible, &confirmed, now);
+        schedule.record(old, false, now);
+        assert_eq!(
+            schedule.retry_delay(&eligible, &confirmed, now),
+            DISCOVERY_COOLDOWN
+        );
+        eligible.insert(new);
+        assert_eq!(schedule.select(&eligible, &confirmed, now), [new]);
+        assert_eq!(
+            schedule.retry_delay(&HashSet::new(), &confirmed, now),
+            DISCOVERY_COOLDOWN
+        );
+    }
+
+    #[test]
+    fn reciprocal_hint_cannot_bypass_probe_reservation_or_create_a_peer() {
+        let now = Instant::now();
+        let ip = Ipv4Addr::new(100, 64, 0, 1);
+        let eligible = HashSet::from([ip]);
+        let mut schedule = ProbeSchedule::default();
+        schedule.select(&eligible, &HashSet::new(), now);
+        schedule.record(ip, false, now);
+        assert!(!schedule.request_probe(ip, now + Duration::from_secs(1)));
+        assert!(schedule
+            .select(&eligible, &HashSet::new(), now + Duration::from_secs(1))
+            .is_empty());
+        assert!(schedule.request_probe(ip, now + DISCOVERY_COOLDOWN));
+        assert!(schedule
+            .select(&eligible, &eligible, now + DISCOVERY_COOLDOWN)
+            .is_empty());
+        assert_eq!(
+            schedule.select(&eligible, &HashSet::new(), now + DISCOVERY_COOLDOWN),
+            [ip]
+        );
+        assert!(!schedule.request_probe(ip, now + DISCOVERY_COOLDOWN));
+    }
+
+    #[test]
+    fn capped_unknown_admission_does_not_starve_known_candidates() {
+        let now = Instant::now();
+        let eligible: HashSet<_> = (1..=40).map(|n| Ipv4Addr::new(100, 64, 0, n)).collect();
+        let mut schedule = ProbeSchedule::default();
+        let mut unknown_budget = 4;
+        let selected = schedule.select_admitted(&eligible, &HashSet::new(), now, |ip| {
+            if ip.octets()[3] >= 30 {
+                return true;
+            }
+            if unknown_budget == 0 {
+                return false;
+            }
+            unknown_budget -= 1;
+            true
+        });
+        assert_eq!(selected.iter().filter(|ip| ip.octets()[3] < 30).count(), 4);
+        assert!(selected.contains(&Ipv4Addr::new(100, 64, 0, 40)));
+        assert!(selected.len() <= SWEEP_BUDGET);
+    }
+
+    #[test]
+    fn reciprocal_hint_prioritizes_a_friend_without_bypassing_unknown_budget() {
+        let now = Instant::now();
+        let eligible: HashSet<_> = (1..=200).map(|n| Ipv4Addr::new(100, 64, 0, n)).collect();
+        let friend = Ipv4Addr::new(100, 64, 0, 200);
+        let mut schedule = ProbeSchedule::default();
+        assert!(schedule.request_probe(friend, now));
+        let mut budget = 4;
+        let selected = schedule.select_admitted(&eligible, &HashSet::new(), now, |_| {
+            if budget == 0 {
+                return false;
+            }
+            budget -= 1;
+            true
+        });
+        assert_eq!(selected.len(), 4);
+        assert_eq!(selected[0], friend);
+        assert!(!schedule.priority.contains(&friend));
+        assert!(!schedule.request_probe(friend, now));
+        for ip in &eligible {
+            schedule.request_probe(*ip, now);
+        }
+        assert!(schedule.priority.len() <= 64);
+        schedule.select(&HashSet::new(), &HashSet::new(), now);
+        assert!(schedule.priority.is_empty());
     }
 
     #[test]

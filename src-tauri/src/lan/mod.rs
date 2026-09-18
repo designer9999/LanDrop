@@ -3,6 +3,8 @@ pub mod identity;
 pub mod protocol;
 pub mod tailscale;
 pub mod transfer;
+#[cfg(target_os = "windows")]
+pub mod windows_tailnet;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -291,7 +293,7 @@ impl LanService {
             .get(&normalized)
             .map(DiscoveredPeer::route_ips)
             .unwrap_or_default();
-        // Tailnet routes originate only from the local authenticated CLI and
+        // Tailnet routes originate only from the platform inventory and
         // successful app probes. An arbitrary UI hint cannot authorize one.
         if let Some(ip) = peer_ip_hint
             .map(str::trim)
@@ -302,8 +304,23 @@ impl LanService {
             }
         }
         ips.retain(|ip| {
-            discovery::is_current_lan_peer_ip(ip)
-                || ip.parse().is_ok_and(tailscale::is_tailscale_ipv4)
+            if discovery::is_current_lan_peer_ip(ip) {
+                return true;
+            }
+            let Ok(ip) = ip.parse() else {
+                return false;
+            };
+            if !tailscale::is_tailscale_ipv4(ip) {
+                return false;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                windows_tailnet::binding_for(ip).is_some()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                true
+            }
         });
         ips.sort_by_key(|ip| ip.parse().is_ok_and(tailscale::is_tailscale_ipv4));
         ips
@@ -312,6 +329,12 @@ impl LanService {
     async fn remember_peer_ip(&self, peer_id: &str, ip: &str) {
         let normalized = normalize_uuid(peer_id).unwrap_or_else(|| peer_id.to_string());
         let mut peers = self.discovered_peers.lock().await;
+        #[cfg(target_os = "windows")]
+        if ip.parse().is_ok_and(|ip| {
+            tailscale::is_tailscale_ipv4(ip) && windows_tailnet::binding_for(ip).is_none()
+        }) {
+            return;
+        }
         if let Some(peer) = peers.get_mut(&normalized) {
             peer.observe_route(ip);
             let _ = self.handle.emit("lan_peer_discovered", peer.clone());

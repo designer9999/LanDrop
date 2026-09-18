@@ -1,5 +1,14 @@
 # Automatic LanDrop discovery over Tailscale
 
+**Superseded decision, September 18:** the owner explicitly rejected an additional
+directory/server/setup-code requirement. The private-directory prototype was
+archived without installation or publication. Follow the
+[server-free Windows design and corrected evidence](windows-native-tailnet-discovery.md)
+instead. In particular, Windows host routes can provide candidates for bounded
+LanDrop probes; their inability to prove app presence does not make them useless
+for discovery. The text below is retained as the historical research record,
+not the active architecture or a statement of completed functionality.
+
 ## Executive assessment
 
 LanDrop can offer a LAN-like experience between colleagues on different home

@@ -51,11 +51,14 @@ the same LanDrop device are combined into one peer, with a visible route label.
 
 ### Using an existing Tailscale network
 
-Automatic Windows Tailscale discovery is temporarily disabled in 1.7.1 because
-status polling can affect Windows Tailscale profile lifecycle. LAN functionality
-remains available. See the [incident report](documentation/tailscale-incident-2026-09.md).
+The 1.8.0-beta.2 source restores automatic Windows discovery using native Windows
+route notifications and Tailscale's local DNS. No additional server, setup code,
+cloud token, or Windows Tailscale CLI/LocalAPI request is needed. This supersedes
+the 1.7.1 safety pause. See the [native design](documentation/windows-native-tailnet-discovery.md)
+for supported route shapes and the [verification record](documentation/releases/v1.8.0-beta.2.md)
+for what has actually been tested; source changes are not a published update.
 
-1. Run the updated LanDrop on both macOS or Linux desktops.
+1. Run the updated LanDrop on both Windows, macOS or Linux desktops.
 2. Keep both installed Tailscale clients connected to your existing tailnet.
 3. Allow the intended devices to connect on TCP **29171** in your tailnet policy
    and host firewalls.

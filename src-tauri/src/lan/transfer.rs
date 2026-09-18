@@ -64,15 +64,44 @@ impl ProgressThrottle {
 pub struct Connection {
     reader: Mutex<OwnedReadHalf>,
     writer: Mutex<OwnedWriteHalf>,
+    #[cfg(windows)]
+    tailnet_route: Option<(
+        std::net::Ipv4Addr,
+        Option<super::windows_tailnet::RouteBinding>,
+    )>,
 }
 
 impl Connection {
     fn from_stream(stream: TcpStream) -> Self {
+        #[cfg(windows)]
+        let tailnet_route = stream
+            .peer_addr()
+            .ok()
+            .and_then(|address| match address.ip() {
+                std::net::IpAddr::V4(ip) if super::tailscale::is_tailscale_ipv4(ip) => {
+                    Some((ip, super::windows_tailnet::binding_for(ip)))
+                }
+                _ => None,
+            });
         let (reader, writer) = stream.into_split();
         Self {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
+            #[cfg(windows)]
+            tailnet_route,
         }
+    }
+
+    /// Windows tailnet sockets must never continue under a stale adapter/profile
+    /// snapshot. This is route validation, not cryptographic UUID authentication.
+    pub(super) fn ensure_current_route(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        if let Some((ip, binding)) = self.tailnet_route {
+            if binding.is_none() || super::windows_tailnet::binding_for(ip) != binding {
+                return Err("Tailscale route changed; reconnect before sending again".into());
+            }
+        }
+        Ok(())
     }
 
     /// Accept incoming connection: read sender's UUID, send our UUID back.
@@ -149,11 +178,13 @@ impl Connection {
 
     pub async fn send_message(&self, msg: &Message) -> Result<(), String> {
         let mut w = self.writer.lock().await;
+        self.ensure_current_route()?;
         write_message(&mut w, msg).await?;
         time::timeout(CONTROL_IO_TIMEOUT, w.flush())
             .await
             .map_err(|_| "Timed out flushing control message".to_string())?
             .map_err(|e| format!("Failed to flush control message: {e}"))?;
+        self.ensure_current_route()?;
         Ok(())
     }
 
@@ -164,6 +195,7 @@ impl Connection {
     /// invalid message is an error.
     pub async fn recv_message(&self) -> Result<Option<Message>, String> {
         let mut r = self.reader.lock().await;
+        self.ensure_current_route()?;
         let mut len_buf = [0u8; 4];
 
         let first_byte_count = time::timeout(CONTROL_IO_TIMEOUT, r.read(&mut len_buf[..1]))
@@ -199,6 +231,7 @@ impl Connection {
         let message: Message =
             serde_json::from_slice(&buf).map_err(|e| format!("Invalid control message: {e}"))?;
         validate_message(&message)?;
+        self.ensure_current_route()?;
         Ok(Some(message))
     }
 
@@ -208,10 +241,12 @@ impl Connection {
         }
 
         let mut r = self.reader.lock().await;
+        self.ensure_current_route()?;
         let read = time::timeout(FILE_IDLE_TIMEOUT, r.read(buf))
             .await
             .map_err(|_| "File transfer timed out waiting for data".to_string())?
             .map_err(|e| format!("Failed to receive file data: {e}"))?;
+        self.ensure_current_route()?;
         if read == 0 {
             return Err("Peer closed the connection before the file was complete".into());
         }
@@ -286,6 +321,28 @@ async fn write_file_chunk(w: &mut OwnedWriteHalf, bytes: &[u8]) -> Result<(), St
 
 // ─── On-demand send functions ───
 
+/// Bind Windows tailnet traffic to the verified adapter's own source address.
+/// No system route, VPN setting, or Tailscale control API is changed here.
+async fn connect_stream(addr: SocketAddr) -> Result<TcpStream, String> {
+    #[cfg(windows)]
+    if let std::net::IpAddr::V4(ip) = addr.ip() {
+        if super::tailscale::is_tailscale_ipv4(ip) {
+            let binding = super::windows_tailnet::binding_for(ip)
+                .ok_or("No current Tailscale host route for this device")?;
+            let socket = tokio::net::TcpSocket::new_v4().map_err(|e| e.to_string())?;
+            socket
+                .bind(SocketAddr::from((binding.local_ipv4, 0)))
+                .map_err(|_| "Cannot bind the current Tailscale adapter")?;
+            let stream = socket.connect(addr).await.map_err(|e| e.to_string())?;
+            if super::windows_tailnet::binding_for(ip) != Some(binding) {
+                return Err("Tailscale route changed during connection".into());
+            }
+            return Ok(stream);
+        }
+    }
+    TcpStream::connect(addr).await.map_err(|e| e.to_string())
+}
+
 /// Establish and verify a route before any transfer payload is sent.
 pub async fn connect_to_peer(
     peer_ip: &str,
@@ -305,7 +362,7 @@ async fn connect_at(
     expected_peer_uuid: &[u8; 16],
 ) -> Result<Arc<Connection>, String> {
     time::timeout(Duration::from_secs(3), async {
-        let stream = TcpStream::connect(addr)
+        let stream = connect_stream(addr)
             .await
             .map_err(|e| format!("Cannot connect to {addr}: {e}"))?;
         Connection::from_outgoing(stream, my_uuid, expected_peer_uuid).await
@@ -330,7 +387,7 @@ pub async fn probe_peer_id(peer_ip: &str, my_uuid: &[u8; 16]) -> Result<String, 
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
 
     time::timeout(Duration::from_millis(700), async {
-        let mut stream = TcpStream::connect(addr)
+        let mut stream = connect_stream(addr)
             .await
             .map_err(|e| format!("Cannot connect to {}: {}", addr, e))?;
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
@@ -365,7 +422,7 @@ async fn probe_peer_info_at(
     my_uuid: &[u8; 16],
 ) -> Result<(String, String, String), String> {
     time::timeout(Duration::from_secs(3), async {
-        let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        let mut stream = connect_stream(addr).await?;
         stream.write_all(my_uuid).await.map_err(|e| e.to_string())?;
         let mut remote = [0; 16];
         stream
@@ -498,6 +555,7 @@ where
 
     // Use writer lock for atomic sends (no interleaving with concurrent operations)
     let mut w = conn.writer.lock().await;
+    conn.ensure_current_route()?;
 
     // Always send batch header so receiver knows what to expect
     write_message(&mut w, &Message::Batch { count: batch_count }).await?;
@@ -525,6 +583,7 @@ where
         let size = metadata.len();
 
         // Send dir marker
+        conn.ensure_current_route()?;
         if let Some(last_sep) = name.rfind('/') {
             let dir_part = &name[..last_sep];
             write_message(
@@ -562,7 +621,9 @@ where
                     remaining
                 ));
             }
+            conn.ensure_current_route()?;
             write_file_chunk(&mut w, &buf[..n]).await?;
+            conn.ensure_current_route()?;
             remaining -= n as u64;
             sent_bytes = sent_bytes
                 .checked_add(n as u64)
@@ -594,6 +655,7 @@ where
     }
 
     // Always send Done so receiver knows the transfer is complete
+    conn.ensure_current_route()?;
     write_message(&mut w, &Message::Done).await?;
     time::timeout(CONTROL_IO_TIMEOUT, w.flush())
         .await
@@ -1117,6 +1179,17 @@ mod tests {
             client.expect("connect loopback client"),
             accepted.expect("accept loopback client").0,
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(windows)]
+    async fn tailnet_session_without_current_route_rejects_io() {
+        let (stream, _peer) = tcp_pair().await;
+        let mut connection = Connection::from_stream(stream);
+        connection.tailnet_route = Some((Ipv4Addr::new(100, 64, 1, 1), None));
+        assert!(connection.send_message(&Message::Done).await.is_err());
+        assert!(connection.recv_message().await.is_err());
+        assert!(connection.recv_raw(&mut [0; 8]).await.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

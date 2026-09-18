@@ -1,5 +1,11 @@
 # LanDrop Windows performance audit
 
+September 18 implementation note: the new server-free Windows discovery provider
+has separate [native verification and limitations](documentation/releases/v1.8.0-beta.2.md).
+Its one-run provider classification timing is not an application-wide benchmark
+or a before/after comparison. The September 11 measurements below still describe
+the installed 1.7.1 safety build; they must not be attributed to the beta.
+
 Execution date: September 11, 2026. Source revision: `89c1016507e91bbc9cb114f2fe8b3d65a3361eb6`.
 Application: installed 1.7.1 Windows safety build. Mode: **audit-only**.
 Research status: **Partially verified**. Verdict: **Audit incomplete** for

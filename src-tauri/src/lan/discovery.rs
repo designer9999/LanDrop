@@ -352,6 +352,21 @@ impl DiscoveredPeer {
         }
         self.select_preferred_route();
     }
+
+    /// Inventory revocation is authoritative, independent of last probe time.
+    fn retain_tailnet_route(&mut self, eligible: &HashSet<Ipv4Addr>) -> bool {
+        if self
+            .tailscale_ip
+            .as_ref()
+            .is_some_and(|ip| ip.parse().map_or(true, |ip| !eligible.contains(&ip)))
+        {
+            self.tailscale_ip = None;
+            self.tailscale_seen = None;
+            self.select_preferred_route();
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -366,7 +381,9 @@ struct IncomingSessionContext<'a> {
     receive_routing: &'a ReceiveRoutingState,
     discovered_peers: &'a Mutex<HashMap<String, DiscoveredPeer>>,
     pending_removals: &'a Mutex<HashMap<String, (Instant, String, u16)>>,
+    #[cfg(not(target_os = "windows"))]
     tailnet_ips: &'a Mutex<HashSet<Ipv4Addr>>,
+    tailnet_hints: &'a tokio::sync::mpsc::Sender<Ipv4Addr>,
     alias_rx: &'a tokio::sync::watch::Receiver<String>,
     device_type: &'a str,
     cancel: &'a CancellationToken,
@@ -497,6 +514,7 @@ pub async fn run_discovery(
     type PendingRemovalMap = Arc<Mutex<HashMap<String, (Instant, String, u16)>>>;
     let pending_removals: PendingRemovalMap = Arc::new(Mutex::new(HashMap::new()));
     let tailnet_ips = Arc::new(Mutex::new(HashSet::new()));
+    let (tailnet_hints, tailnet_hint_rx) = tokio::sync::mpsc::channel(64);
 
     let cancel_mdns = cancel.clone();
     let handle_mdns = handle.clone();
@@ -713,6 +731,7 @@ pub async fn run_discovery(
     let my_uuid = identity.id_bytes();
     let peers_tcp = discovered_peers.clone();
     let pending_tcp = pending_removals.clone();
+    #[cfg(not(target_os = "windows"))]
     let tailnet_tcp = tailnet_ips.clone();
     let alias_tcp = alias_rx.clone();
     let device_type_tcp = identity.device_type.clone();
@@ -774,7 +793,9 @@ pub async fn run_discovery(
                     let receive_routing = receive_routing.clone();
                     let peers_ref = peers_tcp.clone();
                     let pending_ref = pending_tcp.clone();
+                    #[cfg(not(target_os = "windows"))]
                     let tailnet_ref = tailnet_tcp.clone();
+                    let tailnet_hints = tailnet_hints.clone();
                     let alias_ref = alias_tcp.clone();
                     let device_type = device_type_tcp.clone();
                     let cancel_session = cancel_tcp.clone();
@@ -786,7 +807,9 @@ pub async fn run_discovery(
                             receive_routing: &receive_routing,
                             discovered_peers: &peers_ref,
                             pending_removals: &pending_ref,
+                            #[cfg(not(target_os = "windows"))]
                             tailnet_ips: &tailnet_ref,
+                            tailnet_hints: &tailnet_hints,
                             alias_rx: &alias_ref,
                             device_type: &device_type,
                             cancel: &cancel_session,
@@ -902,6 +925,7 @@ pub async fn run_discovery(
         my_id.clone(),
         discovered_peers.clone(),
         tailnet_ips,
+        tailnet_hint_rx,
     ));
     let route_monitor = tokio::spawn(monitor_routes(
         handle.clone(),
@@ -923,6 +947,16 @@ pub async fn run_discovery(
     }
 }
 
+/// Incremental DNS classification may add candidates rapidly. Pure additions
+/// must not repeatedly cancel working probes; revocation always takes priority.
+fn inventory_preserves_sweep(
+    previous: &HashSet<Ipv4Addr>,
+    next: &Result<HashSet<Ipv4Addr>, String>,
+    same_generation: bool,
+) -> bool {
+    same_generation && next.as_ref().is_ok_and(|next| previous.is_subset(next))
+}
+
 async fn run_tailnet_discovery(
     handle: AppHandle,
     cancel: CancellationToken,
@@ -930,14 +964,21 @@ async fn run_tailnet_discovery(
     my_id: String,
     peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
     tailnet_ips: Arc<Mutex<HashSet<Ipv4Addr>>>,
+    mut hints: tokio::sync::mpsc::Receiver<Ipv4Addr>,
 ) {
     let mut schedule = tailscale::ProbeSchedule::default();
     let mut last_status = String::new();
-    loop {
-        let result = tokio::select! {
-            _ = cancel.cancelled() => break,
-            result = tailscale::online_peers() => result,
-        };
+    #[cfg(target_os = "windows")]
+    let mut unknown_window = (Instant::now(), 4_usize);
+    let inventory_cancel = cancel.child_token();
+    let (inventory_tx, mut inventory_rx) =
+        tokio::sync::watch::channel(Err("Checking installed Tailscale routes".to_string()));
+    let inventory_worker = tokio::spawn(tailscale::run_inventory(
+        inventory_cancel.clone(),
+        inventory_tx,
+    ));
+    'inventory: loop {
+        let result = inventory_rx.borrow_and_update().clone();
         let (ips, state, message) = match result {
             Ok(ips) => (
                 ips,
@@ -955,34 +996,103 @@ async fn run_tailnet_discovery(
             last_status = message;
         }
         *tailnet_ips.lock().await = ips.clone();
+        {
+            let mut peers = peers.lock().await;
+            peers.retain(|id, peer| {
+                if !peer.retain_tailnet_route(&ips) {
+                    return true;
+                }
+                if peer.ip.is_empty() {
+                    let _ = handle.emit("lan_peer_lost", serde_json::json!({"id": id}));
+                    false
+                } else {
+                    let _ = handle.emit("lan_peer_discovered", peer.clone());
+                    true
+                }
+            });
+        }
         let confirmed = peers
             .lock()
             .await
             .values()
             .filter_map(|peer| peer.tailscale_ip.as_ref()?.parse().ok())
             .collect();
-        let mut candidates = schedule
-            .select(&ips, &confirmed, Instant::now())
-            .into_iter();
+        #[cfg(target_os = "windows")]
+        let selected = {
+            if unknown_window.0.elapsed() >= tailscale::DISCOVERY_COOLDOWN {
+                unknown_window = (Instant::now(), 4);
+            }
+            schedule.select_admitted(&ips, &confirmed, Instant::now(), |ip| {
+                if !super::windows_tailnet::classification_unknown(ip) {
+                    return true;
+                }
+                if unknown_window.1 == 0 {
+                    return false;
+                }
+                unknown_window.1 -= 1;
+                true
+            })
+        };
+        #[cfg(not(target_os = "windows"))]
+        let selected = schedule.select(&ips, &confirmed, Instant::now());
+        let sweep_empty = selected.is_empty();
+        let mut candidates = selected.into_iter();
+        #[cfg(target_os = "windows")]
+        let sweep_generation = ips.iter().find_map(|ip| {
+            super::windows_tailnet::binding_for(*ip).map(|binding| binding.generation)
+        });
+        let mut inventory_pending = false;
         let mut probes = JoinSet::new();
         loop {
             while probes.len() < tailscale::PROBE_CONCURRENCY {
                 let Some(ip) = candidates.next() else {
                     break;
                 };
+                #[cfg(target_os = "windows")]
+                let binding = super::windows_tailnet::binding_for(ip);
                 probes.spawn(async move {
                     let result = super::transfer::probe_peer_info(&ip.to_string(), &my_uuid).await;
-                    (ip, result)
+                    #[cfg(target_os = "windows")]
+                    let result = if binding.is_some()
+                        && binding == super::windows_tailnet::binding_for(ip)
+                    {
+                        result
+                    } else {
+                        Err("Tailscale route changed during discovery".into())
+                    };
+                    #[cfg(target_os = "windows")]
+                    let generation = binding.map(|binding| binding.generation);
+                    #[cfg(not(target_os = "windows"))]
+                    let generation = None::<u64>;
+                    (ip, result, generation)
                 });
             }
             let result = tokio::select! {
-                _ = cancel.cancelled() => return,
+                biased;
+                _ = cancel.cancelled() => break 'inventory,
+                changed = inventory_rx.changed() => {
+                    if changed.is_err() { break 'inventory; }
+                    let next = inventory_rx.borrow_and_update().clone();
+                    #[cfg(target_os = "windows")]
+                    let same_generation = sweep_generation.is_some() && ips.iter().all(|ip| {
+                        super::windows_tailnet::binding_for(*ip).map(|binding| binding.generation)
+                            == sweep_generation
+                    });
+                    #[cfg(not(target_os = "windows"))]
+                    let same_generation = true;
+                    if inventory_preserves_sweep(&ips, &next, same_generation) {
+                        inventory_pending = true;
+                        continue;
+                    }
+                    // Dropping JoinSet aborts every old-generation probe.
+                    continue 'inventory;
+                },
                 result = probes.join_next() => result,
             };
             let Some(result) = result else {
                 break;
             };
-            let Ok((ip, result)) = result else {
+            let Ok((ip, result, _generation)) = result else {
                 continue;
             };
             let result = result.ok().filter(|(id, _, _)| id != &my_id);
@@ -992,6 +1102,16 @@ async fn run_tailnet_discovery(
             };
             let ip = ip.to_string();
             let mut peers = peers.lock().await;
+            #[cfg(target_os = "windows")]
+            if ip
+                .parse()
+                .ok()
+                .and_then(super::windows_tailnet::binding_for)
+                .map(|binding| binding.generation)
+                != _generation
+            {
+                continue;
+            }
             let peer = peers.entry(id.clone()).or_insert_with(|| {
                 DiscoveredPeer::new(id, alias.clone(), dtype.clone(), ip.clone())
             });
@@ -1002,13 +1122,53 @@ async fn run_tailnet_discovery(
             drop(peers);
             let _ = handle.emit("lan_peer_discovered", peer);
         }
-        // Sleep after all work finishes, including status failures. An interval
-        // can become overdue during a slow sweep and otherwise restart at once.
+        if inventory_pending {
+            continue;
+        }
+        let confirmed = peers
+            .lock()
+            .await
+            .values()
+            .filter_map(|peer| peer.tailscale_ip.as_ref()?.parse().ok())
+            .collect();
+        let delay = if sweep_empty {
+            tailscale::DISCOVERY_COOLDOWN
+        } else {
+            schedule.retry_delay(&ips, &confirmed, Instant::now())
+        };
+        // No periodic Windows OS inventory read. This timer only schedules
+        // bounded app-presence retries, because starting LanDrop need not
+        // change the already-connected friend's OS route.
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => break,
-            _ = time::sleep(tailscale::DISCOVERY_COOLDOWN) => {}
+            changed = inventory_rx.changed() => {
+                if changed.is_err() { break; }
+            },
+            Some(ip) = hints.recv() => {
+                if ips.contains(&ip) && !confirmed.contains(&ip) {
+                    schedule.request_probe(ip, Instant::now());
+                }
+            },
+            _ = time::sleep(delay), if !ips.is_empty() => {}
         }
     }
+    inventory_cancel.cancel();
+    let _ = inventory_worker.await;
+    tailnet_ips.lock().await.clear();
+    let empty = HashSet::new();
+    peers.lock().await.retain(|id, peer| {
+        if !peer.retain_tailnet_route(&empty) {
+            return true;
+        }
+        if peer.ip.is_empty() {
+            let _ = handle.emit("lan_peer_lost", serde_json::json!({"id": id}));
+            false
+        } else {
+            let _ = handle.emit("lan_peer_discovered", peer.clone());
+            true
+        }
+    });
     let _ = handle.emit(
         "tailscale_status",
         serde_json::json!({"state":"stopped", "message":"Discovery stopped"}),
@@ -1090,9 +1250,22 @@ async fn handle_incoming_session(
         .map_err(|e| format!("Failed to read peer address: {}", e))?;
     let sender_ip = sender_addr.ip().to_string();
 
+    #[cfg(target_os = "windows")]
+    let allowed_tailnet = match (stream.local_addr().map(|addr| addr.ip()), sender_addr.ip()) {
+        (Ok(IpAddr::V4(local)), IpAddr::V4(remote)) => {
+            super::windows_tailnet::inbound_allowed(local, remote)
+        }
+        _ => false,
+    };
+    #[cfg(not(target_os = "windows"))]
     let allowed_tailnet = match sender_addr.ip() {
         IpAddr::V4(ip) => context.tailnet_ips.lock().await.contains(&ip),
         _ => false,
+    };
+    #[cfg(target_os = "windows")]
+    let incoming_binding = match sender_addr.ip() {
+        IpAddr::V4(ip) if allowed_tailnet => super::windows_tailnet::binding_for(ip),
+        _ => None,
     };
     if !is_current_lan_peer_ip(&sender_ip) && !allowed_tailnet {
         return Err(format!(
@@ -1101,11 +1274,28 @@ async fn handle_incoming_session(
     }
 
     let (conn, sender_id) = Connection::from_incoming(stream, my_uuid).await?;
+    #[cfg(target_os = "windows")]
+    let check_tailnet_binding = || -> Result<(), String> {
+        if allowed_tailnet {
+            let current = match sender_addr.ip() {
+                IpAddr::V4(ip) => super::windows_tailnet::binding_for(ip),
+                _ => None,
+            };
+            if incoming_binding.is_none() || incoming_binding != current {
+                return Err("Tailscale route changed during incoming session".into());
+            }
+        }
+        Ok(())
+    };
+    #[cfg(target_os = "windows")]
+    check_tailnet_binding()?;
     // Probes must never manufacture a visible sender: a UUID handshake does
     // not prove that the initiating device has a running listener.
     let first_message = match conn.recv_message().await? {
         None => return Ok(()),
         Some(super::protocol::Message::Discover) => {
+            #[cfg(target_os = "windows")]
+            check_tailnet_binding()?;
             let alias = context.alias_rx.borrow().clone();
             conn.send_message(&super::protocol::Message::Identity {
                 app: "LanDrop".into(),
@@ -1113,6 +1303,14 @@ async fn handle_incoming_session(
                 device_type: context.device_type.to_string(),
             })
             .await?;
+            // A bounded reciprocal hint makes app startup visible even when
+            // the friend's Tailscale route existed throughout our backoff.
+            // Only a successful reverse listener probe can publish the peer.
+            if allowed_tailnet {
+                if let IpAddr::V4(ip) = sender_addr.ip() {
+                    let _ = context.tailnet_hints.try_send(ip);
+                }
+            }
             return Ok(());
         }
         Some(super::protocol::Message::Identity { .. }) => {
@@ -1148,6 +1346,8 @@ async fn handle_incoming_session(
     // Always update the IP — mDNS might have stale data or never discovered them.
     let sender_alias = {
         let mut peers = context.discovered_peers.lock().await;
+        #[cfg(target_os = "windows")]
+        check_tailnet_binding()?;
         if context.cancel.is_cancelled() {
             return Err("Discovery stopped before the incoming session started".into());
         }
@@ -1187,6 +1387,8 @@ async fn handle_incoming_session(
             None if allow_legacy_text_eof => return Ok(()),
             None => return Err("Peer closed the session before sending Done".into()),
         };
+        #[cfg(target_os = "windows")]
+        check_tailnet_binding()?;
         received_control_message = true;
 
         match msg {
@@ -1360,6 +1562,49 @@ mod tests {
         peer.forget_route_before("100.100.1.2", std::time::Instant::now());
         assert!(peer.ip.is_empty());
         assert!(peer.route_ips().is_empty());
+    }
+
+    #[test]
+    fn inventory_revocation_preserves_lan_and_never_creates_visible_peers() {
+        let mut peer = DiscoveredPeer::new(
+            "device-id".into(),
+            "Colleague".into(),
+            "desktop".into(),
+            "192.168.1.2".into(),
+        );
+        peer.observe_route("100.100.1.2");
+        let eligible = std::collections::HashSet::from([Ipv4Addr::new(100, 100, 1, 2)]);
+        assert!(!peer.retain_tailnet_route(&eligible));
+        assert!(peer.retain_tailnet_route(&std::collections::HashSet::new()));
+        assert_eq!(peer.ip, "192.168.1.2");
+        assert_eq!(peer.network, "lan");
+        assert!(peer.tailscale_ip.is_none());
+        assert!(!peer.retain_tailnet_route(&eligible));
+        assert!(peer.tailscale_ip.is_none());
+        peer.forget_route_before("192.168.1.2", std::time::Instant::now());
+        peer.observe_route("100.100.1.2");
+        assert!(peer.retain_tailnet_route(&std::collections::HashSet::new()));
+        assert!(peer.ip.is_empty());
+    }
+
+    #[test]
+    fn incremental_additions_preserve_sweep_but_revocation_never_does() {
+        let first = Ipv4Addr::new(100, 64, 0, 1);
+        let second = Ipv4Addr::new(100, 64, 0, 2);
+        let before = std::collections::HashSet::from([first]);
+        let added = Ok(std::collections::HashSet::from([first, second]));
+        assert!(super::inventory_preserves_sweep(&before, &added, true));
+        assert!(!super::inventory_preserves_sweep(&before, &added, false));
+        assert!(!super::inventory_preserves_sweep(
+            &before,
+            &Ok(std::collections::HashSet::from([second])),
+            true
+        ));
+        assert!(!super::inventory_preserves_sweep(
+            &before,
+            &Err("disconnected".into()),
+            true
+        ));
     }
 
     #[test]
