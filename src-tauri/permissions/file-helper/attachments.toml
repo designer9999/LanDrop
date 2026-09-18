@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-open-file"
+description = "Open an app-owned attachment through the Android FileProvider."
+commands.allow = ["openFile"]
+
+[[permission]]
+identifier = "allow-save-to-downloads"
+description = "Export an app-owned attachment through MediaStore or the system save picker."
+commands.allow = ["saveToDownloads"]
+
+[[permission]]
+identifier = "allow-get-file-name"
+description = "Read the display name of a user-selected content URI."
+commands.allow = ["getFileName"]

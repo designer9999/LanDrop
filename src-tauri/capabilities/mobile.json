@@ -5,6 +5,9 @@
   "platforms": ["android"],
   "windows": ["main"],
   "permissions": [
+    "file-helper:allow-open-file",
+    "file-helper:allow-save-to-downloads",
+    "file-helper:allow-get-file-name",
     "fs:allow-read",
     "fs:allow-read-file",
     "fs:allow-write",
