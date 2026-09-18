@@ -1,34 +1,42 @@
 # LanDrop application icon
 
-`landrop-icon.png` is the generated master. The built-in image-generation tool
-created it; the image tool selects its model, so no unverified model-version claim
-is made. A second built-in edit requested perimeter/alpha cleanup. The result was
-copied into this repository before generating the platform assets.
+`landrop-icon.png` is the orange/cream speed-folder master supplied and approved
+by the owner on 2026-09-18. The source picture contained an opaque checkerboard.
+The built-in image-generation skill prepared genuine alpha and the edge-to-edge
+crop demonstrated by the owner's second screenshot. This is an image-tool edit,
+not a claim of pixel-identical extraction. No separate logo was designed.
 
-Final generation prompt:
+Final accepted preparation prompt:
 
-> Create one production square desktop icon for LanDrop, a local and Tailscale
-> file-and-message sharing app. Use a bold integrated droplet and two-way transfer
-> symbol, readable at small sizes; contemporary Windows Fluent and Material 3
-> compatible, softly rounded geometry, subtle layered depth, crisp edges, purple
-> brand family and a light contrasting mark. One centered icon, approximately 84%
-> canvas coverage, consistent transparent padding; rounded purple tile allowed.
-> No words, letters, badges, mockups, frames, watermarks, tiny details, excessive
-> glow, or scene background.
+> Use the original approved orange/cream speed-folder artwork and the owner's
+> tight-crop screenshot. Zero outer margin: the orange rounded-square tile touches
+> all four canvas edges at their midpoints. Only the rounded corners are truly
+> transparent. Preserve the folder, speed lines, colors and grain; no checkerboard,
+> extra border, shadow, padding, particles or redesign.
 
-Final edit instruction:
+The tool selects its model; no unverified model-version claim is made. Earlier
+padded/extraction attempts were rejected and are not application assets.
 
-> Preserve the tile, white folded droplet, opposing arrows, proportions, and colors.
-> Clean only the alpha/background and outer perimeter; remove stray colored
-> pixels outside the tile, retain genuinely transparent padding and smooth edges.
+## Reproduction
 
-Regenerate platform assets with the repository's pinned Tauri CLI:
+Run with Windows Node and the project's installed pinned Tauri CLI:
 
-```sh
-npm run tauri -- icon assets/branding/landrop-icon.png --output /path/to/icon-output
+```powershell
+powershell -NoProfile -File scripts/Update-LanDropIcons.ps1
 ```
 
-Copy the desktop PNG/ICO/ICNS outputs to `src-tauri/icons/`, and the 128px PNG to
-`public/app-icon.png`. Mobile exports are not automatically copied into Android
-or iOS projects. This release is desktop-first and does not change the Android
-signing migration requirement.
+If the Windows dependency tree lives in a separate native staging project,
+pass `-CliProjectPath <Windows-project-path>`. The script checks the master,
+generates in an isolated temporary directory, preflights all expected outputs,
+and updates desktop PNG/ICO/ICNS, the in-app PNG, and existing Android launcher
+PNGs. Intermediate output is retained; signing and unrelated native configuration
+are untouched.
+
+The executable, installer/uninstaller and shortcuts use the bundled ICO. The tray
+uses an embedded full-canvas 64px PNG, not a padded preview. Windows toasts and
+in-app branding share the same 128px image. Android status notifications use the
+matching monochrome speed-folder vector because that surface requires a mask.
+
+The generated ICO includes 16/24/32/48/64/256px frames. Tauri's tray RGBA path uses
+one image, so this is not a claim of individual tray frame selection at every DPI.
+See [production research and coverage](../../documentation/icon-production.md).

@@ -134,11 +134,10 @@ pub fn run() {
                     .item(&quit)
                     .build()?;
 
-                // Use embedded window icon — file paths break in AppImage (read-only mount)
-                let icon = app
-                    .default_window_icon()
-                    .cloned()
-                    .ok_or("No bundled window icon — tray cannot start")?;
+                // Dedicated full-canvas 64px artwork avoids inheriting launcher
+                // padding and provides enough source pixels up to 400% Windows
+                // tray scaling. Embed it: runtime paths break in AppImage.
+                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/64x64.png"))?;
 
                 let _tray = TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
@@ -224,4 +223,49 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running LanDrop");
+}
+
+#[cfg(test)]
+mod icon_tests {
+    #[test]
+    fn tray_artwork_fills_canvas_and_has_transparent_corners() {
+        let icon = image::load_from_memory(include_bytes!("../icons/64x64.png"))
+            .expect("tray PNG must decode")
+            .to_rgba8();
+        assert_eq!(icon.dimensions(), (64, 64));
+        for (x, y) in [(0, 0), (63, 0), (0, 63), (63, 63)] {
+            assert!(icon.get_pixel(x, y)[3] < 16, "corner must be transparent");
+        }
+        for (x, y) in [(32, 0), (32, 63), (0, 32), (63, 32)] {
+            let pixel = icon.get_pixel(x, y);
+            assert!(pixel[3] >= 240, "tile must reach every canvas edge");
+            assert!(pixel[0] > 200 && pixel[1] < 130 && pixel[2] < 80);
+        }
+        assert_eq!(
+            include_bytes!("../icons/128x128.png").as_slice(),
+            include_bytes!("../../public/app-icon.png").as_slice(),
+            "in-app and native notification branding must match"
+        );
+    }
+
+    #[test]
+    fn windows_icon_includes_small_and_large_frames() {
+        let bytes = include_bytes!("../icons/icon.ico");
+        assert_eq!(&bytes[..4], &[0, 0, 1, 0]);
+        let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        assert!(bytes.len() >= 6 + count * 16);
+        let dimensions: Vec<u16> = (0..count)
+            .map(|index| {
+                let entry = 6 + index * 16;
+                assert_eq!(bytes[entry], bytes[entry + 1], "ICO frame must be square");
+                match bytes[entry] {
+                    0 => 256,
+                    size => u16::from(size),
+                }
+            })
+            .collect();
+        for required in [16, 24, 32, 48, 64, 256] {
+            assert!(dimensions.contains(&required), "missing {required}px frame");
+        }
+    }
 }
