@@ -5,6 +5,13 @@ a confirmed status-polling lifecycle problem. Windows LAN discovery, text, files
 and saved history remain available. Do not use the earlier 1.7.0 Windows build for
 automatic Tailscale discovery. See the [incident report](tailscale-incident-2026-09.md).
 
+For the researched replacement design, see
+[Automatic LanDrop discovery over Tailscale](tailscale-discovery-design.md).
+It explains why remote connectivity does not automatically carry LAN discovery,
+compares safe alternatives, and specifies the proposed event-driven directory.
+That replacement is not implemented or deployed yet; the Windows safety guard
+remains in place.
+
 macOS and Linux can discover other running LanDrop desktops through an existing
 Tailscale network using the standard installed client. Discovery uses IPv4.
 

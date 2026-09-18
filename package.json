@@ -2,7 +2,7 @@
   "name": "landrop",
   "private": true,
   "version": "1.7.1",
-  "packageManager": "pnpm@12.4.1",
+  "packageManager": "pnpm@12.4.2",
   "type": "module",
   "engines": {
     "node": "24.x"
