@@ -145,8 +145,14 @@ npm run tauri build
 Build an Android arm64 APK (Android SDK, NDK r27, and JDK 17 are required):
 
 ```bash
-npm run tauri android build -- --target aarch64 --apk
+npx tauri android build --target aarch64 --apk -- --locked --config "$PWD/src-tauri/.cargo/config.toml"
 ```
+
+Run from the repository root. The explicit absolute Cargo configuration also
+reaches Gradle's second Rust compilation, preserving the required 16 KB Android
+linker settings when npm changes the working directory. The packaged APK must
+still pass the ELF and ZIP alignment gates; a successful compile alone is not
+enough.
 
 ## Releasing
 

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import { selectArm64Libraries, verifyReadelf } from "./Verify-AndroidElfAlignment.mjs";
+
+test("release build forwards the source Cargo config through both Android compilations", () => {
+  const workflow = fs.readFileSync(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const step = workflow.split("- name: Build Android APK")[1]?.split("- name:")[0];
+  assert(step, "Android release build step is missing");
+  assert.match(step, /-- --locked --config "\$PWD\/src-tauri\/\.cargo\/config\.toml"/);
+});
 
 const valid = `ELF Header:
   Class:                             ELF64

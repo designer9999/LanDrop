@@ -479,7 +479,10 @@ jobs:
       - name: Build Android APK
         # Tauri automatically merges tauri.android.conf.json for this target,
         # including both the application package and generated Rust JNI names.
-        run: npx tauri android build --target aarch64 --apk --ci -- --locked
+        # Gradle invokes npm from the package root; Cargo's second invocation
+        # otherwise misses src-tauri/.cargo. Forward the immutable source config
+        # explicitly to both compilations, preserving Tauri's own Android flags.
+        run: npx tauri android build --target aarch64 --apk --ci -- --locked --config "$PWD/src-tauri/.cargo/config.toml"
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
