@@ -20,6 +20,9 @@ src-tauri/keys/landrop.key
 # Android keystores
 *.keystore
 *.jks
+*.p12
+*.pfx
+*.dpapi
 
 # OS
 .DS_Store

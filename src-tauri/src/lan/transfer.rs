@@ -692,7 +692,24 @@ pub async fn receive_file(
     handle: Option<&AppHandle>,
 ) -> Result<String, String> {
     let safe_name = sanitize_relative_path(name);
-    let base_dir = resolve_receive_base_dir(out_folder, sort_by_date);
+    #[cfg(target_os = "android")]
+    let default_dir = if out_folder.is_empty() {
+        use tauri::Manager;
+        Some(
+            handle
+                .ok_or("Android receive storage is unavailable")?
+                .path()
+                .app_data_dir()
+                .map_err(|_| "Android receive storage is unavailable")?
+                .join("files")
+                .join("received"),
+        )
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "android"))]
+    let default_dir: Option<PathBuf> = None;
+    let base_dir = resolve_receive_base_dir(out_folder, sort_by_date, default_dir.as_deref())?;
     let desired_out_path = base_dir.join(&safe_name);
     let parent = desired_out_path
         .parent()
@@ -1110,42 +1127,47 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn dirs_next_downloads() -> String {
-    // On Android, directories crate doesn't work — use the standard shared Downloads path
-    #[cfg(target_os = "android")]
-    {
-        let android_dl = "/storage/emulated/0/Download/LanDrop";
-        let _ = std::fs::create_dir_all(android_dl);
-        return android_dl.to_string();
-    }
-
-    #[cfg(not(target_os = "android"))]
-    {
-        if let Some(user_dirs) = directories::UserDirs::new() {
-            if let Some(downloads) = user_dirs.download_dir() {
-                return downloads.to_string_lossy().to_string();
-            }
-            // Linux fallback: ~/Downloads if XDG_DOWNLOAD_DIR isn't set
-            // (xdg-user-dirs isn't installed on minimal distros like Arch)
-            let fallback = user_dirs.home_dir().join("Downloads");
-            let _ = std::fs::create_dir_all(&fallback);
-            return fallback.to_string_lossy().to_string();
+    if let Some(user_dirs) = directories::UserDirs::new() {
+        if let Some(downloads) = user_dirs.download_dir() {
+            return downloads.to_string_lossy().to_string();
         }
-        // Last resort: HOME env var (current_dir is read-only inside AppImage mount)
-        if let Ok(home) = std::env::var("HOME") {
-            let fallback = std::path::PathBuf::from(home).join("Downloads");
-            let _ = std::fs::create_dir_all(&fallback);
-            return fallback.to_string_lossy().to_string();
-        }
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
+        // Linux fallback: ~/Downloads if XDG_DOWNLOAD_DIR isn't set
+        // (xdg-user-dirs isn't installed on minimal distros like Arch)
+        let fallback = user_dirs.home_dir().join("Downloads");
+        let _ = std::fs::create_dir_all(&fallback);
+        return fallback.to_string_lossy().to_string();
     }
+    // Last resort: HOME env var (current_dir is read-only inside AppImage mount)
+    if let Ok(home) = std::env::var("HOME") {
+        let fallback = std::path::PathBuf::from(home).join("Downloads");
+        let _ = std::fs::create_dir_all(&fallback);
+        return fallback.to_string_lossy().to_string();
+    }
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string())
 }
 
-fn resolve_receive_base_dir(out_folder: &str, sort_by_date: bool) -> PathBuf {
+fn resolve_receive_base_dir(
+    out_folder: &str,
+    sort_by_date: bool,
+    default_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
     let mut base_dir = if out_folder.is_empty() {
-        PathBuf::from(dirs_next_downloads())
+        if let Some(directory) = default_dir {
+            directory.to_owned()
+        } else {
+            #[cfg(target_os = "android")]
+            {
+                return Err("Android receive storage is unavailable".into());
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                PathBuf::from(dirs_next_downloads())
+            }
+        }
     } else {
         PathBuf::from(out_folder)
     };
@@ -1155,7 +1177,7 @@ fn resolve_receive_base_dir(out_folder: &str, sort_by_date: bool) -> PathBuf {
         base_dir = base_dir.join(date_folder);
     }
 
-    base_dir
+    Ok(base_dir)
 }
 
 #[cfg(test)]
@@ -1570,9 +1592,12 @@ mod tests {
         let root = test_directory("base-dir");
         let folder = root.to_string_lossy().into_owned();
 
-        assert_eq!(resolve_receive_base_dir(&folder, false), root);
+        assert_eq!(
+            resolve_receive_base_dir(&folder, false, None).unwrap(),
+            root
+        );
 
-        let dated = resolve_receive_base_dir(&folder, true);
+        let dated = resolve_receive_base_dir(&folder, true, None).unwrap();
         assert_eq!(dated.parent(), Some(root.as_path()));
         let date_folder = dated
             .file_name()
@@ -1587,7 +1612,20 @@ mod tests {
         assert!(parts[2].len() == 4 && parts[2].chars().all(|c| c.is_ascii_digit()));
 
         // An empty folder falls back to the platform Downloads directory.
-        assert!(!resolve_receive_base_dir("", false).as_os_str().is_empty());
+        #[cfg(not(target_os = "android"))]
+        assert!(!resolve_receive_base_dir("", false, None)
+            .unwrap()
+            .as_os_str()
+            .is_empty());
+        let private = root.join("files").join("received");
+        assert_eq!(
+            resolve_receive_base_dir("", false, Some(&private)).unwrap(),
+            private
+        );
+        assert_eq!(
+            resolve_receive_base_dir(&folder, false, Some(&private)).unwrap(),
+            root
+        );
     }
 
     #[test]

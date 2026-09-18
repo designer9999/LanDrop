@@ -64,7 +64,10 @@ pub fn run() {
         builder = builder.plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("file-helper")
                 .setup(|_app, api| {
-                    api.register_android_plugin("com.landrop.app", "FileHelperPlugin")?;
+                    api.register_android_plugin(
+                        "io.github.designer9999.landrop",
+                        "FileHelperPlugin",
+                    )?;
                     Ok(())
                 })
                 .build(),

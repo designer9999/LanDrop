@@ -18,6 +18,12 @@
           "path": "$APPCACHE/**"
         },
         {
+          "path": "$APPDATA/files/media_history/**"
+        },
+        {
+          "path": "$APPDATA/files/received/**"
+        },
+        {
           "path": "$DOWNLOAD/**"
         },
         {

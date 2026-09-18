@@ -1,0 +1,8 @@
+# Android NDK r27 requires both flags for 16 KiB-compatible LOAD and RELRO
+# alignment. Scope them to the shipped Android ABI; desktop linking is unchanged.
+# https://developer.android.com/guide/practices/page-sizes
+[target.aarch64-linux-android]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]

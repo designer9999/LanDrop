@@ -1,4 +1,4 @@
-package com.landrop.app
+package io.github.designer9999.landrop
 
 import android.app.Notification
 import android.app.NotificationChannel

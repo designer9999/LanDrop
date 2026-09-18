@@ -171,8 +171,16 @@ export async function openUrl(url: string): Promise<void> {
 }
 
 export async function downloadFile(path: string): Promise<string> {
-  // Files received from LAN are already at /storage/emulated/0/Download/LanDrop/
-  // Copy to standard Downloads so it shows in gallery and file manager
+  if (isMobile()) {
+    // Android owns scoped-storage export. Never materialize the entire file in
+    // JS or ask for broad storage access just to save a received attachment.
+    const result = await invoke<{ savedPath: string }>("plugin:file-helper|saveToDownloads", {
+      path,
+    });
+    if (!result.savedPath) throw new Error("Android did not return a saved destination");
+    return result.savedPath;
+  }
+  // Legacy non-mobile caller path; Android always uses native export above.
   const { readFile, writeFile, mkdir, exists } = await import("@tauri-apps/plugin-fs");
   const name = fileNameFromPath(path, "file");
 

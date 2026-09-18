@@ -305,11 +305,36 @@ jobs:
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      ANDROID_BUILD_TOOLS_VERSION: "36.0.0"
+      ANDROID_APPLICATION_ID: io.github.designer9999.landrop
+      # Public fingerprint of the exposed historical signer. Never trust it again.
+      ANDROID_REVOKED_CERT_SHA256: D55EE2D0DBBC31BDB14FAD8BB15D0C9104F829F0D169AA8AFD53E4598C996CB9
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
+      - name: Preflight private Android signing material
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_EXPECTED_CERT_SHA256; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required Android signing secret: $name" >&2
+              exit 1
+            fi
+          done
+          EXPECTED_CERT=$(printf '%s' "$ANDROID_EXPECTED_CERT_SHA256" | tr '[:lower:]' '[:upper:]' | tr -d ':[:space:]')
+          [[ "$EXPECTED_CERT" =~ ^[0-9A-F]{64}$ ]]
+          test "$EXPECTED_CERT" != "$ANDROID_REVOKED_CERT_SHA256"
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -323,8 +348,51 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Verify new Android identity and signing certificate before build
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/landrop-release.jks"
+          trap 'rm -f -- "$RUNNER_TEMP/landrop-release.jks" "$RUNNER_TEMP/landrop-release-cert.der"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_PATH"
+          test -s "$ANDROID_KEYSTORE_PATH"
+          keytool -exportcert -alias "$ANDROID_KEY_ALIAS" \
+            -keystore "$ANDROID_KEYSTORE_PATH" \
+            -storepass:env ANDROID_KEYSTORE_PASSWORD \
+            -file "$RUNNER_TEMP/landrop-release-cert.der" >/dev/null
+          ACTUAL_CERT=$(sha256sum "$RUNNER_TEMP/landrop-release-cert.der" | awk '{ print toupper($1) }')
+          EXPECTED_CERT=$(printf '%s' "$ANDROID_EXPECTED_CERT_SHA256" | tr '[:lower:]' '[:upper:]' | tr -d ':[:space:]')
+          [[ "$ACTUAL_CERT" =~ ^[0-9A-F]{64}$ ]]
+          test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+          test "$ACTUAL_CERT" != "$ANDROID_REVOKED_CERT_SHA256"
+
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          const base = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+          const android = JSON.parse(fs.readFileSync("src-tauri/tauri.android.conf.json", "utf8"));
+          assert.equal(base.identifier, "com.landrop.app", "Desktop identity must remain unchanged");
+          assert.equal(android.identifier, process.env.ANDROID_APPLICATION_ID, "Android platform override must use the new identity");
+          assert.equal(android.version ?? base.version, process.env.GITHUB_REF_NAME.slice(1), "Android config version must match the tag");
+          NODE
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+
+      - name: Install pinned Android Build Tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install "build-tools;$ANDROID_BUILD_TOOLS_VERSION" "platforms;android-36"
+          for tool in aapt apksigner zipalign; do
+            test -x "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_VERSION/$tool"
+          done
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -349,11 +417,37 @@ jobs:
         run: npm ci
 
       - name: Build Android APK
+        # Tauri automatically merges tauri.android.conf.json for this target,
+        # including both the application package and generated Rust JNI names.
         run: npx tauri android build --target aarch64 --apk --ci -- --locked
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Require private Android signing material
+      - name: Test Android release Kotlin helpers
+        shell: bash
+        env:
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          bash src-tauri/gen/android/gradlew --no-daemon \
+            -p src-tauri/gen/android \
+            :app:testArm64ReleaseUnitTest -x :app:rustBuildArm64Release
+
+      - name: Verify packaged Android ELF 16-KB alignment
+        shell: bash
+        env:
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          node --test scripts/Verify-AndroidElfAlignment.test.mjs
+          mapfile -d '' -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*release-unsigned.apk" -print0)
+          test "${#APKS[@]}" -eq 1
+          node scripts/Verify-AndroidElfAlignment.mjs \
+            --apk "${APKS[0]}" \
+            --readelf "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --jar "$JAVA_HOME/bin/jar"
+
+      - name: Sign and verify Android APK
+        shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -361,24 +455,42 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
         run: |
-          test -n "$ANDROID_KEYSTORE_BASE64"
-          test -n "$ANDROID_KEYSTORE_PASSWORD"
-          test -n "$ANDROID_KEY_ALIAS"
-          test -n "$ANDROID_KEY_PASSWORD"
-          test -n "$ANDROID_EXPECTED_CERT_SHA256"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/landrop-release.jks"
-          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/landrop-release.jks" >> "$GITHUB_ENV"
-
-      - name: Sign and verify Android APK
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
-        run: |
-          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*release-unsigned.apk" -print -quit)
-          test -n "$APK"
-          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+          set -euo pipefail
+          mapfile -d '' -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*release-unsigned.apk" -print0)
+          if [ "${#APKS[@]}" -ne 1 ]; then
+            echo "Expected exactly one unsigned Android release APK" >&2
+            exit 1
+          fi
+          APK="${APKS[0]}"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_VERSION"
+          export BADGING_PATH="$RUNNER_TEMP/landrop-apk-badging.txt"
+          "$BUILD_TOOLS/aapt" dump badging "$APK" > "$BADGING_PATH"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          const badging = fs.readFileSync(process.env.BADGING_PATH, "utf8");
+          const packageLine = badging.split(/\r?\n/).find(line => line.startsWith("package: ")) ?? "";
+          const attributes = Object.fromEntries([...packageLine.matchAll(/(\w+)='([^']*)'/g)].map(match => [match[1], match[2]]));
+          const version = process.env.GITHUB_REF_NAME.slice(1);
+          assert.match(version, /^\d+\.\d+\.\d+$/);
+          const [major, minor, patch] = version.split(".").map(Number);
+          const versionCode = major * 1000000 + minor * 1000 + patch;
+          assert(Number.isSafeInteger(versionCode) && versionCode > 0 && versionCode <= 2100000000);
+          assert.equal(attributes.name, process.env.ANDROID_APPLICATION_ID, "APK uses the wrong Android identity");
+          assert.equal(attributes.versionName, version, "APK versionName does not match the release tag");
+          assert.equal(attributes.versionCode, String(versionCode), "APK versionCode does not match the Tauri version mapping");
+          assert.match(badging, /^sdkVersion:'24'$/m);
+          assert.match(badging, /^targetSdkVersion:'36'$/m);
+          assert.match(badging, /^native-code: 'arm64-v8a'\s*$/m);
+          assert(!/^application-debuggable/m.test(badging), "A debuggable APK must not be released");
+          NODE
+          # Private material exists only during preflight/signing, not while
+          # dependency installers or the application build run.
+          umask 077
+          ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/landrop-release.jks"
+          trap 'rm -f -- "$RUNNER_TEMP/landrop-release.jks" "$RUNNER_TEMP/landrop-release-cert.der"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_PATH"
+          test -s "$ANDROID_KEYSTORE_PATH"
           "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 "$APK" landrop-android-arm64-aligned.apk
           "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 landrop-android-arm64-aligned.apk
           "$BUILD_TOOLS/apksigner" sign \
@@ -389,13 +501,25 @@ jobs:
             --out landrop-android-arm64-release.apk \
             landrop-android-arm64-aligned.apk
           "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 landrop-android-arm64-release.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose landrop-android-arm64-release.apk
-          ACTUAL_CERT=$("$BUILD_TOOLS/apksigner" verify --print-certs landrop-android-arm64-release.apk \
-            | awk -F': ' '/Signer #1 certificate SHA-256 digest/ { print toupper($2); exit }' \
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs landrop-android-arm64-release.apk \
+            > "$RUNNER_TEMP/landrop-apk-signature.txt"
+          SIGNER_COUNT=$(awk '/^Signer #[0-9]+ certificate SHA-256 digest: / { count++ } END { print count+0 }' "$RUNNER_TEMP/landrop-apk-signature.txt")
+          test "$SIGNER_COUNT" = "1"
+          ACTUAL_CERT=$(awk -F': ' '/^Signer #1 certificate SHA-256 digest: / { print toupper($2) }' "$RUNNER_TEMP/landrop-apk-signature.txt" \
             | tr -d ':[:space:]')
           EXPECTED_CERT=$(printf '%s' "$ANDROID_EXPECTED_CERT_SHA256" | tr '[:lower:]' '[:upper:]' | tr -d ':[:space:]')
-          test -n "$ACTUAL_CERT"
+          [[ "$ACTUAL_CERT" =~ ^[0-9A-F]{64}$ ]]
           test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+          test "$ACTUAL_CERT" != "$ANDROID_REVOKED_CERT_SHA256"
+          "$BUILD_TOOLS/aapt" dump badging landrop-android-arm64-release.apk > "$RUNNER_TEMP/landrop-apk-signed-badging.txt"
+          cmp "$BADGING_PATH" "$RUNNER_TEMP/landrop-apk-signed-badging.txt"
+          echo "Verified new Android identity, release version, arm64 ABI, alignment and approved signer"
+
+      - name: Remove temporary Android signing material
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          rm -f -- "$RUNNER_TEMP/landrop-release.jks" "$RUNNER_TEMP/landrop-release-cert.der"
 
       - name: Upload Android APK to draft release
         uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1

@@ -117,6 +117,7 @@ pub fn handle_launch_args(app: &AppHandle, args: impl IntoIterator<Item = String
         }
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.show();
+            #[cfg(desktop)]
             let _ = window.unminimize();
             let _ = window.set_focus();
         }

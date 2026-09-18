@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-  <external-path name="my_images" path="." />
-  <cache-path name="my_cache_images" path="." />
+  <files-path name="received" path="received/" />
+  <files-path name="media_history" path="media_history/" />
+  <cache-path name="send_cache" path="send_cache/" />
 </paths>
