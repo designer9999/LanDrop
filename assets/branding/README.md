@@ -32,6 +32,19 @@ and updates desktop PNG/ICO/ICNS, the in-app PNG, and existing Android launcher
 PNGs. Intermediate output is retained; signing and unrelated native configuration
 are untouched.
 
+The pinned Tauri CLI 2.11.4 has an upstream Android HDPI table error: it emits
+49px launcher images instead of the required 72px (48dp at 1.5×). The script repairs
+those two variants by using the same CLI to downsample its correctly masked 192px
+variants, and checks all 15 Android PNG dimensions before copying. To repair only
+those two Android files, use `-AndroidDensityRepairOnly`. No artwork is redesigned
+and desktop assets are not touched in that mode. A CI test guards the density map.
+See the [version-matched generator source](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-cli/src/icon.rs#L393).
+
+The Android TV launcher uses a scalable `tv_banner.xml` with the same speed-folder
+geometry and an outlined LanDrop wordmark, matching Android's 320×180 xhdpi banner
+requirement. This supplies the existing TV launcher's missing metadata; it is not
+a claim that TV remote/D-pad navigation has been tested.
+
 The executable, installer/uninstaller and shortcuts use the bundled ICO. The tray
 uses an embedded full-canvas 64px PNG, not a padded preview. Windows toasts and
 in-app branding share the same 128px image. Android status notifications use the

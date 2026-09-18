@@ -45,3 +45,12 @@ Until a migration is announced:
 
 The technical details and response checklist are in
 [`documentation/technical-audit-2026-07.md`](documentation/technical-audit-2026-07.md).
+
+On September 18, 2026, the owner approved a separate Android application identity,
+`io.github.designer9999.landrop`, and a fresh private signing key for version 1.8.2.
+It will not replace old installations or migrate their history automatically.
+The replacement certificate fingerprint and custody instructions are published in
+[`android/signing/README.md`](android/signing/README.md). Build/signature checks
+passed, but the replacement APK is not yet published: emulator-only runtime
+qualification is pending, as requested by the owner. Do not treat the historical compromised key as
+trusted while this qualification is pending.

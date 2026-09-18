@@ -1,7 +1,7 @@
 # LanDrop
 
 LanDrop sends files and text between devices on the same local network or, on
-macOS/Linux, through your existing Tailscale network. LanDrop has no account or cloud
+Windows/macOS/Linux, through your existing Tailscale network. LanDrop has no account or cloud
 storage. Tailscale may relay its encrypted connections when a direct path is unavailable.
 
 > [!IMPORTANT]
@@ -13,7 +13,7 @@ storage. Tailscale may relay its encrypted connections when a direct path is una
 
 - Direct file, folder, and text transfer over TCP
 - Automatic peer discovery with mDNS
-- macOS/Linux Tailscale discovery, with LAN preferred when both routes are available
+- Desktop Tailscale discovery, with LAN preferred when both routes are available
 - A live device list; saved conversations remain available through **View all history**
 - Windows, macOS, Linux, and Android builds
 - Transfer history, image previews, and desktop video previews
@@ -33,6 +33,14 @@ Download builds from the [GitHub Releases page](https://github.com/designer9999/
 | macOS (Intel) | `LanDrop_x.x.x_x64.dmg` |
 | Linux | `.AppImage` or `.deb` |
 
+The replacement Android 1.8.2 APK is built and privately signed, but publication is
+on hold for runtime qualification. At the owner's request, current testing is
+emulator-only; physical-device coverage is not claimed. It uses the new identity
+`io.github.designer9999.landrop` and will install separately from the historical
+Android app; old history will not migrate automatically. Do not assume a desktop
+release includes an Android asset. See the
+[Android qualification record](documentation/releases/v1.8.2-verification.md).
+
 macOS and Windows operating-system code signing is not configured yet. The Tauri
 updater signature protects updater artifacts, but it is not a substitute for Apple
 notarization or Windows Authenticode.
@@ -51,12 +59,14 @@ the same LanDrop device are combined into one peer, with a visible route label.
 
 ### Using an existing Tailscale network
 
-The 1.8.0-beta.2 source restores automatic Windows discovery using native Windows
+The published 1.8.0 release restores automatic Windows discovery using native Windows
 route notifications and Tailscale's local DNS. No additional server, setup code,
 cloud token, or Windows Tailscale CLI/LocalAPI request is needed. This supersedes
 the 1.7.1 safety pause. See the [native design](documentation/windows-native-tailnet-discovery.md)
-for supported route shapes and the [verification record](documentation/releases/v1.8.0-beta.2.md)
-for what has actually been tested; source changes are not a published update.
+for supported route shapes and the [verification record](documentation/releases/v1.8.0-verification.md)
+for what has actually been tested. Real two-PC worldwide and Mullvad coexistence
+acceptance remain unverified; the implementation and publication are not proof of
+every network scenario.
 
 1. Run the updated LanDrop on both Windows, macOS or Linux desktops.
 2. Keep both installed Tailscale clients connected to your existing tailnet.
@@ -171,8 +181,9 @@ repository-level secrets; see
 
 The Android keystore previously committed to this public repository is compromised.
 It was removed from the current tree, but remains recoverable from Git history and
-must never be used again. Do not publish another Android update until the application
-identity and user migration plan have been chosen.
+must never be used again. The owner approved a fresh private key and separate
+Android identity for 1.8.2. The new key is configured securely for releases;
+runtime qualification remains required before Android publication.
 
 The LAN protocol also does not yet provide cryptographic authentication or encryption.
 There is no evidence from this code audit that either issue has been exploited, but
