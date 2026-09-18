@@ -33,7 +33,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read
-      contents: read
+      # GitHub hides draft releases from tokens without repository push access.
+      # The validation helper itself makes only GET requests.
+      contents: write
     outputs:
       source_sha: ${{ steps.guard.outputs.source_sha }}
       asset_snapshot: ${{ steps.guard.outputs.asset_snapshot }}
