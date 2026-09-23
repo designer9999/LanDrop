@@ -42,7 +42,7 @@
     "@sveltejs/vite-plugin-svelte": "7.3.0",
     "@tailwindcss/vite": "4.3.3",
     "@tauri-apps/cli": "2.11.4",
-    "@types/node": "24.13.4",
+    "@types/node": "26.6.2",
     "eslint": "10.10.0",
     "eslint-plugin-svelte": "3.23.0",
     "globals": "17.12.0",
