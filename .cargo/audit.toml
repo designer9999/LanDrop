@@ -1,0 +1,11 @@
+# cargo-audit configuration (CI runs `cargo audit --file src-tauri/Cargo.lock`
+# from the repository root).
+[advisories]
+# zip 4.6.1 extraction advisories (symlink targets, Unix permissions/SUID bits).
+# zip is pulled in only by tauri-plugin-updater 2.14.0 (latest) on Windows, which
+# still requires zip ^4; no compatible fixed release exists. LanDrop's Windows
+# updater artifacts are NSIS .exe files verified with the minisign updater key
+# before use, so the vulnerable archive-extraction path is not exercised, and the
+# app never extracts archives received from peers. Remove these entries as soon
+# as tauri-plugin-updater depends on zip >= 9.
+ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]

@@ -68,5 +68,11 @@ changes are in the [2.0.0 release notes](releases/v2.0.0.md).
 - TypeScript 7 and the Gradle 9 / AGP 9 / Kotlin 2 Android toolchain are deferred:
   Svelte tooling and typescript-eslint still require TypeScript 6, and the Android
   toolchain should follow Tauri's generated template.
+- `cargo audit` exception (`.cargo/audit.toml`): RUSTSEC-2026-0367/0368/0369 in
+  `zip 4.6.1`, published October 9–10, 2026. It is reached only through
+  `tauri-plugin-updater` 2.14.0 (latest) on Windows, which still requires `zip ^4`.
+  Windows updates are minisign-verified NSIS executables, not extracted archives,
+  and LanDrop never unpacks archives from peers. Remove the exception when the
+  updater moves to `zip >= 9`.
 - Package manager: `package.json` declares pnpm, but the lockfile, CI, `dev.bat` and
   Tauri hooks use npm. This pass stayed on npm to avoid an untested CI migration.
