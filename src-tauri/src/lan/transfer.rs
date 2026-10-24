@@ -785,6 +785,7 @@ pub async fn receive_file(
     Ok(out_path.to_string_lossy().to_string())
 }
 
+#[cfg(test)]
 pub async fn receive_batch(
     conn: &Connection,
     count: u32,
@@ -792,6 +793,22 @@ pub async fn receive_batch(
     sort_by_date: bool,
     handle: Option<&AppHandle>,
 ) -> Result<Vec<(String, String, u64)>, String> {
+    let mut files = Vec::new();
+    receive_batch_into(conn, count, out_folder, sort_by_date, handle, &mut files).await?;
+    Ok(files)
+}
+
+/// Receive a batch, pushing each finalized file into `files` as soon as it is on
+/// disk. On error, `files` still lists everything already written so the caller
+/// can surface it instead of leaving untracked files in the receive folder.
+pub async fn receive_batch_into(
+    conn: &Connection,
+    count: u32,
+    out_folder: &str,
+    sort_by_date: bool,
+    handle: Option<&AppHandle>,
+    files: &mut Vec<(String, String, u64)>,
+) -> Result<(), String> {
     // Emit before validation: the caller emits a terminal error even for an
     // invalid batch. Every terminal event must have its own matching start,
     // otherwise it can incorrectly decrement a different active receive.
@@ -812,7 +829,7 @@ pub async fn receive_batch(
             "Batch contains too many files: {count} (maximum {MAX_BATCH_FILES})"
         ));
     }
-    let mut files = Vec::with_capacity(count as usize);
+    files.reserve(count as usize);
 
     for file_index in 0..count {
         let msg = recv_required_message(conn, "batch item").await?;
@@ -882,7 +899,7 @@ pub async fn receive_batch(
         );
     }
 
-    Ok(files)
+    Ok(())
 }
 
 // ─── Utility functions ───

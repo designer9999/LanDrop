@@ -61,7 +61,9 @@ fn save_folder_settings(
     };
 
     if let Ok(json) = serde_json::to_string_pretty(&payload) {
-        let _ = fs::write(settings_path, json);
+        if let Err(error) = crate::path_utils::write_atomic(&settings_path, json.as_bytes()) {
+            eprintln!("Failed to save receive folder settings: {error}");
+        }
     }
 }
 
@@ -275,7 +277,7 @@ impl LanService {
             return self.alias_tx.borrow().clone();
         }
         let alias_file = self.data_dir.join("device_alias.txt");
-        let _ = fs::write(alias_file, &sanitized);
+        let _ = crate::path_utils::write_atomic(&alias_file, sanitized.as_bytes());
         self.alias_tx.send_replace(sanitized.clone());
         sanitized
     }

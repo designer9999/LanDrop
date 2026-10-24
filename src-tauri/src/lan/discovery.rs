@@ -737,18 +737,20 @@ pub async fn run_discovery(
     let device_type_tcp = identity.device_type.clone();
     let incoming_session_slots = Arc::new(Semaphore::new(MAX_INCOMING_SESSIONS));
     let tcp_acceptor = tokio::spawn(async move {
-        let mut listener: Arc<TcpListener> = tcp_listener;
+        let mut listener: Option<Arc<TcpListener>> = Some(tcp_listener);
         let mut consecutive_errors: u32 = 0;
         let mut last_capacity_warning: Option<Instant> = None;
 
         loop {
             // If accept keeps failing, the socket is dead (network change, sleep/wake).
-            // Rebind the listener to recover.
+            // Release the old socket first: binding the same port while it is still
+            // held can never succeed.
             if consecutive_errors >= 5 {
                 emit_log(&handle_tcp, "warn", "TCP listener unhealthy — rebinding...");
+                listener = None;
                 match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TCP_PORT)).await {
                     Ok(new_listener) => {
-                        listener = Arc::new(new_listener);
+                        listener = Some(Arc::new(new_listener));
                         consecutive_errors = 0;
                         emit_log(&handle_tcp, "success", "TCP listener rebound successfully");
                     }
@@ -762,10 +764,14 @@ pub async fn run_discovery(
                     }
                 }
             }
+            let Some(active_listener) = listener.as_ref() else {
+                consecutive_errors = consecutive_errors.max(5);
+                continue;
+            };
 
             let accepted = tokio::select! {
                 _ = cancel_tcp.cancelled() => break,
-                accepted = listener.accept() => accepted,
+                accepted = active_listener.accept() => accepted,
             };
             match accepted {
                 Ok((stream, _addr)) => {
@@ -831,6 +837,12 @@ pub async fn run_discovery(
                 }
                 Err(_) => {
                     consecutive_errors += 1;
+                    // Back off so a persistent accept error cannot spin a core.
+                    let backoff = Duration::from_millis(50 * u64::from(consecutive_errors.min(10)));
+                    tokio::select! {
+                        _ = cancel_tcp.cancelled() => break,
+                        _ = time::sleep(backoff) => {}
+                    }
                 }
             }
         }
@@ -1462,42 +1474,49 @@ async fn handle_incoming_session(
                 );
             }
             super::protocol::Message::Batch { count } => {
-                let files = match super::transfer::receive_batch(
+                let mut files = Vec::new();
+                let outcome = super::transfer::receive_batch_into(
                     &conn,
                     count,
                     &out_folder,
                     sort_into_date_folder,
                     Some(context.handle),
+                    &mut files,
                 )
-                .await
-                {
-                    Ok(files) => files,
-                    Err(error) => {
-                        emit_transfer_error(context.handle, "receive");
-                        return Err(format!("Batch receive error: {error}"));
-                    }
-                };
-                let body = match files.len() {
-                    0 => "Received files".to_string(),
-                    1 => format!("Received {}", files[0].0),
-                    n => format!("Received {} items", n),
-                };
-                emit_android_receive_notification(context.handle, &sender_alias, &body);
-                let names: Vec<&str> = files.iter().map(|(n, _, _)| n.as_str()).collect();
-                let details: Vec<serde_json::Value> = files
-                    .iter()
-                    .map(|(name, path, size)| {
-                        serde_json::json!({"name": name, "path": path, "size": size})
-                    })
-                    .collect();
-                let _ = context.handle.emit(
-                    "lan_files_received",
-                    serde_json::json!({
-                        "peer_id": sender_id,
-                        "files": names,
-                        "file_details": details,
-                    }),
-                );
+                .await;
+                if !files.is_empty() {
+                    let body = match (files.len(), outcome.is_ok()) {
+                        (1, true) => format!("Received {}", files[0].0),
+                        (n, true) => format!("Received {} items", n),
+                        (n, false) => {
+                            format!("Received {n} of {count} items before the transfer failed")
+                        }
+                    };
+                    emit_android_receive_notification(context.handle, &sender_alias, &body);
+                    let names: Vec<&str> = files.iter().map(|(n, _, _)| n.as_str()).collect();
+                    let details: Vec<serde_json::Value> = files
+                        .iter()
+                        .map(|(name, path, size)| {
+                            serde_json::json!({"name": name, "path": path, "size": size})
+                        })
+                        .collect();
+                    // Files already finalized on disk are reported even when the
+                    // batch fails later, so they appear in the conversation.
+                    let _ = context.handle.emit(
+                        "lan_files_received",
+                        serde_json::json!({
+                            "peer_id": sender_id,
+                            "files": names,
+                            "file_details": details,
+                            "partial": outcome.is_err(),
+                            "expected_files": count,
+                        }),
+                    );
+                }
+                if let Err(error) = outcome {
+                    emit_transfer_error(context.handle, "receive");
+                    return Err(format!("Batch receive error: {error}"));
+                }
                 return Ok(());
             }
             super::protocol::Message::Done => return Ok(()),
