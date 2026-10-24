@@ -330,3 +330,74 @@ pub async fn open_url(url: String, app: tauri::AppHandle) -> Result<(), String> 
         .open_url(parsed, None::<&str>)
         .map_err(|e| format!("open_url: {e}"))
 }
+
+const MAX_CHAT_LINK_BYTES: usize = 2048;
+
+/// Accept only plain web links from chat text: `http`/`https`, a host, no
+/// embedded credentials, bounded length. Returns the normalized URL.
+fn validate_chat_link(url: &str) -> Result<tauri::Url, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_CHAT_LINK_BYTES {
+        return Err("open_chat_link: URL is empty or too long".to_string());
+    }
+    let parsed =
+        tauri::Url::parse(trimmed).map_err(|_| "open_chat_link: invalid URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("open_chat_link: only http and https links can be opened".to_string());
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("open_chat_link: link has no host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("open_chat_link: links with embedded credentials are not opened".to_string());
+    }
+    if parsed.as_str().len() > MAX_CHAT_LINK_BYTES {
+        return Err("open_chat_link: URL is empty or too long".to_string());
+    }
+    Ok(parsed)
+}
+
+/// Open a link the user clicked in a chat message in the default browser.
+#[tauri::command]
+pub async fn open_chat_link(url: String, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let parsed = validate_chat_link(&url)?;
+    app.opener()
+        .open_url(parsed, None::<&str>)
+        .map_err(|e| format!("open_chat_link: {e}"))
+}
+
+#[cfg(test)]
+mod chat_link_tests {
+    use super::validate_chat_link;
+
+    #[test]
+    fn accepts_only_plain_web_links() {
+        for ok in [
+            "https://example.com",
+            "http://example.com/path?q=1#frag",
+            "https://sub.example.co.uk:8443/a",
+            "  https://example.com/trimmed  ",
+        ] {
+            assert!(validate_chat_link(ok).is_ok(), "{ok}");
+        }
+        let long = format!("https://example.com/{}", "a".repeat(2048));
+        for bad in [
+            "",
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "ms-settings:privacy",
+            "landrop://open",
+            "ftp://example.com/file",
+            "https://user:pass@example.com",
+            "https://user@example.com",
+            "https://",
+            "data:text/html,<script>alert(1)</script>",
+            "not a url",
+            long.as_str(),
+        ] {
+            assert!(validate_chat_link(bad).is_err(), "{bad}");
+        }
+    }
+}

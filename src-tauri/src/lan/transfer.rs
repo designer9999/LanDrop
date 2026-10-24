@@ -1,3 +1,5 @@
+use serde::Serialize;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -8,21 +10,36 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
 
-use super::protocol::{Message, CHUNK_SIZE, TCP_PORT};
+use super::protocol::{parse_caps, ChatEvent, Message, CHUNK_SIZE, TCP_PORT};
 
 use crate::path_utils::sanitize_relative_path;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const FILE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a sender waits after `done` for the receiver's `ack`.
+const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_TRANSFER_PATH_BYTES: usize = 4096;
 const MAX_BATCH_FILES: u32 = 100_000;
+const MAX_MESSAGE_ID_BYTES: usize = 128;
+const MAX_CHAT_KIND_BYTES: usize = 32;
+const MAX_EMOJI_BYTES: usize = 64;
+const MAX_ACK_ERROR_BYTES: usize = 1024;
+/// Wire bounds for identity capabilities; stored lists are further trimmed
+/// by `parse_caps`.
+const MAX_WIRE_CAPS: usize = 64;
+const MAX_WIRE_CAP_BYTES: usize = 64;
 const DISK_SPACE_RESERVE_BYTES: u64 = 10_000_000;
 const PART_FILE_CREATE_ATTEMPTS: usize = 16;
+const RECEIVE_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
+
+/// Error string a cancelled send rejects with. The frontend matches it exactly.
+pub const CANCELLED: &str = "cancelled";
 
 static RECEIVE_FINALIZE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -59,6 +76,177 @@ impl ProgressThrottle {
             false
         }
     }
+}
+
+/// Result of a send that completed without error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SendStatus {
+    /// The receiver acknowledged committing the unit.
+    Delivered,
+    /// Written and terminated with `done`, but not acknowledged (1.8.x peer,
+    /// no message id, EOF or acknowledgement timeout).
+    Sent,
+    /// The peer does not support this operation (chat frame to a non-`chat2` peer).
+    Unsupported,
+}
+
+/// Optional v2 identifiers carried by a text or batch unit.
+#[derive(Debug, Clone, Default)]
+pub struct UnitMeta {
+    pub id: Option<String>,
+    pub reply_to: Option<String>,
+}
+
+/// Where `lan_transfer_progress` events go, tagged with the message and peer
+/// they belong to so the UI can track several transfers at once.
+#[derive(Clone, Copy, Default)]
+pub struct ProgressSink<'a> {
+    pub handle: Option<&'a AppHandle>,
+    pub message_id: Option<&'a str>,
+    pub peer_id: Option<&'a str>,
+}
+
+impl ProgressSink<'_> {
+    pub fn emit(&self, mut payload: serde_json::Value) {
+        let Some(handle) = self.handle else {
+            return;
+        };
+        if let Some(map) = payload.as_object_mut() {
+            if let Some(id) = self.message_id {
+                map.insert("message_id".into(), id.into());
+            }
+            if let Some(id) = self.peer_id {
+                map.insert("peer_id".into(), id.into());
+            }
+        }
+        let _ = handle.emit("lan_transfer_progress", payload);
+    }
+}
+
+/// Whole-unit receive progress. The protocol announces each file's size only
+/// when that file starts, so `total_bytes` is the sum of sizes announced so far
+/// and grows as a batch proceeds; `total_files` is known from the batch header.
+/// Intermediate events are throttled to ~10 Hz per unit, not per file.
+pub struct ReceiveProgress<'a> {
+    sink: ProgressSink<'a>,
+    total_files: u32,
+    received_files: u32,
+    total_bytes: u64,
+    received_bytes: u64,
+    last_emit: Option<Instant>,
+}
+
+impl<'a> ReceiveProgress<'a> {
+    pub fn new(sink: ProgressSink<'a>, total_files: u32) -> Self {
+        Self {
+            sink,
+            total_files,
+            received_files: 0,
+            total_bytes: 0,
+            received_bytes: 0,
+            last_emit: None,
+        }
+    }
+
+    /// Android resolves its private receive directory through the app handle.
+    #[cfg(target_os = "android")]
+    pub fn handle(&self) -> Option<&'a AppHandle> {
+        self.sink.handle
+    }
+
+    /// Emit unconditionally (start and terminal phases).
+    pub fn emit(&mut self, phase: &str, current_file: Option<&str>) {
+        if self.sink.handle.is_none() {
+            return;
+        }
+        let mut payload = serde_json::json!({
+            "direction": "receive",
+            "phase": phase,
+            "total_files": self.total_files,
+            "received_files": self.received_files,
+            "total_bytes": self.total_bytes,
+            "received_bytes": self.received_bytes,
+        });
+        if let Some(name) = current_file {
+            payload["current_file"] = name.into();
+        }
+        self.sink.emit(payload);
+        self.last_emit = Some(Instant::now());
+    }
+
+    pub fn emit_error(&self, error: &str) {
+        self.sink.emit(serde_json::json!({
+            "direction": "receive",
+            "phase": "error",
+            "error": error,
+            "total_files": self.total_files,
+            "received_files": self.received_files,
+            "total_bytes": self.total_bytes,
+            "received_bytes": self.received_bytes,
+        }));
+    }
+
+    fn due(&self) -> bool {
+        self.sink.handle.is_some()
+            && self
+                .last_emit
+                .is_none_or(|at| at.elapsed() >= PROGRESS_EMIT_MIN_INTERVAL)
+    }
+
+    /// A file header arrived announcing `size` more bytes.
+    pub fn begin_file(&mut self, size: u64) {
+        self.total_bytes = self.total_bytes.saturating_add(size);
+    }
+
+    fn add_bytes(&mut self, bytes: u64, current_file: &str) {
+        self.received_bytes = self.received_bytes.saturating_add(bytes);
+        if self.due() {
+            self.emit("transferring", Some(current_file));
+        }
+    }
+
+    pub fn finish_file(&mut self, current_file: &str) {
+        self.received_files = self.received_files.saturating_add(1);
+        if self.due() {
+            self.emit("transferring", Some(current_file));
+        }
+    }
+}
+
+/// Run `work` until it finishes or `cancel` fires. Cancelling drops the work
+/// future, which closes its connection; the receiver then sees an incomplete
+/// transfer and removes its partial file.
+pub async fn with_cancel<T>(
+    cancel: Option<&CancellationToken>,
+    work: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let Some(cancel) = cancel else {
+        return work.await;
+    };
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(CANCELLED.into()),
+        result = work => result,
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 pub struct Connection {
@@ -254,19 +442,34 @@ impl Connection {
     }
 }
 
+fn id_too_long(id: Option<&String>) -> bool {
+    id.is_some_and(|id| id.is_empty() || id.len() > MAX_MESSAGE_ID_BYTES)
+}
+
 fn validate_message(msg: &Message) -> Result<(), String> {
     match msg {
         Message::Identity {
             app,
             alias,
             device_type,
-        } if app.len() > 32 || alias.len() > 256 || device_type.len() > 32 => {
+            caps,
+        } if app.len() > 32
+            || alias.len() > 256
+            || device_type.len() > 32
+            || caps.len() > MAX_WIRE_CAPS
+            || caps.iter().any(|cap| cap.len() > MAX_WIRE_CAP_BYTES) =>
+        {
             Err("Discovery identity fields exceed their size limits".into())
         }
-        Message::Text { text } if text.len() > MAX_TEXT_BYTES => Err(format!(
+        Message::Text { text, .. } if text.len() > MAX_TEXT_BYTES => Err(format!(
             "Text message too large: {} bytes (maximum {MAX_TEXT_BYTES})",
             text.len()
         )),
+        Message::Text { id, reply_to, .. } | Message::Batch { id, reply_to, .. }
+            if id_too_long(id.as_ref()) || id_too_long(reply_to.as_ref()) =>
+        {
+            Err("Message identifier is empty or too long".into())
+        }
         Message::File { name, .. } | Message::Dir { name }
             if name.len() > MAX_TRANSFER_PATH_BYTES =>
         {
@@ -275,26 +478,50 @@ fn validate_message(msg: &Message) -> Result<(), String> {
                 name.len()
             ))
         }
-        Message::Batch { count } if *count > MAX_BATCH_FILES => Err(format!(
+        Message::Batch { count, .. } if *count > MAX_BATCH_FILES => Err(format!(
             "Batch contains too many files: {count} (maximum {MAX_BATCH_FILES})"
         )),
+        Message::Ack { id, error, .. }
+            if id_too_long(Some(id))
+                || error
+                    .as_ref()
+                    .is_some_and(|e| e.len() > MAX_ACK_ERROR_BYTES) =>
+        {
+            Err("Acknowledgement fields exceed their size limits".into())
+        }
+        Message::Chat {
+            kind,
+            id,
+            text,
+            emoji,
+        } if kind.len() > MAX_CHAT_KIND_BYTES
+            || id_too_long(Some(id))
+            || text.as_ref().is_some_and(|t| t.len() > MAX_TEXT_BYTES)
+            || emoji.as_ref().is_some_and(|e| e.len() > MAX_EMOJI_BYTES) =>
+        {
+            Err("Chat event fields exceed their size limits".into())
+        }
         _ => Ok(()),
     }
 }
 
-fn encode_message(msg: &Message) -> Result<([u8; 4], Vec<u8>), String> {
+/// Encode one control frame (`u32` big-endian length + JSON) into a single
+/// buffer so it leaves in one write rather than two small segments.
+fn encode_frame(msg: &Message) -> Result<Vec<u8>, String> {
     validate_message(msg)?;
-    let json = serde_json::to_vec(msg).map_err(|e| format!("Failed to encode message: {e}"))?;
-    if json.len() > MAX_CONTROL_FRAME_BYTES {
+    let mut frame = vec![0u8; 4];
+    serde_json::to_writer(&mut frame, msg).map_err(|e| format!("Failed to encode message: {e}"))?;
+    let json_len = frame.len() - 4;
+    if json_len > MAX_CONTROL_FRAME_BYTES {
         return Err(format!(
-            "Control message too large: {} bytes (maximum {MAX_CONTROL_FRAME_BYTES})",
-            json.len()
+            "Control message too large: {json_len} bytes (maximum {MAX_CONTROL_FRAME_BYTES})"
         ));
     }
-    let len = u32::try_from(json.len())
+    let len = u32::try_from(json_len)
         .map_err(|_| "Control message length exceeds protocol capacity".to_string())?
         .to_be_bytes();
-    Ok((len, json))
+    frame[..4].copy_from_slice(&len);
+    Ok(frame)
 }
 
 /// Write a framed message directly to a writer (caller already holds the lock)
@@ -302,14 +529,11 @@ async fn write_message(
     w: &mut tokio::net::tcp::OwnedWriteHalf,
     msg: &Message,
 ) -> Result<(), String> {
-    let (len, json) = encode_message(msg)?;
-    time::timeout(CONTROL_IO_TIMEOUT, async {
-        w.write_all(&len).await?;
-        w.write_all(&json).await
-    })
-    .await
-    .map_err(|_| "Timed out sending control message".to_string())?
-    .map_err(|e| format!("Failed to send control message: {e}"))
+    let frame = encode_frame(msg)?;
+    time::timeout(CONTROL_IO_TIMEOUT, w.write_all(&frame))
+        .await
+        .map_err(|_| "Timed out sending control message".to_string())?
+        .map_err(|e| format!("Failed to send control message: {e}"))
 }
 
 async fn write_file_chunk(w: &mut OwnedWriteHalf, bytes: &[u8]) -> Result<(), String> {
@@ -371,13 +595,74 @@ async fn connect_at(
     .map_err(|_| format!("Connection timeout to {addr}"))?
 }
 
-pub async fn send_text_on_connection(conn: &Connection, text: &str) -> Result<(), String> {
+pub async fn send_text_on_connection(
+    conn: &Connection,
+    text: &str,
+    meta: &UnitMeta,
+) -> Result<SendStatus, String> {
     conn.send_message(&Message::Text {
         text: text.to_string(),
+        id: meta.id.clone(),
+        reply_to: meta.reply_to.clone(),
+        // Only v2 sends (with an id) carry a timestamp, so id-less sends keep
+        // the exact 1.8.x frame.
+        sent_at: meta.id.as_ref().map(|_| now_unix_ms()),
     })
     .await?;
     conn.send_message(&Message::Done).await?;
-    Ok(())
+    match &meta.id {
+        Some(id) => await_ack(conn, id).await,
+        None => Ok(SendStatus::Sent),
+    }
+}
+
+/// Send one chat event (edit/delete/react). Callers must have checked that
+/// the peer advertises `chat2`.
+pub async fn send_chat_on_connection(
+    conn: &Connection,
+    event: ChatEvent,
+) -> Result<SendStatus, String> {
+    let id = event.id().to_string();
+    conn.send_message(&event.into_message()).await?;
+    conn.send_message(&Message::Done).await?;
+    await_ack(conn, &id).await
+}
+
+/// After `done`, wait briefly for the receiver's acknowledgement of `id`.
+/// LanDrop 1.8.x receivers close right after `done`, so EOF returns at once.
+async fn await_ack(conn: &Connection, id: &str) -> Result<SendStatus, String> {
+    match time::timeout(ACK_TIMEOUT, conn.recv_message()).await {
+        Ok(Ok(Some(Message::Ack {
+            id: acked,
+            ok,
+            error,
+        }))) if acked == id => {
+            if ok {
+                Ok(SendStatus::Delivered)
+            } else {
+                Err(error
+                    .filter(|error| !error.trim().is_empty())
+                    .unwrap_or_else(|| "The receiver rejected the message".into()))
+            }
+        }
+        // EOF, timeout, a reset after `done`, or an unrelated frame: the unit
+        // was written in full but its commit cannot be confirmed.
+        _ => Ok(SendStatus::Sent),
+    }
+}
+
+/// Receiver side: acknowledge a committed (or failed) unit that carried an id.
+pub async fn send_ack(conn: &Connection, id: &str, result: Result<(), &str>) -> Result<(), String> {
+    let (ok, error) = match result {
+        Ok(()) => (true, None),
+        Err(error) => (false, Some(truncate_utf8(error, MAX_ACK_ERROR_BYTES))),
+    };
+    conn.send_message(&Message::Ack {
+        id: id.to_string(),
+        ok,
+        error,
+    })
+    .await
 }
 
 /// Open the LanDrop TCP handshake only and return the peer UUID.
@@ -405,22 +690,25 @@ pub async fn probe_peer_id(peer_ip: &str, my_uuid: &[u8; 16]) -> Result<String, 
     .map_err(|_| format!("Probe timeout to {}", addr))?
 }
 
+/// Application identity returned by a discovery probe.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub id: String,
+    pub alias: String,
+    pub device_type: String,
+    pub caps: Vec<String>,
+}
+
 /// Confirm that a tailnet node actually runs LanDrop, including its application
 /// response rather than treating arbitrary UUID-shaped bytes as discovery.
-pub async fn probe_peer_info(
-    peer_ip: &str,
-    my_uuid: &[u8; 16],
-) -> Result<(String, String, String), String> {
+pub async fn probe_peer_info(peer_ip: &str, my_uuid: &[u8; 16]) -> Result<PeerInfo, String> {
     let addr: SocketAddr = format!("{peer_ip}:{TCP_PORT}")
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
     probe_peer_info_at(addr, my_uuid).await
 }
 
-async fn probe_peer_info_at(
-    addr: SocketAddr,
-    my_uuid: &[u8; 16],
-) -> Result<(String, String, String), String> {
+async fn probe_peer_info_at(addr: SocketAddr, my_uuid: &[u8; 16]) -> Result<PeerInfo, String> {
     time::timeout(Duration::from_secs(3), async {
         let mut stream = connect_stream(addr).await?;
         stream.write_all(my_uuid).await.map_err(|e| e.to_string())?;
@@ -436,11 +724,13 @@ async fn probe_peer_info_at(
                 app,
                 alias,
                 device_type,
-            }) if app == "LanDrop" => Ok((
-                uuid::Uuid::from_bytes(remote).to_string(),
-                super::identity::sanitize_alias(&alias),
+                caps,
+            }) if app == "LanDrop" => Ok(PeerInfo {
+                id: uuid::Uuid::from_bytes(remote).to_string(),
+                alias: super::identity::sanitize_alias(&alias),
                 device_type,
-            )),
+                caps: parse_caps(&caps.join(",")),
+            }),
             _ => Err("Peer did not identify as LanDrop".into()),
         }
     })
@@ -448,16 +738,9 @@ async fn probe_peer_info_at(
     .map_err(|_| format!("LanDrop discovery timed out at {addr}"))?
 }
 
-/// Prepare files before opening a verified connection, then send exactly once.
-pub async fn send_files_on_connection<F>(
-    paths: &[String],
-    handle: Option<&AppHandle>,
-    connect: F,
-) -> Result<(), String>
-where
-    F: std::future::Future<Output = Result<Arc<Connection>, String>>,
-{
-    // Collect all files to send (skip symlinks for security)
+/// Resolve the files to send (folders walked, symlinks skipped) and their
+/// combined size. Synchronous filesystem work: run on the blocking pool.
+fn collect_send_entries(paths: &[String]) -> Result<(Vec<(String, PathBuf)>, u64), String> {
     let mut file_entries: Vec<(String, PathBuf)> = Vec::new();
 
     for path_str in paths {
@@ -497,15 +780,6 @@ where
             file_entries.push((name, path.to_path_buf()));
         } else {
             // File doesn't exist or can't be accessed — report error instead of silently skipping
-            if let Some(h) = handle {
-                let _ = h.emit(
-                    "lan_log",
-                    serde_json::json!({
-                        "level": "error",
-                        "text": format!("File not accessible: {}", path.display()),
-                    }),
-                );
-            }
             return Err(format!("File not accessible: {}", path.display()));
         }
     }
@@ -514,6 +788,47 @@ where
         return Err("No files to send".into());
     }
 
+    let mut total = 0u64;
+    for (_, fp) in &file_entries {
+        let metadata = std::fs::metadata(fp)
+            .map_err(|e| format!("Failed to read metadata for {}: {e}", fp.display()))?;
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| "Combined transfer size exceeds protocol capacity".to_string())?;
+    }
+    Ok((file_entries, total))
+}
+
+/// Prepare files before opening a verified connection, then send exactly once.
+pub async fn send_files_on_connection<F>(
+    paths: &[String],
+    meta: &UnitMeta,
+    sink: ProgressSink<'_>,
+    connect: F,
+) -> Result<SendStatus, String>
+where
+    F: Future<Output = Result<Arc<Connection>, String>>,
+{
+    let owned_paths = paths.to_vec();
+    let collected = tokio::task::spawn_blocking(move || collect_send_entries(&owned_paths))
+        .await
+        .map_err(|e| format!("Failed to prepare files: {e}"))?;
+    let (file_entries, total_size) = match collected {
+        Ok(collected) => collected,
+        Err(error) => {
+            if let Some(h) = sink.handle {
+                let _ = h.emit(
+                    "lan_log",
+                    serde_json::json!({
+                        "level": "error",
+                        "text": error,
+                    }),
+                );
+            }
+            return Err(error);
+        }
+    };
+
     let batch_count = u32::try_from(file_entries.len())
         .map_err(|_| "Too many files for one transfer".to_string())?;
     if batch_count > MAX_BATCH_FILES {
@@ -521,48 +836,38 @@ where
             "Batch contains too many files: {batch_count} (maximum {MAX_BATCH_FILES})"
         ));
     }
-
-    // Calculate total size for progress
-    let total_size: u64 = {
-        let mut total = 0u64;
-        for (_, fp) in &file_entries {
-            let metadata = tokio::fs::metadata(fp)
-                .await
-                .map_err(|e| format!("Failed to read metadata for {}: {e}", fp.display()))?;
-            total = total
-                .checked_add(metadata.len())
-                .ok_or_else(|| "Combined transfer size exceeds protocol capacity".to_string())?;
-        }
-        total
-    };
     let total_files = file_entries.len();
 
     let conn = connect.await?;
 
-    if let Some(h) = handle {
-        let _ = h.emit(
-            "lan_transfer_progress",
-            serde_json::json!({
-                "direction": "send",
-                "phase": "start",
-                "total_bytes": total_size,
-                "total_files": total_files,
-                "sent_bytes": 0,
-                "sent_files": 0,
-            }),
-        );
-    }
+    sink.emit(serde_json::json!({
+        "direction": "send",
+        "phase": "start",
+        "total_bytes": total_size,
+        "total_files": total_files,
+        "sent_bytes": 0,
+        "sent_files": 0,
+    }));
 
     // Use writer lock for atomic sends (no interleaving with concurrent operations)
     let mut w = conn.writer.lock().await;
     conn.ensure_current_route()?;
 
     // Always send batch header so receiver knows what to expect
-    write_message(&mut w, &Message::Batch { count: batch_count }).await?;
+    write_message(
+        &mut w,
+        &Message::Batch {
+            count: batch_count,
+            id: meta.id.clone(),
+            reply_to: meta.reply_to.clone(),
+        },
+    )
+    .await?;
 
     let mut sent_bytes: u64 = 0;
     let mut sent_files: usize = 0;
     let mut progress_throttle = ProgressThrottle::new(total_size);
+    let mut buf = vec![0u8; CHUNK_SIZE];
 
     for (name, file_path) in &file_entries {
         // Open first, then obtain metadata from that same handle so the declared
@@ -605,7 +910,6 @@ where
         )
         .await?;
 
-        let mut buf = vec![0u8; CHUNK_SIZE];
         let mut remaining = size;
 
         while remaining > 0 {
@@ -629,21 +933,18 @@ where
                 .checked_add(n as u64)
                 .ok_or_else(|| "Sent byte counter overflowed".to_string())?;
 
-            if let Some(h) = handle {
-                if sent_bytes == total_size || progress_throttle.should_emit(sent_bytes) {
-                    let _ = h.emit(
-                        "lan_transfer_progress",
-                        serde_json::json!({
-                            "direction": "send",
-                            "phase": "transferring",
-                            "total_bytes": total_size,
-                            "total_files": total_files,
-                            "sent_bytes": sent_bytes,
-                            "sent_files": sent_files,
-                            "current_file": name,
-                        }),
-                    );
-                }
+            if sink.handle.is_some()
+                && (sent_bytes == total_size || progress_throttle.should_emit(sent_bytes))
+            {
+                sink.emit(serde_json::json!({
+                    "direction": "send",
+                    "phase": "transferring",
+                    "total_bytes": total_size,
+                    "total_files": total_files,
+                    "sent_bytes": sent_bytes,
+                    "sent_files": sent_files,
+                    "current_file": name,
+                }));
             }
         }
 
@@ -664,21 +965,22 @@ where
 
     drop(w);
 
-    if let Some(h) = handle {
-        let _ = h.emit(
-            "lan_transfer_progress",
-            serde_json::json!({
-                "direction": "send",
-                "phase": "done",
-                "total_bytes": total_size,
-                "total_files": total_files,
-                "sent_bytes": sent_bytes,
-                "sent_files": sent_files,
-            }),
-        );
-    }
+    let status = match &meta.id {
+        Some(id) => await_ack(&conn, id).await?,
+        None => SendStatus::Sent,
+    };
 
-    Ok(())
+    sink.emit(serde_json::json!({
+        "direction": "send",
+        "phase": "done",
+        "total_bytes": total_size,
+        "total_files": total_files,
+        "sent_bytes": sent_bytes,
+        "sent_files": sent_files,
+        "status": status,
+    }));
+
+    Ok(status)
 }
 
 // ─── Receive functions (called by incoming TCP handler) ───
@@ -689,14 +991,16 @@ pub async fn receive_file(
     size: u64,
     out_folder: &str,
     sort_by_date: bool,
-    handle: Option<&AppHandle>,
+    mut progress: Option<&mut ReceiveProgress<'_>>,
 ) -> Result<String, String> {
     let safe_name = sanitize_relative_path(name);
     #[cfg(target_os = "android")]
     let default_dir = if out_folder.is_empty() {
         use tauri::Manager;
         Some(
-            handle
+            progress
+                .as_ref()
+                .and_then(|progress| progress.handle())
                 .ok_or("Android receive storage is unavailable")?
                 .path()
                 .app_data_dir()
@@ -724,11 +1028,11 @@ pub async fn receive_file(
 
     check_disk_space(&desired_out_path, size)?;
 
-    let (mut file, partial_path) = create_partial_file(parent).await?;
+    let (file, partial_path) = create_partial_file(parent).await?;
+    // Network reads arrive in small pieces; batch them into large disk writes.
+    let mut file = tokio::io::BufWriter::with_capacity(RECEIVE_WRITE_BUFFER_BYTES, file);
     let mut remaining = size;
     let mut buf = vec![0u8; CHUNK_SIZE];
-    let mut received_bytes: u64 = 0;
-    let mut progress_throttle = ProgressThrottle::new(size);
 
     let receive_result: Result<(), String> = async {
         while remaining > 0 {
@@ -738,23 +1042,8 @@ pub async fn receive_file(
                 .await
                 .map_err(|e| format!("Failed to write received file: {e}"))?;
             remaining -= read as u64;
-            received_bytes = received_bytes
-                .checked_add(read as u64)
-                .ok_or_else(|| "Received byte counter overflowed".to_string())?;
-
-            if let Some(h) = handle {
-                if remaining == 0 || progress_throttle.should_emit(received_bytes) {
-                    let _ = h.emit(
-                        "lan_transfer_progress",
-                        serde_json::json!({
-                            "direction": "receive",
-                            "phase": "transferring",
-                            "total_bytes": size,
-                            "received_bytes": received_bytes,
-                            "current_file": name,
-                        }),
-                    );
-                }
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.add_bytes(read as u64, name);
             }
         }
 
@@ -791,10 +1080,18 @@ pub async fn receive_batch(
     count: u32,
     out_folder: &str,
     sort_by_date: bool,
-    handle: Option<&AppHandle>,
 ) -> Result<Vec<(String, String, u64)>, String> {
     let mut files = Vec::new();
-    receive_batch_into(conn, count, out_folder, sort_by_date, handle, &mut files).await?;
+    let mut progress = ReceiveProgress::new(ProgressSink::default(), count);
+    receive_batch_into(
+        conn,
+        count,
+        out_folder,
+        sort_by_date,
+        &mut progress,
+        &mut files,
+    )
+    .await?;
     Ok(files)
 }
 
@@ -806,23 +1103,13 @@ pub async fn receive_batch_into(
     count: u32,
     out_folder: &str,
     sort_by_date: bool,
-    handle: Option<&AppHandle>,
+    progress: &mut ReceiveProgress<'_>,
     files: &mut Vec<(String, String, u64)>,
 ) -> Result<(), String> {
     // Emit before validation: the caller emits a terminal error even for an
     // invalid batch. Every terminal event must have its own matching start,
     // otherwise it can incorrectly decrement a different active receive.
-    if let Some(h) = handle {
-        let _ = h.emit(
-            "lan_transfer_progress",
-            serde_json::json!({
-                "direction": "receive",
-                "phase": "start",
-                "total_files": count,
-                "received_files": 0,
-            }),
-        );
-    }
+    progress.emit("start", None);
 
     if count > MAX_BATCH_FILES {
         return Err(format!(
@@ -861,20 +1148,18 @@ pub async fn receive_batch_into(
             }
         };
 
-        let path = receive_file(conn, &name, size, out_folder, sort_by_date, handle).await?;
+        progress.begin_file(size);
+        let path = receive_file(
+            conn,
+            &name,
+            size,
+            out_folder,
+            sort_by_date,
+            Some(&mut *progress),
+        )
+        .await?;
+        progress.finish_file(&name);
         files.push((name, path, size));
-
-        if let Some(h) = handle {
-            let _ = h.emit(
-                "lan_transfer_progress",
-                serde_json::json!({
-                    "direction": "receive",
-                    "phase": "transferring",
-                    "total_files": count,
-                    "received_files": files.len(),
-                }),
-            );
-        }
     }
 
     match recv_required_message(conn, "batch completion").await? {
@@ -887,17 +1172,7 @@ pub async fn receive_batch_into(
         }
     }
 
-    if let Some(h) = handle {
-        let _ = h.emit(
-            "lan_transfer_progress",
-            serde_json::json!({
-                "direction": "receive",
-                "phase": "done",
-                "total_files": count,
-                "received_files": files.len(),
-            }),
-        );
-    }
+    progress.emit("done", None);
 
     Ok(())
 }
@@ -985,6 +1260,8 @@ fn message_kind(message: &Message) -> &'static str {
         Message::Done => "done",
         Message::Discover => "discovery",
         Message::Identity { .. } => "identity",
+        Message::Ack { .. } => "acknowledgement",
+        Message::Chat { .. } => "chat",
     }
 }
 
@@ -1251,16 +1528,18 @@ mod tests {
                         app: app.into(),
                         alias: "Colleague".into(),
                         device_type: "desktop".into(),
+                        caps: vec!["ack".into(), "chat2".into()],
                     })
                     .await
                     .unwrap();
             };
             let (result, ()) = tokio::join!(super::probe_peer_info_at(address, &[1; 16]), server);
             if app == "LanDrop" {
-                let (id, alias, dtype) = result.unwrap();
-                assert_eq!(id, uuid::Uuid::from_bytes(remote_uuid).to_string());
-                assert_eq!(alias, "Colleague");
-                assert_eq!(dtype, "desktop");
+                let info = result.unwrap();
+                assert_eq!(info.id, uuid::Uuid::from_bytes(remote_uuid).to_string());
+                assert_eq!(info.alias, "Colleague");
+                assert_eq!(info.device_type, "desktop");
+                assert_eq!(info.caps, vec!["ack", "chat2"]);
             } else {
                 assert!(result.is_err());
             }
@@ -1289,7 +1568,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
             assert!(
-                matches!(connection.recv_message().await.unwrap(), Some(Message::Text { text }) if text == "hello over the selected route")
+                matches!(connection.recv_message().await.unwrap(), Some(Message::Text { text, id: None, .. }) if text == "hello over the selected route")
             );
             assert!(matches!(
                 connection.recv_message().await.unwrap(),
@@ -1300,9 +1579,14 @@ mod tests {
             let connection = super::connect_at(address, &[1; 16], &[2; 16])
                 .await
                 .unwrap();
-            super::send_text_on_connection(&connection, "hello over the selected route")
-                .await
-                .unwrap();
+            let status = super::send_text_on_connection(
+                &connection,
+                "hello over the selected route",
+                &super::UnitMeta::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, super::SendStatus::Sent);
         };
         tokio::join!(server, client);
     }
@@ -1320,18 +1604,13 @@ mod tests {
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
-            let Some(Message::Batch { count }) = connection.recv_message().await.unwrap() else {
+            let Some(Message::Batch { count, .. }) = connection.recv_message().await.unwrap()
+            else {
                 panic!("expected file batch");
             };
-            let files = receive_batch(
-                &connection,
-                count,
-                destination.to_str().unwrap(),
-                false,
-                None,
-            )
-            .await
-            .unwrap();
+            let files = receive_batch(&connection, count, destination.to_str().unwrap(), false)
+                .await
+                .unwrap();
             assert_eq!(files.len(), 1);
             assert_eq!(
                 std::fs::read(&files[0].1).unwrap(),
@@ -1341,7 +1620,8 @@ mod tests {
         let client = async {
             super::send_files_on_connection(
                 &[source_file.to_string_lossy().into_owned()],
-                None,
+                &super::UnitMeta::default(),
+                super::ProgressSink::default(),
                 super::connect_at(address, &[1; 16], &[2; 16]),
             )
             .await
@@ -1350,6 +1630,265 @@ mod tests {
         tokio::join!(server, client);
         std::fs::remove_dir_all(source).unwrap();
         std::fs::remove_dir_all(destination).unwrap();
+    }
+
+    fn v2_meta(id: &str) -> super::UnitMeta {
+        super::UnitMeta {
+            id: Some(id.into()),
+            reply_to: Some("earlier".into()),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_text_is_acknowledged_as_delivered() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            let Some(Message::Text {
+                text,
+                id: Some(id),
+                reply_to,
+                sent_at,
+            }) = connection.recv_message().await.unwrap()
+            else {
+                panic!("expected v2 text");
+            };
+            assert_eq!(text, "hello");
+            assert_eq!(reply_to.as_deref(), Some("earlier"));
+            assert!(sent_at.is_some_and(|ms| ms > 1_600_000_000_000));
+            super::send_ack(&connection, &id, Ok(())).await.unwrap();
+            assert!(matches!(
+                connection.recv_message().await.unwrap(),
+                Some(Message::Done)
+            ));
+        };
+        let client = async {
+            let connection = super::connect_at(address, &[1; 16], &[2; 16])
+                .await
+                .unwrap();
+            super::send_text_on_connection(&connection, "hello", &v2_meta("m-1")).await
+        };
+        let ((), status) = tokio::join!(server, client);
+        assert_eq!(status.unwrap(), super::SendStatus::Delivered);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_receiver_closing_after_done_returns_sent_without_waiting() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // Behaves like a 1.8.x receiver: reads the unit, never acks, closes.
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            assert!(matches!(
+                connection.recv_message().await.unwrap(),
+                Some(Message::Text { .. })
+            ));
+            assert!(matches!(
+                connection.recv_message().await.unwrap(),
+                Some(Message::Done)
+            ));
+        };
+        let client = async {
+            let connection = super::connect_at(address, &[1; 16], &[2; 16])
+                .await
+                .unwrap();
+            let started = std::time::Instant::now();
+            let status =
+                super::send_text_on_connection(&connection, "hello", &v2_meta("m-2")).await;
+            (status, started.elapsed())
+        };
+        let ((), (status, elapsed)) = tokio::join!(server, client);
+        assert_eq!(status.unwrap(), super::SendStatus::Sent);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "EOF must not wait for the ack timeout: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn negative_ack_rejects_the_send_with_the_receiver_error() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            let _ = connection.recv_message().await.unwrap();
+            super::send_ack(&connection, "m-3", Err("Not enough disk space"))
+                .await
+                .unwrap();
+            let _ = connection.recv_message().await;
+        };
+        let client = async {
+            let connection = super::connect_at(address, &[1; 16], &[2; 16])
+                .await
+                .unwrap();
+            super::send_text_on_connection(&connection, "hello", &v2_meta("m-3")).await
+        };
+        let ((), status) = tokio::join!(server, client);
+        assert_eq!(status.unwrap_err(), "Not enough disk space");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_batch_carries_its_id_and_is_acknowledged() {
+        let source = test_directory("ack-source");
+        let destination = test_directory("ack-destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let source_file = source.join("photo.jpg");
+        std::fs::write(&source_file, b"not really a jpeg").unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            let Some(Message::Batch {
+                count,
+                id: Some(id),
+                reply_to,
+            }) = connection.recv_message().await.unwrap()
+            else {
+                panic!("expected v2 batch");
+            };
+            assert_eq!(reply_to.as_deref(), Some("earlier"));
+            let files = receive_batch(&connection, count, destination.to_str().unwrap(), false)
+                .await
+                .unwrap();
+            assert_eq!(files.len(), 1);
+            super::send_ack(&connection, &id, Ok(())).await.unwrap();
+        };
+        let paths = [source_file.to_string_lossy().into_owned()];
+        let meta = v2_meta("m-4");
+        let client = super::send_files_on_connection(
+            &paths,
+            &meta,
+            super::ProgressSink::default(),
+            super::connect_at(address, &[1; 16], &[2; 16]),
+        );
+        let ((), status) = tokio::join!(server, client);
+        assert_eq!(status.unwrap(), super::SendStatus::Delivered);
+        std::fs::remove_dir_all(source).unwrap();
+        std::fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_event_round_trips_and_is_acknowledged() {
+        use crate::lan::protocol::ChatEvent;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            let Some(Message::Chat {
+                kind,
+                id,
+                text,
+                emoji,
+            }) = connection.recv_message().await.unwrap()
+            else {
+                panic!("expected chat frame");
+            };
+            let event = ChatEvent::from_frame(&kind, id.clone(), text, emoji);
+            super::send_ack(&connection, &id, Ok(())).await.unwrap();
+            assert!(matches!(
+                connection.recv_message().await.unwrap(),
+                Some(Message::Done)
+            ));
+            event
+        };
+        let client = async {
+            let connection = super::connect_at(address, &[1; 16], &[2; 16])
+                .await
+                .unwrap();
+            super::send_chat_on_connection(
+                &connection,
+                ChatEvent::Edit {
+                    id: "m-5".into(),
+                    text: "corrected".into(),
+                },
+            )
+            .await
+        };
+        let (event, status) = tokio::join!(server, client);
+        assert_eq!(status.unwrap(), super::SendStatus::Delivered);
+        assert_eq!(
+            event,
+            Some(ChatEvent::Edit {
+                id: "m-5".into(),
+                text: "corrected".into()
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_mid_file_rejects_with_cancelled_and_receiver_cleans_up() {
+        let source = test_directory("cancel-source");
+        let destination = test_directory("cancel-destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let source_file = source.join("large.bin");
+        // Sparse/lazily zeroed: large enough that it cannot finish before the
+        // cancel lands, without writing it to disk first.
+        std::fs::File::create(&source_file)
+            .unwrap()
+            .set_len(256 * 1024 * 1024)
+            .unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (connection, _) = Connection::from_incoming(stream, &[2; 16]).await.unwrap();
+            let Some(Message::Batch { count, .. }) = connection.recv_message().await.unwrap()
+            else {
+                panic!("expected batch");
+            };
+            receive_batch(&connection, count, destination.to_str().unwrap(), false).await
+        };
+        let paths = [source_file.to_string_lossy().into_owned()];
+        let meta = v2_meta("m-6");
+        let client = super::with_cancel(
+            Some(&cancel),
+            super::send_files_on_connection(
+                &paths,
+                &meta,
+                super::ProgressSink::default(),
+                super::connect_at(address, &[1; 16], &[2; 16]),
+            ),
+        );
+        // Cancel once the receiver has started writing the file.
+        let canceller = async {
+            loop {
+                let receiving = std::fs::read_dir(&destination)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".part"));
+                if receiving {
+                    cancel.cancel();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        };
+        let (received, sent, ()) = tokio::join!(server, client, canceller);
+        assert_eq!(sent.unwrap_err(), super::CANCELLED);
+        assert!(received.is_err(), "receiver must see the incomplete file");
+        assert_no_partial_files(&destination);
+        assert!(!destination.join("large.bin").exists());
+        std::fs::remove_dir_all(source).unwrap();
+        std::fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn control_frames_are_encoded_as_one_length_prefixed_buffer() {
+        let frame = super::encode_frame(&Message::Done).unwrap();
+        let json = br#"{"type":"done"}"#;
+        assert_eq!(&frame[..4], &(json.len() as u32).to_be_bytes());
+        assert_eq!(&frame[4..], json);
     }
 
     fn test_directory(label: &str) -> PathBuf {
@@ -1702,7 +2241,7 @@ mod tests {
             client.shutdown().await.expect("close client stream");
         };
 
-        let (files, ()) = tokio::join!(receive_batch(&connection, 2, &folder, false, None), send);
+        let (files, ()) = tokio::join!(receive_batch(&connection, 2, &folder, false), send);
         let files = files.expect("batch receive succeeds");
 
         assert_eq!(files.len(), 2);
@@ -1747,7 +2286,7 @@ mod tests {
             client.shutdown().await.expect("close client stream");
         };
 
-        let (result, ()) = tokio::join!(receive_batch(&connection, 2, &folder, false, None), send);
+        let (result, ()) = tokio::join!(receive_batch(&connection, 2, &folder, false), send);
         let error = result.expect_err("early Done must fail the batch");
         assert!(
             error.contains("Batch ended early after 1 of 2 files"),
@@ -1772,13 +2311,16 @@ mod tests {
                 &mut client,
                 &Message::Text {
                     text: "not a file".into(),
+                    id: None,
+                    reply_to: None,
+                    sent_at: None,
                 },
             )
             .await;
             client.shutdown().await.expect("close client stream");
         };
 
-        let (result, ()) = tokio::join!(receive_batch(&connection, 1, &folder, false, None), send);
+        let (result, ()) = tokio::join!(receive_batch(&connection, 1, &folder, false), send);
         let error = result.expect_err("a text frame is not a batch item");
         assert!(
             error.contains("Unexpected text message in batch"),
@@ -1808,11 +2350,20 @@ mod tests {
             .await;
             client.write_all(b"x").await.expect("write body");
             // Wrong terminator.
-            write_frame(&mut client, &Message::Text { text: "bye".into() }).await;
+            write_frame(
+                &mut client,
+                &Message::Text {
+                    text: "bye".into(),
+                    id: None,
+                    reply_to: None,
+                    sent_at: None,
+                },
+            )
+            .await;
             client.shutdown().await.expect("close client stream");
         };
 
-        let (result, ()) = tokio::join!(receive_batch(&connection, 1, &folder, false, None), send);
+        let (result, ()) = tokio::join!(receive_batch(&connection, 1, &folder, false), send);
         let error = result.expect_err("batch must end with Done");
         assert!(error.contains("Expected batch completion"), "{error}");
 
@@ -1877,11 +2428,30 @@ mod tests {
     #[test]
     fn rejects_excessive_control_values() {
         assert!(validate_message(&Message::Batch {
-            count: MAX_BATCH_FILES + 1
+            count: MAX_BATCH_FILES + 1,
+            id: None,
+            reply_to: None,
         })
         .is_err());
         assert!(validate_message(&Message::Text {
-            text: "x".repeat(MAX_TEXT_BYTES + 1)
+            text: "x".repeat(MAX_TEXT_BYTES + 1),
+            id: None,
+            reply_to: None,
+            sent_at: None,
+        })
+        .is_err());
+        assert!(validate_message(&Message::Text {
+            text: "ok".into(),
+            id: Some("x".repeat(129)),
+            reply_to: None,
+            sent_at: None,
+        })
+        .is_err());
+        assert!(validate_message(&Message::Chat {
+            kind: "react".into(),
+            id: "m1".into(),
+            text: None,
+            emoji: Some("x".repeat(65)),
         })
         .is_err());
     }

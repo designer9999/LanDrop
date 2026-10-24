@@ -14,9 +14,10 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use super::identity::{normalize_uuid, DeviceIdentity};
-use super::protocol::{MDNS_SERVICE_TYPE, TCP_PORT};
+use super::protocol::{local_caps, parse_caps, LOCAL_CAPS, MDNS_SERVICE_TYPE, TCP_PORT};
+use super::protocol::{ChatEvent, Message};
 use super::tailscale;
-use super::transfer::{probe_peer_id, Connection};
+use super::transfer::{probe_peer_id, Connection, ProgressSink, ReceiveProgress};
 
 const MAX_INCOMING_SESSIONS: usize = 32;
 
@@ -37,7 +38,13 @@ fn register_landrop_service(
     device_type: &str,
     local_ip: Ipv4Addr,
 ) {
-    let properties = [("id", my_id), ("alias", alias), ("dtype", device_type)];
+    let caps = LOCAL_CAPS.join(",");
+    let properties = [
+        ("id", my_id),
+        ("alias", alias),
+        ("dtype", device_type),
+        ("caps", caps.as_str()),
+    ];
     let host_name = format!("landrop-{}.local.", &my_id[..8]);
     let instance_name = service_instance_name(my_id);
 
@@ -81,16 +88,6 @@ fn emit_log(handle: &AppHandle, level: &str, text: &str) {
         }),
     );
     eprintln!("[LAN {}] {}", level, text);
-}
-
-fn emit_transfer_error(handle: &AppHandle, direction: &str) {
-    let _ = handle.emit(
-        "lan_transfer_progress",
-        serde_json::json!({
-            "direction": direction,
-            "phase": "error",
-        }),
-    );
 }
 
 #[cfg(target_os = "android")]
@@ -283,6 +280,13 @@ pub struct DiscoveredPeer {
     pub network: String,
     pub lan_ip: Option<String>,
     pub tailscale_ip: Option<String>,
+    /// Protocol capabilities (`ack`, `chat2`). Empty for 1.8.x peers and for
+    /// peers whose capabilities are not known yet (see `caps_known`).
+    pub caps: Vec<String>,
+    /// False for peers found only by a UUID handshake (healer scan, inbound
+    /// session); an identity probe fills `caps` on first need.
+    #[serde(skip)]
+    caps_known: bool,
     #[serde(skip)]
     lan_seen: Option<Instant>,
     #[serde(skip)]
@@ -300,11 +304,24 @@ impl DiscoveredPeer {
             network: String::new(),
             lan_ip: None,
             tailscale_ip: None,
+            caps: Vec::new(),
+            caps_known: false,
             lan_seen: None,
             tailscale_seen: None,
         };
         peer.observe_route(&ip);
         peer
+    }
+
+    /// Capabilities learned from mDNS TXT or an identity response.
+    pub fn set_caps(&mut self, caps: Vec<String>) {
+        self.caps = caps;
+        self.caps_known = true;
+    }
+
+    /// `None` until capabilities have been learned from TXT or identity.
+    pub fn known_caps(&self) -> Option<&[String]> {
+        self.caps_known.then_some(self.caps.as_slice())
     }
 
     pub fn observe_route(&mut self, ip: &str) {
@@ -616,6 +633,10 @@ pub async fn run_discovery(
                                 .get_property_val_str("dtype")
                                 .unwrap_or("desktop")
                                 .to_string();
+                            // 1.8.x records carry no `caps` key: known, empty.
+                            let peer_caps = parse_caps(
+                                props.get_property_val_str("caps").unwrap_or_default(),
+                            );
 
                             // Skip our own service
                             if peer_id == my_id_mdns || peer_id.is_empty() {
@@ -688,6 +709,7 @@ pub async fn run_discovery(
                                 peer_id.clone(), peer_alias.clone(), peer_dtype.clone(), ip.clone()));
                             peer.alias = peer_alias;
                             peer.device_type = peer_dtype;
+                            peer.set_caps(peer_caps);
                             peer.observe_route(&ip);
                             let peer = peer.clone();
                             drop(peers);
@@ -1107,9 +1129,15 @@ async fn run_tailnet_discovery(
             let Ok((ip, result, _generation)) = result else {
                 continue;
             };
-            let result = result.ok().filter(|(id, _, _)| id != &my_id);
+            let result = result.ok().filter(|info| info.id != my_id);
             schedule.record(ip, result.is_some(), Instant::now());
-            let Some((id, alias, dtype)) = result else {
+            let Some(super::transfer::PeerInfo {
+                id,
+                alias,
+                device_type: dtype,
+                caps,
+            }) = result
+            else {
                 continue;
             };
             let ip = ip.to_string();
@@ -1129,6 +1157,7 @@ async fn run_tailnet_discovery(
             });
             peer.alias = alias;
             peer.device_type = dtype;
+            peer.set_caps(caps);
             peer.observe_route(&ip);
             let peer = peer.clone();
             drop(peers);
@@ -1216,7 +1245,7 @@ async fn monitor_routes(
                     let alive = if ip.parse().is_ok_and(tailscale::is_tailscale_ipv4) {
                         super::transfer::probe_peer_info(&ip, &my_uuid)
                             .await
-                            .is_ok_and(|(found, _, _)| found == id)
+                            .is_ok_and(|info| info.id == id)
                     } else {
                         probe_peer_id(&ip, &my_uuid)
                             .await
@@ -1313,6 +1342,7 @@ async fn handle_incoming_session(
                 app: "LanDrop".into(),
                 alias,
                 device_type: context.device_type.to_string(),
+                caps: local_caps(),
             })
             .await?;
             // A bounded reciprocal hint makes app startup visible even when
@@ -1329,6 +1359,9 @@ async fn handle_incoming_session(
             return Err("Unexpected identity response".into())
         }
         Some(super::protocol::Message::Done) => return Ok(()),
+        Some(super::protocol::Message::Ack { .. }) => {
+            return Err("Unexpected acknowledgement without a transfer".into())
+        }
         Some(message) => message,
     };
 
@@ -1404,50 +1437,102 @@ async fn handle_incoming_session(
         received_control_message = true;
 
         match msg {
-            super::protocol::Message::Text { text } => {
+            Message::Text {
+                text,
+                id,
+                reply_to,
+                sent_at,
+            } => {
                 allow_legacy_text_eof = true;
                 emit_android_receive_notification(
                     context.handle,
                     &sender_alias,
                     &notification_text_preview(&text),
                 );
-                let _ = context.handle.emit(
-                    "lan_text_received",
-                    serde_json::json!({"peer_id": sender_id, "text": text}),
-                );
+                let mut payload = serde_json::json!({"peer_id": sender_id, "text": text});
+                if let Some(id) = &id {
+                    payload["id"] = id.as_str().into();
+                }
+                if let Some(reply_to) = reply_to {
+                    payload["reply_to"] = reply_to.into();
+                }
+                if let Some(sent_at) = sent_at {
+                    payload["sent_at"] = sent_at.into();
+                }
+                let _ = context.handle.emit("lan_text_received", payload);
+                // Committed: acknowledge v2 senders. 1.8.x senders send no id
+                // and therefore never receive an unexpected frame.
+                if let Some(id) = id {
+                    let _ = super::transfer::send_ack(&conn, &id, Ok(())).await;
+                }
             }
-            super::protocol::Message::File { name, size } => {
+            Message::Chat {
+                kind,
+                id,
+                text,
+                emoji,
+            } => {
+                allow_legacy_text_eof = false;
+                let ack_id = id.clone();
+                match ChatEvent::from_frame(&kind, id, text, emoji) {
+                    Some(event) => {
+                        let mut payload = serde_json::json!({
+                            "peer_id": sender_id,
+                            "kind": kind,
+                            "id": event.id(),
+                        });
+                        match &event {
+                            ChatEvent::Edit { text, .. } => payload["text"] = text.as_str().into(),
+                            ChatEvent::React { emoji, .. } => {
+                                payload["emoji"] = emoji.as_deref().into();
+                            }
+                            ChatEvent::Delete { .. } => {}
+                        }
+                        let _ = context.handle.emit("lan_chat_event", payload);
+                        let _ = super::transfer::send_ack(&conn, &ack_id, Ok(())).await;
+                    }
+                    None => {
+                        let _ = super::transfer::send_ack(
+                            &conn,
+                            &ack_id,
+                            Err("Unsupported chat event"),
+                        )
+                        .await;
+                    }
+                }
+            }
+            Message::File { name, size } => {
                 allow_legacy_text_eof = false;
                 // Legacy single-file sessions must participate in the same
                 // start/terminal activity contract as batches. The frontend
                 // uses it to avoid closing the app for an update mid-receive.
-                let _ = context.handle.emit(
-                    "lan_transfer_progress",
-                    serde_json::json!({
-                        "direction": "receive",
-                        "phase": "start",
-                        "total_bytes": size,
-                        "total_files": 1,
-                        "received_bytes": 0,
-                        "received_files": 0,
-                    }),
+                let mut progress = ReceiveProgress::new(
+                    ProgressSink {
+                        handle: Some(context.handle),
+                        message_id: None,
+                        peer_id: Some(&sender_id),
+                    },
+                    1,
                 );
+                progress.begin_file(size);
+                progress.emit("start", None);
                 let path = match super::transfer::receive_file(
                     &conn,
                     &name,
                     size,
                     &out_folder,
                     sort_into_date_folder,
-                    Some(context.handle),
+                    Some(&mut progress),
                 )
                 .await
                 {
                     Ok(path) => path,
                     Err(error) => {
-                        emit_transfer_error(context.handle, "receive");
+                        progress.emit_error(&error);
                         return Err(format!("File receive error: {error}"));
                     }
                 };
+                progress.finish_file(&name);
                 emit_android_receive_notification(
                     context.handle,
                     &sender_alias,
@@ -1461,26 +1546,28 @@ async fn handle_incoming_session(
                         "file_details": [{"name": &name, "path": &path, "size": size}]
                     }),
                 );
-                let _ = context.handle.emit(
-                    "lan_transfer_progress",
-                    serde_json::json!({
-                        "direction": "receive",
-                        "phase": "done",
-                        "total_bytes": size,
-                        "total_files": 1,
-                        "received_bytes": size,
-                        "received_files": 1,
-                    }),
-                );
+                progress.emit("done", None);
             }
-            super::protocol::Message::Batch { count } => {
+            Message::Batch {
+                count,
+                id,
+                reply_to,
+            } => {
                 let mut files = Vec::new();
+                let mut progress = ReceiveProgress::new(
+                    ProgressSink {
+                        handle: Some(context.handle),
+                        message_id: id.as_deref(),
+                        peer_id: Some(&sender_id),
+                    },
+                    count,
+                );
                 let outcome = super::transfer::receive_batch_into(
                     &conn,
                     count,
                     &out_folder,
                     sort_into_date_folder,
-                    Some(context.handle),
+                    &mut progress,
                     &mut files,
                 )
                 .await;
@@ -1502,28 +1589,43 @@ async fn handle_incoming_session(
                         .collect();
                     // Files already finalized on disk are reported even when the
                     // batch fails later, so they appear in the conversation.
-                    let _ = context.handle.emit(
-                        "lan_files_received",
-                        serde_json::json!({
-                            "peer_id": sender_id,
-                            "files": names,
-                            "file_details": details,
-                            "partial": outcome.is_err(),
-                            "expected_files": count,
-                        }),
-                    );
+                    let mut payload = serde_json::json!({
+                        "peer_id": sender_id,
+                        "files": names,
+                        "file_details": details,
+                        "partial": outcome.is_err(),
+                        "expected_files": count,
+                    });
+                    if let Some(id) = &id {
+                        payload["id"] = id.as_str().into();
+                    }
+                    if let Some(reply_to) = &reply_to {
+                        payload["reply_to"] = reply_to.as_str().into();
+                    }
+                    let _ = context.handle.emit("lan_files_received", payload);
                 }
                 if let Err(error) = outcome {
-                    emit_transfer_error(context.handle, "receive");
+                    progress.emit_error(&error);
+                    // Best effort: only reaches the sender if it is still
+                    // reading, i.e. the failure happened after its `done`.
+                    if let Some(id) = &id {
+                        let _ = super::transfer::send_ack(&conn, id, Err(&error)).await;
+                    }
                     return Err(format!("Batch receive error: {error}"));
+                }
+                if let Some(id) = &id {
+                    let _ = super::transfer::send_ack(&conn, id, Ok(())).await;
                 }
                 return Ok(());
             }
-            super::protocol::Message::Done => return Ok(()),
-            super::protocol::Message::Dir { .. } => {
+            Message::Done => return Ok(()),
+            Message::Dir { .. } => {
                 return Err("Unexpected directory marker outside a batch".into());
             }
-            super::protocol::Message::Discover | super::protocol::Message::Identity { .. } => {
+            Message::Ack { .. } => {
+                return Err("Unexpected acknowledgement during a transfer".into());
+            }
+            Message::Discover | Message::Identity { .. } => {
                 return Err("Unexpected discovery message during a transfer".into());
             }
         }

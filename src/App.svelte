@@ -6,19 +6,19 @@
   import { onMount } from "svelte";
   import { getThemeState } from "$lib/theme/theme-store.svelte";
   import { applyThemeToDOM } from "$lib/theme/apply-theme";
-  import { getAppState, PEER_COLORS } from "$lib/state/app-state.svelte";
-  import type { MessageAttachment } from "$lib/state/app-state.svelte";
+  import { getAppState } from "$lib/state/app-state.svelte";
+  import type { MessageAttachment } from "$lib/state/model";
+  import { ChatController } from "$lib/chat/chat-controller.svelte";
   import {
     getStatus,
     startLanService,
-    lanSendText,
-    lanSendFiles,
     onLanLog,
     onLanPeerDiscovered,
     onLanPeerLost,
     onTailscaleStatus,
     onLanTextReceived,
     onLanFilesReceived,
+    onLanChatEvent,
     onTransferProgress,
     windowMinimize,
     windowToggleMaximize,
@@ -34,17 +34,8 @@
     getClipboardFiles,
     isMobile,
   } from "$lib/api/bridge";
-  import type { PreparedSendPath, TransferProgress } from "$lib/api/bridge";
   import { loadPersistedAppState, savePersistedAppState } from "$lib/persistence/app-store";
-  import {
-    fileNameFromPath,
-    isImage as fileIsImage,
-    isVideo as fileIsVideo,
-    fileSizeStr,
-    getReceivedFolderPath,
-    joinReceivePath,
-    limitHistoryItems,
-  } from "$lib/utils/file-utils";
+  import { fileSizeStr, joinReceivePath } from "$lib/utils/file-utils";
   import {
     sendNativeNotification,
     onNotificationActivation,
@@ -52,33 +43,27 @@
   } from "$lib/utils/native-notifications";
   import { getUpdaterState } from "$lib/state/updater-state.svelte";
   import { openNotificationPeer } from "$lib/utils/notification-routing";
-  import { playReceiveSound } from "$lib/utils/notification-sound";
 
   import Icon from "$lib/ui/Icon.svelte";
-  import Dialog from "$lib/ui/Dialog.svelte";
   import IconButton from "$lib/ui/IconButton.svelte";
   import Snackbar from "$lib/ui/Snackbar.svelte";
+  import ContextMenu from "$lib/ui/ContextMenu.svelte";
   import PeerBar from "./features/peers/PeerBar.svelte";
   import DeviceSettingsDialog from "./features/peers/DeviceSettingsDialog.svelte";
-  import TransferPage from "./features/transfer/TransferPage.svelte";
+  import ConversationList from "./features/conversations/ConversationList.svelte";
+  import Welcome from "./features/conversations/Welcome.svelte";
+  import ChatView from "./features/chat/ChatView.svelte";
   import SettingsPage from "./features/settings/SettingsPage.svelte";
 
   const theme = getThemeState();
   const app = getAppState();
   const updater = getUpdaterState();
-  let pendingNotificationPeer = $state<string | null>(null);
-  let notificationDialogOpen = $state(false);
 
   function openNotificationConversation(peerId: string) {
-    const result = openNotificationPeer(app, peerId);
-    if (result === "missing") {
+    if (openNotificationPeer(app, peerId) === "missing") {
       showSnackbar("This conversation is no longer in your saved history.");
-    } else if (result === "busy") {
-      showSnackbar("Finish the current transfer before switching conversations.");
-    } else if (result === "draft") {
-      pendingNotificationPeer = peerId;
-      notificationDialogOpen = true;
     }
+    drawerOpen = false;
   }
 
   function handleNotificationActivation(target: NotificationTarget) {
@@ -95,7 +80,6 @@
   let snackbarMsg = $state("");
   let snackbarVisible = $state(false);
   let appVersion = $state("1.0.0");
-  let transferProgress = $state<TransferProgress | null>(null);
 
   let deviceDialogOpen = $state(false);
   let editingDevice = $state<import("$lib/state/app-state.svelte").DiscoveredDevice | null>(null);
@@ -104,14 +88,18 @@
   // startup; Rust remains the single owner (UI writes go through
   // set_peer_out_folder / set_default_out_folder at the moment of action).
   let startupPeerFolders: Record<string, string> = {};
-  let transferRateBps = $state<number | null>(null);
-  let transferEtaSeconds = $state<number | null>(null);
-  let lastProgressSample = $state<{
-    bytes: number;
-    at: number;
-    direction: "send" | "receive";
-  } | null>(null);
-  const MAX_HISTORY_ITEMS = 100;
+
+  // Adaptive layout: a conversation list pane beside the chat on wide windows,
+  // a drawer on narrow ones.
+  let windowWidth = $state(window.innerWidth);
+  const expanded = $derived(windowWidth >= 760);
+  let drawerOpen = $state(false);
+
+  const controller = new ChatController({
+    app,
+    notify: showSnackbar,
+    updateInProgress: () => updater.phase === "downloading" || updater.phase === "installing",
+  });
 
   function showSnackbar(msg: string) {
     snackbarMsg = msg;
@@ -121,36 +109,6 @@
   function openDeviceSettings(id: string) {
     editingDevice = app.devices.find((d) => d.id === id) ?? null;
     deviceDialogOpen = true;
-  }
-
-  function ensurePeerVisible(peerId: string) {
-    if (app.devices.some((device) => device.id === peerId)) return;
-    app.devices = [
-      ...app.devices,
-      {
-        id: peerId,
-        alias: `Device-${peerId.slice(0, 8)}`,
-        deviceType: "desktop",
-        ip: "",
-        online: false,
-        color: app.devices.length % PEER_COLORS.length,
-      },
-    ];
-    app.addLog("warn", `Recovered hidden peer ${peerId.slice(0, 8)} from inbound traffic`);
-  }
-
-  function revealIncomingPeer(peerId: string) {
-    ensurePeerVisible(peerId);
-    // Incoming traffic must not change the recipient of a draft or interrupt history/settings.
-    if (
-      !app.activeDeviceId &&
-      !app.sendTextContent &&
-      !app.hasFiles &&
-      !app.transferActive &&
-      !app.messageViewAll
-    ) {
-      app.setActiveDevice(peerId);
-    }
   }
 
   function getConfiguredOutFolder(peerId: string): string {
@@ -221,15 +179,22 @@
     previousPersistedState = serialized;
     clearTimeout(persistedStateSaveTimer);
     persistedStateSaveTimer = setTimeout(() => {
-      savePersistedAppState(snapshot).catch(() => {});
-    }, 200);
+      savePersistedAppState(snapshot).catch((error) => {
+        app.addLog("error", `Could not save history: ${error}`);
+      });
+    }, 300);
   });
+  // Flush a pending save when the window is hidden or closed.
+  function flushPersistedState() {
+    if (!persistedStateReady) return;
+    clearTimeout(persistedStateSaveTimer);
+    void savePersistedAppState(app.exportPersistedState()).catch(() => {});
+  }
   $effect(() => () => clearTimeout(persistedStateSaveTimer));
 
   onMount(() => {
     let unlisteners: Array<() => void> = [];
     let disposed = false;
-    let activeReceives = 0;
 
     function cleanupListeners() {
       for (const unlisten of unlisteners.splice(0)) unlisten();
@@ -324,133 +289,10 @@
         onTailscaleStatus((status) => {
           app.tailscaleStatus = status;
         }),
-        onLanTextReceived((peerId, text) => {
-          revealIncomingPeer(peerId);
-          app.addMessage({ peerId, direction: "received", text });
-          app.addLog("info", `Received text from ${peerId.slice(0, 8)} (${text.length} chars)`);
-          if (app.notificationsEnabled) playReceiveSound();
-          if (app.notificationsEnabled && !document.hasFocus()) {
-            sendNativeNotification(
-              app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop",
-              text || "New message received",
-              { kind: "peer", peerId },
-            ).catch((error) => app.addLog("warn", `Notification unavailable: ${error}`));
-          }
-          if (app.popOnReceive) windowShow();
-        }),
-        onLanFilesReceived((peerId, files, details) => {
-          revealIncomingPeer(peerId);
-          if (details.length > 0) {
-            // Plain Map on purpose: a local grouping table, never reactive state.
-            // eslint-disable-next-line svelte/prefer-svelte-reactivity
-            const folderFiles = new Map<string, typeof details>();
-            const looseFiles: typeof details = [];
-            for (const f of details) {
-              const slashIdx = f.name.indexOf("/");
-              if (slashIdx > 0) {
-                const folder = f.name.substring(0, slashIdx);
-                if (!folderFiles.has(folder)) folderFiles.set(folder, []);
-                folderFiles.get(folder)!.push(f);
-              } else {
-                looseFiles.push(f);
-              }
-            }
-
-            const attachments: MessageAttachment[] = [];
-            for (const [folder, folderDetails] of folderFiles) {
-              const totalSize = folderDetails.reduce((sum, f) => sum + f.size, 0);
-              const folderPath = getReceivedFolderPath(
-                folderDetails[0].path,
-                folderDetails[0].name,
-              );
-              const children = limitHistoryItems(folderDetails, MAX_HISTORY_ITEMS).map(
-                (detail) => ({
-                  name: detail.name,
-                  path: detail.path,
-                  size: fileSizeStr(detail.size),
-                  type: fileIsImage(detail.name)
-                    ? ("image" as const)
-                    : fileIsVideo(detail.name)
-                      ? ("video" as const)
-                      : ("file" as const),
-                }),
-              );
-              attachments.push({
-                name: folder,
-                path: folderPath,
-                size: fileSizeStr(totalSize),
-                type: "folder" as const,
-                fileCount: folderDetails.length,
-                children,
-              });
-            }
-            for (const f of looseFiles) {
-              attachments.push({
-                name: f.name,
-                path: f.path,
-                size: fileSizeStr(f.size),
-                type: fileIsImage(f.name)
-                  ? ("image" as const)
-                  : fileIsVideo(f.name)
-                    ? ("video" as const)
-                    : ("file" as const),
-              });
-            }
-            app.addMessage({ peerId, direction: "received", text: "", attachments });
-          }
-          if (app.notificationsEnabled) playReceiveSound();
-          if (app.notificationsEnabled && !document.hasFocus()) {
-            const peerAlias =
-              app.devices.find((device) => device.id === peerId)?.alias ?? "LanDrop";
-            const body =
-              files.length === 1 ? `Received ${files[0]}` : `Received ${files.length} items`;
-            sendNativeNotification(peerAlias, body, { kind: "peer", peerId }).catch((error) =>
-              app.addLog("warn", `Notification unavailable: ${error}`),
-            );
-          }
-          if (app.popOnReceive) windowShow();
-        }),
-        onTransferProgress((progress) => {
-          if (progress.direction === "receive") {
-            if (progress.phase === "start") activeReceives += 1;
-            if (progress.phase === "done" || progress.phase === "error") {
-              activeReceives = Math.max(0, activeReceives - 1);
-            }
-            app.receivingTransferActive = activeReceives > 0;
-          }
-          const completedBytes = progress.sent_bytes ?? progress.received_bytes ?? 0;
-          const totalBytes = progress.total_bytes ?? 0;
-          if (progress.phase === "start") {
-            lastProgressSample =
-              completedBytes > 0
-                ? { bytes: completedBytes, at: Date.now(), direction: progress.direction }
-                : null;
-            transferRateBps = null;
-            transferEtaSeconds = null;
-          } else if (progress.phase === "transferring" && totalBytes > 0) {
-            const now = Date.now();
-            if (lastProgressSample && lastProgressSample.direction === progress.direction) {
-              const elapsedMs = now - lastProgressSample.at;
-              const byteDelta = completedBytes - lastProgressSample.bytes;
-              if (elapsedMs > 0 && byteDelta > 0) {
-                transferRateBps = byteDelta / (elapsedMs / 1000);
-                const remainingBytes = Math.max(0, totalBytes - completedBytes);
-                transferEtaSeconds = transferRateBps > 0 ? remainingBytes / transferRateBps : null;
-              }
-            }
-            lastProgressSample = { bytes: completedBytes, at: now, direction: progress.direction };
-          } else if (progress.phase === "done" || progress.phase === "error") {
-            lastProgressSample = null;
-            transferRateBps = null;
-            transferEtaSeconds = null;
-          }
-          const terminal = progress.phase === "done" || progress.phase === "error";
-          if (!terminal) {
-            transferProgress = progress;
-          } else if (!transferProgress || transferProgress.direction === progress.direction) {
-            transferProgress = null;
-          }
-        }),
+        onLanTextReceived((event) => controller.handleText(event)),
+        onLanFilesReceived((event) => controller.handleFiles(event)),
+        onLanChatEvent((event) => controller.handleChatEvent(event)),
+        onTransferProgress((progress) => controller.handleProgress(progress)),
       ]);
 
       const registeredListeners = listenerResults.flatMap((result) =>
@@ -574,136 +416,22 @@
     }
   });
 
-  async function handleSendFiles() {
-    if (updater.phase === "downloading" || updater.phase === "installing") {
-      showSnackbar("Wait for the app update to finish before sending.");
-      return;
-    }
-    if (!app.hasFiles || app.transferActive) return;
-    const device = app.activeDevice;
-    if (!device) {
-      showSnackbar("No device selected");
-      return;
-    }
-    if (!device.online) {
-      showSnackbar("Device is offline");
-      return;
-    }
+  const legacy = $derived(controller.legacyTransfer);
+  const legacyPct = $derived(
+    legacy && legacy.total > 0 ? Math.round((legacy.bytes / legacy.total) * 100) : null,
+  );
 
-    const filesCopy = [...app.files];
-    const pathsCopy = [...app.filePaths];
-    app.transferActive = true;
-    try {
-      let preparedFiles: PreparedSendPath[] = pathsCopy.map((path) => ({
-        originalPath: path,
-        sendPath: path,
-        historyPath: path,
-      }));
-      const sent = await lanSendFiles(device.id, pathsCopy, device.ip, (prepared) => {
-        preparedFiles = prepared;
-      });
-      if (sent) {
-        const historyPathFor = new Map(
-          preparedFiles.map((file) => [file.originalPath, file.historyPath]),
-        );
-        const attachments: MessageAttachment[] = limitHistoryItems(
-          filesCopy,
-          MAX_HISTORY_ITEMS,
-        ).map((f) => ({
-          name: f.info?.name ?? fileNameFromPath(f.path, "file"),
-          path: historyPathFor.get(f.path) ?? f.path,
-          size: f.info?.size_bytes ? fileSizeStr(f.info.size_bytes) : "",
-          type: fileIsImage(f.info?.name ?? f.path)
-            ? ("image" as const)
-            : fileIsVideo(f.info?.name ?? f.path)
-              ? ("video" as const)
-              : ("file" as const),
-        }));
-        app.addMessage({ peerId: device.id, direction: "sent", text: "", attachments });
-        app.removeSentFiles(filesCopy);
-      } else {
-        showSnackbar(`Send failed — ${device.alias} did not accept the transfer`);
-        app.addLog("warn", `File transfer to ${device.alias} was not accepted`);
-      }
-    } catch (e) {
-      showSnackbar("Send failed — " + e);
-      app.markDeviceOffline(device.id);
-      app.addLog("warn", `Send failed for ${device.alias} (${device.ip || "unknown ip"}): ${e}`);
-    } finally {
-      app.transferActive = false;
-    }
-  }
-
-  async function handleSendText() {
-    if (updater.phase === "downloading" || updater.phase === "installing") {
-      showSnackbar("Wait for the app update to finish before sending.");
-      return;
-    }
-    if (!app.sendTextContent.trim() || app.transferActive) return;
-    const device = app.activeDevice;
-    if (!device) {
-      showSnackbar("No device selected");
-      return;
-    }
-    if (!device.online) {
-      showSnackbar("Device is offline");
-      return;
-    }
-
-    const textDraft = app.sendTextContent;
-    const textToSend = textDraft.trim();
-    app.sendTextContent = "";
-
-    function restoreText() {
-      app.sendTextContent = app.sendTextContent.trim()
-        ? `${textDraft}\n${app.sendTextContent}`
-        : textDraft;
-    }
-
-    app.transferActive = true;
-    try {
-      const sent = await lanSendText(device.id, textToSend, device.ip);
-      if (sent) {
-        app.addMessage({ peerId: device.id, direction: "sent", text: textToSend });
-      } else {
-        restoreText();
-        showSnackbar(`Send failed — ${device.alias} did not accept the message`);
-        app.addLog("warn", `Message to ${device.alias} was not accepted`);
-      }
-    } catch (e: unknown) {
-      restoreText();
-      app.markDeviceOffline(device.id);
-      const detail = e instanceof Error ? e.message : String(e ?? "device unreachable");
-      showSnackbar(`Send failed — ${detail}`);
-    } finally {
-      app.transferActive = false;
-    }
-  }
-
-  const progressPct = $derived.by(() => {
-    if (!transferProgress?.total_bytes || transferProgress.total_bytes === 0) return null;
-    const done = transferProgress.sent_bytes ?? transferProgress.received_bytes ?? 0;
-    return Math.round((done / transferProgress.total_bytes) * 100);
-  });
-
-  const transferRateLabel = $derived.by(() => {
-    if (!transferRateBps) return "";
-    return `${fileSizeStr(Math.round(transferRateBps))}/s`;
-  });
-
-  const transferEtaLabel = $derived.by(() => {
-    if (!transferEtaSeconds || !isFinite(transferEtaSeconds)) return "";
-    const secs = Math.max(0, Math.round(transferEtaSeconds));
-    if (secs < 60) return `${secs}s left`;
-    const mins = Math.floor(secs / 60);
-    const rem = secs % 60;
-    return `${mins}m ${rem}s left`;
+  // Reading the open conversation clears its unread badge.
+  $effect(() => {
+    const id = app.activeDeviceId;
+    void app.messages.length;
+    if (id && app.activeView === "transfer" && document.hasFocus()) app.markRead(id);
   });
 
   function handleTitlebarMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
-    if (target.closest("button, input, a, [role='button'], .peer-chip")) return;
+    if (target.closest("button, input, a, [role='button'], .peer-chip, .no-drag")) return;
     if (e.detail === 2) {
       windowToggleMaximize();
     } else {
@@ -712,32 +440,49 @@
   }
 </script>
 
+<svelte:window
+  bind:innerWidth={windowWidth}
+  onfocus={() =>
+    app.activeDeviceId && app.activeView === "transfer" && app.markRead(app.activeDeviceId)}
+  onblur={flushPersistedState}
+  onbeforeunload={flushPersistedState}
+/>
+
 <div
   class="app-shell"
   class:mica-on={theme.mica}
+  class:expanded
   style:--mica-opacity={theme.mica ? 0.05 + (theme.micaOpacity * 0.75) / 100 : 1}
 >
   <!-- Custom title bar -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="titlebar" onmousedown={handleTitlebarMouseDown}>
     <div class="titlebar-content">
-      {#if app.activeView === "transfer"}
+      {#if app.activeView === "settings"}
+        <IconButton title="Back" onclick={() => (app.activeView = "transfer")}>
+          <Icon name="arrow_back" size={20} />
+        </IconButton>
+        <span class="titlebar-title">Settings</span>
+      {:else if expanded}
+        <img class="titlebar-logo" src="/app-icon.png" alt="" width="22" height="22" />
+        <span class="titlebar-title">LanDrop</span>
+      {:else}
+        <span class="drawer-button">
+          <IconButton title="Conversations" onclick={() => (drawerOpen = true)}>
+            <Icon name="menu" size={20} />
+          </IconButton>
+          {#if app.totalUnread > 0}<span class="drawer-badge">{app.totalUnread}</span>{/if}
+        </span>
         <div class="peer-strip">
           <PeerBar onedit={openDeviceSettings} onsnackbar={showSnackbar} />
         </div>
-      {:else}
-        <div class="flex items-center gap-2 flex-1 min-w-0">
-          <Icon name="settings" size={18} />
-          <span class="text-sm font-medium">Settings</span>
-        </div>
       {/if}
-
-      <IconButton
-        title={app.activeView === "settings" ? "Back" : "Settings"}
-        onclick={() => (app.activeView = app.activeView === "settings" ? "transfer" : "settings")}
-      >
-        <Icon name={app.activeView === "settings" ? "close" : "tune"} size={20} />
-      </IconButton>
+      <span class="flex-1"></span>
+      {#if app.activeView !== "settings"}
+        <IconButton title="Settings" onclick={() => (app.activeView = "settings")}>
+          <Icon name="settings" size={20} />
+        </IconButton>
+      {/if}
     </div>
 
     <div class="titlebar-controls">
@@ -750,47 +495,67 @@
     </div>
   </div>
 
-  <!-- Content area -->
   <main class="content-area">
-    {#if app.activeView === "transfer"}
-      <TransferPage
-        onsnackbar={showSnackbar}
-        onsend={handleSendFiles}
-        onsendtext={handleSendText}
-      />
-    {:else}
+    {#if app.activeView === "settings"}
       <div class="settings-scroll">
         <SettingsPage {appVersion} onsnackbar={showSnackbar} />
+      </div>
+    {:else}
+      {#if expanded}
+        <aside class="list-pane">
+          <ConversationList onsnackbar={showSnackbar} />
+        </aside>
+      {/if}
+      <div class="chat-pane">
+        {#if app.activeDevice}
+          {#key app.activeDevice.id}
+            <ChatView
+              device={app.activeDevice}
+              {controller}
+              compact={!expanded}
+              onsnackbar={showSnackbar}
+              ondevicesettings={openDeviceSettings}
+            />
+          {/key}
+        {:else if app.conversations.length > 0}
+          <div class="pick">
+            <Icon name="forum" size={36} />
+            <p>Choose a device to start chatting.</p>
+            {#if !expanded}
+              <button class="pick-button" onclick={() => (drawerOpen = true)}>Show devices</button>
+            {/if}
+          </div>
+        {:else}
+          <Welcome />
+        {/if}
       </div>
     {/if}
   </main>
 
-  <!-- Transfer Progress -->
-  {#if transferProgress}
-    <div class="progress-bar">
-      <div class="progress-bar-fill" style="width: {progressPct ?? 0}%"></div>
+  {#if legacy}
+    <div class="progress-bar" role="status">
+      <div class="progress-bar-fill" style="width: {legacyPct ?? 0}%"></div>
       <div class="progress-bar-content">
-        <Icon name={transferProgress.direction === "send" ? "upload" : "download"} size={14} />
-        <div class="progress-text">
-          <span class="truncate flex-1">
-            {transferProgress.direction === "send" ? "Sending" : "Receiving"}
-            {#if transferProgress.current_file}
-              {transferProgress.current_file.split("/").pop()}
-            {/if}
-          </span>
-          {#if transferRateLabel || transferEtaLabel}
-            <span class="progress-meta"
-              >{[transferRateLabel, transferEtaLabel].filter(Boolean).join(" · ")}</span
-            >
-          {/if}
-        </div>
-        {#if progressPct !== null}
-          <span class="progress-pct">{progressPct}%</span>
-        {/if}
+        <Icon name={legacy.direction === "send" ? "upload" : "download"} size={14} />
+        <span class="truncate flex-1">
+          {legacy.direction === "send" ? "Sending" : "Receiving"}
+          {legacy.currentFile?.split("/").pop() ?? ""}
+          {#if legacy.total}· {fileSizeStr(legacy.bytes)} of {fileSizeStr(legacy.total)}{/if}
+        </span>
+        {#if legacyPct !== null}<span class="progress-pct">{legacyPct}%</span>{/if}
       </div>
     </div>
   {/if}
 </div>
+
+{#if drawerOpen && !expanded && app.activeView !== "settings"}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="scrim" onclick={() => (drawerOpen = false)}></div>
+  <aside class="drawer" aria-label="Conversations">
+    <ConversationList onselect={() => (drawerOpen = false)} onsnackbar={showSnackbar} />
+  </aside>
+{/if}
 
 <DeviceSettingsDialog
   bind:open={deviceDialogOpen}
@@ -801,31 +566,8 @@
   }}
 />
 
+<ContextMenu />
 <Snackbar message={snackbarMsg} bind:visible={snackbarVisible} />
-
-<Dialog
-  bind:open={notificationDialogOpen}
-  headline="Keep your current draft?"
-  dismissLabel="Keep editing"
-  confirmLabel="Discard draft and open"
-  confirmDisabled={app.transferActive}
-  onclose={() => {
-    pendingNotificationPeer = null;
-  }}
-  onconfirm={() => {
-    if (app.transferActive || !pendingNotificationPeer) return;
-    app.sendTextContent = "";
-    app.files = [];
-    openNotificationConversation(pendingNotificationPeer);
-    notificationDialogOpen = false;
-    pendingNotificationPeer = null;
-  }}
->
-  <p>
-    You have unsent text or attachments. Keep editing them, or discard them to open the
-    notification's conversation.
-  </p>
-</Dialog>
 
 <style>
   .app-shell {
@@ -869,12 +611,113 @@
     min-width: 0;
     overflow: hidden;
   }
+  .titlebar-title {
+    font-size: 15px;
+    font-weight: 600;
+    font-variation-settings: "wdth" 112;
+    padding-left: 4px;
+  }
+  .titlebar-logo {
+    margin-left: 8px;
+    border-radius: 6px;
+  }
+  .drawer-button {
+    position: relative;
+    display: inline-flex;
+  }
+  .drawer-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+    background: var(--md-sys-color-error);
+    color: var(--md-sys-color-on-error);
+    pointer-events: none;
+  }
+
+  /* ── Panes ── */
+  .list-pane {
+    width: clamp(260px, 30vw, 340px);
+    flex-shrink: 0;
+    min-height: 0;
+    background: var(--md-sys-color-surface-container-low);
+    border-right: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 50%, transparent);
+  }
+  .chat-pane {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .pick {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--md-sys-color-on-surface-variant);
+    font-size: 14px;
+  }
+  .pick p {
+    margin: 0;
+  }
+  .pick-button {
+    margin-top: 8px;
+    height: 40px;
+    padding: 0 20px;
+    border: none;
+    border-radius: 20px;
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: color-mix(in srgb, var(--md-sys-color-scrim) 40%, transparent);
+    animation: fade-in 150ms ease-out;
+  }
+  .drawer {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 201;
+    width: min(340px, 86vw);
+    background: var(--md-sys-color-surface-container-low);
+    border-radius: 0 28px 28px 0;
+    box-shadow: var(--shadow-level3);
+    animation: drawer-in var(--md-spring-default-spatial-dur) var(--md-spring-default-spatial);
+    overflow: hidden;
+  }
+  @keyframes drawer-in {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
 
   /* ── Content ── */
   .content-area {
     flex: 1;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     min-height: 0;
   }
   .settings-scroll {
@@ -906,17 +749,6 @@
     font-size: 12px;
     color: var(--md-sys-color-primary);
   }
-  .progress-text {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1;
-  }
-  .progress-meta {
-    font-size: 10px;
-    opacity: 0.75;
-    white-space: nowrap;
-  }
   .progress-pct {
     font-variant-numeric: tabular-nums;
     font-weight: 600;
@@ -933,14 +765,8 @@
   .mica-on .titlebar {
     background: transparent;
   }
-  .mica-on :global(.composer) {
-    background: transparent !important;
-  }
-  .mica-on :global(.composer-box) {
-    background: var(--md-sys-color-surface) !important;
-  }
-  .mica-on :global(.chat-toolbar) {
-    background: transparent;
+  .mica-on .list-pane {
+    background: rgba(255, 255, 255, 0.04);
   }
   .mica-on .settings-scroll {
     background: transparent;

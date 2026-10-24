@@ -14,6 +14,7 @@ export interface DiscoveredDevice {
   ip: string; // current IP address
   online: boolean; // currently discovered in this session
   network?: "lan" | "tailscale"; // preferred/last successful route
+  caps?: string[]; // protocol capabilities advertised this session ("ack", "chat2")
   lanIp?: string;
   tailscaleIp?: string;
   color: number; // auto-assigned avatar color
@@ -36,7 +37,19 @@ export interface MessageAttachment {
   children?: MessageAttachment[];
 }
 
+/**
+ * sending → sent (peer has no receipts) | delivered (peer acknowledged) | failed.
+ * "receiving" marks an incoming batch whose files are still arriving.
+ */
+export type MessageStatus = "sending" | "sent" | "delivered" | "failed" | "receiving";
+
+export interface MessageReactions {
+  mine?: string;
+  theirs?: string;
+}
+
 export interface MessageEntry {
+  /** Shared with the peer when both run LanDrop 2 (sender-generated UUID). */
   id: string;
   peerId: string;
   direction: "sent" | "received";
@@ -44,6 +57,34 @@ export interface MessageEntry {
   timestamp: string;
   starred?: boolean;
   attachments?: MessageAttachment[];
+  status?: MessageStatus;
+  error?: string;
+  replyTo?: string;
+  editedAt?: string;
+  /** Tombstone: the sender deleted this message for everyone. */
+  deleted?: boolean;
+  reactions?: MessageReactions;
+  /** Original local paths of a sent attachment batch, kept so a failed send can be retried. */
+  sendPaths?: string[];
+}
+
+/** Live byte progress of a message's attachments (transient, never persisted). */
+export interface MessageProgress {
+  bytes: number;
+  total: number;
+  files: number;
+  totalFiles: number;
+  rateBps?: number;
+}
+
+/** Composer state kept separately for every conversation. */
+export interface Draft {
+  text: string;
+  files: SelectedFile[];
+  replyTo?: string;
+  editingId?: string;
+  /** Text typed before entering edit mode, restored when the edit is cancelled. */
+  stash?: string;
 }
 
 export interface SelectedFile {
@@ -68,11 +109,17 @@ export interface PersistedAppState {
   devices: DiscoveredDevice[];
   activeDeviceId: string | null;
   messages: MessageEntry[];
+  /** ISO time each conversation was last viewed, for unread badges. */
+  lastReadAt?: Record<string, string>;
   notificationsEnabled: boolean;
   popOnReceive: boolean;
   receiveOptions: ReceiveOptions;
   hotkeys: HotkeySettings;
 }
+
+export const PERSISTED_STATE_VERSION = 2;
+
+export const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "🙏", "🔥"];
 
 export const PEER_COLORS = [
   "#6750A4",

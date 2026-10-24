@@ -15,12 +15,12 @@ describe("notification conversation routing", () => {
   it("opens the exact peer and clears history filters", () => {
     const app = setup();
     app.activeView = "settings";
-    app.messageViewAll = true;
+    app.starredOnly = true;
     app.messageSearch = "old search";
     expect(openNotificationPeer(app, "sender")).toBe("opened");
     expect(app.activeDeviceId).toBe("sender");
     expect(app.activeView).toBe("transfer");
-    expect(app.messageViewAll).toBe(false);
+    expect(app.starredOnly).toBe(false);
     expect(app.messageSearch).toBe("");
   });
   it("opens an offline saved peer without making it discoverable or sendable", () => {
@@ -35,20 +35,16 @@ describe("notification conversation routing", () => {
     expect(openNotificationPeer(app, "unknown")).toBe("missing");
     expect(app.activeDeviceId).toBe("other");
   });
-  it("does not retarget unsent text or attachments", () => {
+  it("keeps each conversation's draft with its own peer", () => {
     const app = setup();
     app.sendTextContent = "Private draft";
     app.addFile("/draft.txt", null);
-    expect(openNotificationPeer(app, "sender")).toBe("draft");
-    expect(app.activeDeviceId).toBe("other");
+    expect(openNotificationPeer(app, "sender")).toBe("opened");
+    expect(app.activeDeviceId).toBe("sender");
+    expect(app.sendTextContent).toBe("");
+    expect(app.filePaths).toEqual([]);
+    expect(openNotificationPeer(app, "other")).toBe("opened");
     expect(app.sendTextContent).toBe("Private draft");
     expect(app.filePaths).toEqual(["/draft.txt"]);
-    expect(openNotificationPeer(app, "other")).toBe("opened");
-  });
-  it("does not switch during a send", () => {
-    const app = setup();
-    app.transferActive = true;
-    expect(openNotificationPeer(app, "sender")).toBe("busy");
-    expect(app.activeDeviceId).toBe("other");
   });
 });

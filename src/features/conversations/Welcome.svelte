@@ -1,76 +1,62 @@
 <!--
-  Main transfer view — welcome onboarding + chat layout
+  Shown until the first device or conversation exists: how discovery works.
 -->
 <script lang="ts">
   import { getAppState } from "$lib/state/app-state.svelte";
   import Icon from "$lib/ui/Icon.svelte";
-  import ChatArea from "./ChatArea.svelte";
-
-  interface Props {
-    onsnackbar?: (msg: string) => void;
-    onsend?: () => void;
-    onsendtext?: () => void;
-  }
-
-  let { onsnackbar, onsend, onsendtext }: Props = $props();
 
   const app = getAppState();
-  const device = $derived(app.activeDevice);
-  const hasOnlineDevices = $derived(app.onlineDevices.length > 0);
 </script>
 
-{#if !hasOnlineDevices && !app.messageViewAll && !app.activeDevice}
-  <div class="welcome-wrapper">
-    <div class="welcome-card">
-      <div class="welcome-icon-ring">
-        <div class="welcome-icon">
-          <img src="/app-icon.png" alt="" width="48" height="48" />
-        </div>
+<div class="welcome-wrapper">
+  <div class="welcome-card">
+    <div class="welcome-icon-ring">
+      <div class="welcome-icon">
+        <img src="/app-icon.png" alt="" width="48" height="48" />
       </div>
-
-      <div class="welcome-text">
-        <h2 class="welcome-title">Find your devices</h2>
-        <p class="welcome-desc">
-          Send files and messages over your local network or Tailscale. Only devices running LanDrop
-          and discovered now appear above.
-        </p>
-      </div>
-
-      <div class="welcome-steps">
-        <div class="step">
-          <span class="step-num">1</span>
-          <span class="step-text">Install LanDrop on your devices</span>
-        </div>
-        <div class="step">
-          <span class="step-num">2</span>
-          <span class="step-text"
-            >Connect to the same LAN or sign in to your shared Tailscale network</span
-          >
-        </div>
-        <div class="step">
-          <span class="step-num">3</span>
-          <span class="step-text">Select a device to send. LAN is preferred when available.</span>
-        </div>
-      </div>
-
-      <div class="searching-hint" role="status">
-        <Icon name="radar" size={18} />
-        <span>{app.discoveryError || "Searching for devices running LanDrop..."}</span>
-      </div>
-      {#if app.tailscaleStatus}
-        <p class="welcome-desc">Tailscale: {app.tailscaleStatus.message}</p>
-      {/if}
     </div>
-  </div>
-{/if}
 
-<ChatArea peerName={device?.alias} {onsnackbar} {onsend} {onsendtext} />
+    <div class="welcome-text">
+      <h2 class="welcome-title">Find your devices</h2>
+      <p class="welcome-desc">
+        Send files and messages over your local network or Tailscale. Devices running LanDrop appear
+        here as soon as they're found.
+      </p>
+    </div>
+
+    <div class="welcome-steps">
+      <div class="step">
+        <span class="step-num">1</span>
+        <span class="step-text">Install LanDrop on your devices</span>
+      </div>
+      <div class="step">
+        <span class="step-num">2</span>
+        <span class="step-text"
+          >Connect to the same LAN or sign in to your shared Tailscale network</span
+        >
+      </div>
+      <div class="step">
+        <span class="step-num">3</span>
+        <span class="step-text">Select a device to send. LAN is preferred when available.</span>
+      </div>
+    </div>
+
+    <div class="searching-hint" role="status">
+      <Icon name="radar" size={18} />
+      <span>{app.discoveryError || "Searching for devices running LanDrop..."}</span>
+    </div>
+    {#if app.tailscaleStatus}
+      <p class="welcome-desc">Tailscale: {app.tailscaleStatus.message}</p>
+    {/if}
+  </div>
+</div>
 
 <style>
   .welcome-wrapper {
     padding: 24px 16px 8px;
     min-height: 0;
-    max-height: calc(100% - 180px);
+    max-height: 100%;
+    margin: auto 0;
     overflow-y: auto;
   }
 

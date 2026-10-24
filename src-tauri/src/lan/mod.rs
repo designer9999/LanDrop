@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{watch, Mutex};
@@ -20,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 use discovery::DiscoveredPeer;
 use identity::normalize_uuid;
 use identity::DeviceIdentity;
+use protocol::{ChatEvent, CAP_CHAT};
+use transfer::{ProgressSink, SendStatus, UnitMeta};
 
 fn peer_uuid_bytes(peer_id: &str) -> Result<[u8; 16], String> {
     uuid::Uuid::parse_str(peer_id.trim())
@@ -67,6 +70,65 @@ fn save_folder_settings(
     }
 }
 
+/// Cancellation tokens for in-flight sends, keyed by frontend message id. The
+/// serial distinguishes a retry that reuses an id from the attempt it replaced.
+#[derive(Default)]
+struct TransferRegistry {
+    next_serial: AtomicU64,
+    active: std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>,
+}
+
+impl TransferRegistry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (u64, CancellationToken)>> {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn register(&self, message_id: &str) -> TransferRegistration<'_> {
+        let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
+        let token = CancellationToken::new();
+        self.lock()
+            .insert(message_id.to_string(), (serial, token.clone()));
+        TransferRegistration {
+            registry: self,
+            message_id: message_id.to_string(),
+            serial,
+            token,
+        }
+    }
+
+    fn cancel(&self, message_id: &str) -> bool {
+        match self.lock().get(message_id) {
+            Some((_, token)) if !token.is_cancelled() => {
+                token.cancel();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Removes its registry entry when the send finishes, however it finishes.
+struct TransferRegistration<'a> {
+    registry: &'a TransferRegistry,
+    message_id: String,
+    serial: u64,
+    token: CancellationToken,
+}
+
+impl Drop for TransferRegistration<'_> {
+    fn drop(&mut self) {
+        let mut active = self.registry.lock();
+        if active
+            .get(&self.message_id)
+            .is_some_and(|(serial, _)| *serial == self.serial)
+        {
+            active.remove(&self.message_id);
+        }
+    }
+}
+
 /// One discovery run: its cancellation token and the task driving it.
 struct DiscoveryRun {
     cancel: CancellationToken,
@@ -88,6 +150,8 @@ pub struct LanService {
     sort_by_date: Arc<Mutex<bool>>,
     /// Current alias; discovery watches this and re-registers mDNS on change
     alias_tx: watch::Sender<String>,
+    /// In-flight sends that `lan_cancel_transfer` can cancel
+    transfers: TransferRegistry,
 }
 
 impl LanService {
@@ -104,6 +168,7 @@ impl LanService {
             default_out_folder: Arc::new(Mutex::new(folder_settings.default_out_folder)),
             sort_by_date: Arc::new(Mutex::new(folder_settings.sort_by_date)),
             alias_tx: watch::Sender::new(alias),
+            transfers: TransferRegistry::default(),
         }
     }
 
@@ -170,12 +235,16 @@ impl LanService {
         peer_id: &str,
         peer_ip_hint: Option<&str>,
         text: &str,
-    ) -> Result<bool, String> {
-        let connection = self.resolve_available_peer(peer_id, peer_ip_hint).await?;
-        // Route fallback happens before any payload. Once sending starts, an
-        // error is ambiguous; automatic retries could deliver duplicates.
-        transfer::send_text_on_connection(&connection, text).await?;
-        Ok(true)
+        meta: UnitMeta,
+    ) -> Result<SendStatus, String> {
+        let registration = meta.id.as_deref().map(|id| self.transfers.register(id));
+        transfer::with_cancel(registration.as_ref().map(|r| &r.token), async {
+            let connection = self.resolve_available_peer(peer_id, peer_ip_hint).await?;
+            // Route fallback happens before any payload. Once sending starts, an
+            // error is ambiguous; automatic retries could deliver duplicates.
+            transfer::send_text_on_connection(&connection, text, &meta).await
+        })
+        .await
     }
 
     pub async fn send_files(
@@ -183,24 +252,90 @@ impl LanService {
         peer_id: &str,
         peer_ip_hint: Option<&str>,
         paths: &[String],
-    ) -> Result<bool, String> {
+        meta: UnitMeta,
+    ) -> Result<SendStatus, String> {
         peer_uuid_bytes(peer_id)?;
-        match transfer::send_files_on_connection(
-            paths,
-            Some(&self.handle),
-            self.resolve_available_peer(peer_id, peer_ip_hint),
+        let registration = meta.id.as_deref().map(|id| self.transfers.register(id));
+        let sink = ProgressSink {
+            handle: Some(&self.handle),
+            message_id: meta.id.as_deref(),
+            peer_id: Some(peer_id),
+        };
+        let result = transfer::with_cancel(
+            registration.as_ref().map(|r| &r.token),
+            transfer::send_files_on_connection(
+                paths,
+                &meta,
+                sink,
+                self.resolve_available_peer(peer_id, peer_ip_hint),
+            ),
         )
-        .await
-        {
-            Ok(()) => Ok(true),
-            Err(error) => {
-                let _ = self.handle.emit(
-                    "lan_transfer_progress",
-                    serde_json::json!({"direction":"send","phase":"error"}),
-                );
-                Err(error)
-            }
+        .await;
+        if let Err(error) = &result {
+            sink.emit(serde_json::json!({
+                "direction": "send",
+                "phase": "error",
+                "error": error,
+            }));
         }
+        result
+    }
+
+    /// Send an edit/delete/react event. Returns `Unsupported` without sending
+    /// anything when the peer does not advertise `chat2`.
+    pub async fn send_chat_event(
+        &self,
+        peer_id: &str,
+        peer_ip_hint: Option<&str>,
+        event: ChatEvent,
+    ) -> Result<SendStatus, String> {
+        let caps = self.peer_caps(peer_id, peer_ip_hint).await?;
+        if !caps.iter().any(|cap| cap == CAP_CHAT) {
+            return Ok(SendStatus::Unsupported);
+        }
+        let connection = self.resolve_available_peer(peer_id, peer_ip_hint).await?;
+        transfer::send_chat_on_connection(&connection, event).await
+    }
+
+    /// Cancel an in-flight send started with this message id.
+    pub fn cancel_transfer(&self, message_id: &str) -> bool {
+        self.transfers.cancel(message_id)
+    }
+
+    /// Known capabilities, or one identity probe (cached) for peers found only
+    /// by a UUID handshake, e.g. the /24 healer scan or an inbound session.
+    async fn peer_caps(&self, peer_id: &str, hint: Option<&str>) -> Result<Vec<String>, String> {
+        let expected = normalize_uuid(peer_id).ok_or("Invalid peer UUID")?;
+        if let Some(caps) = self
+            .discovered_peers
+            .lock()
+            .await
+            .get(&expected)
+            .and_then(|peer| peer.known_caps().map(<[String]>::to_vec))
+        {
+            return Ok(caps);
+        }
+        let mut ips = self.resolve_peer_ips(&expected, hint).await;
+        if ips.is_empty() {
+            ips.extend(self.find_peer_on_lan(&expected).await);
+        }
+        for ip in ips {
+            let Ok(info) = transfer::probe_peer_info(&ip, &self.identity.id_bytes()).await else {
+                continue;
+            };
+            if normalize_uuid(&info.id).as_deref() != Some(expected.as_str()) {
+                continue;
+            }
+            let mut peers = self.discovered_peers.lock().await;
+            if let Some(peer) = peers.get_mut(&expected) {
+                peer.set_caps(info.caps.clone());
+                let _ = self.handle.emit("lan_peer_discovered", peer.clone());
+            }
+            return Ok(info.caps);
+        }
+        Err(format!(
+            "Peer {peer_id} is offline or unreachable on LAN and Tailscale"
+        ))
     }
 
     async fn resolve_available_peer(
@@ -424,8 +559,26 @@ impl LanState {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_folder_settings, save_folder_settings};
+    use super::{load_folder_settings, save_folder_settings, TransferRegistry};
     use std::collections::HashMap;
+
+    #[test]
+    fn transfer_registry_cancels_once_and_forgets_finished_sends() {
+        let registry = TransferRegistry::default();
+        assert!(!registry.cancel("m1"), "unknown id");
+        let first = registry.register("m1");
+        assert!(registry.cancel("m1"));
+        assert!(first.token.is_cancelled());
+        assert!(!registry.cancel("m1"), "already cancelled");
+        // A retry reusing the id replaces the entry; dropping the old
+        // registration must not remove the new one.
+        let retry = registry.register("m1");
+        drop(first);
+        assert!(registry.cancel("m1"));
+        assert!(retry.token.is_cancelled());
+        drop(retry);
+        assert!(registry.lock().is_empty());
+    }
 
     #[test]
     fn folder_settings_round_trip() {

@@ -15,6 +15,8 @@ pub use platform::*;
 pub use shell::*;
 pub use storage::*;
 
+use crate::lan::protocol::ChatEvent;
+use crate::lan::transfer::{SendStatus, UnitMeta};
 use crate::lan::LanState;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -48,17 +50,39 @@ pub async fn refresh_lan_discovery(state: State<'_, LanState>) -> Result<(), Str
     state.service.start().await
 }
 
+/// `{ status: "delivered" | "sent" | "unsupported" }`
+#[derive(Serialize)]
+pub struct SendOutcome {
+    pub status: SendStatus,
+}
+
+fn unit_meta(message_id: Option<String>, reply_to: Option<String>) -> UnitMeta {
+    let non_empty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+    UnitMeta {
+        id: non_empty(message_id),
+        reply_to: non_empty(reply_to),
+    }
+}
+
 #[tauri::command]
 pub async fn lan_send_text(
     peer_id: String,
     text: String,
     peer_ip: Option<String>,
+    message_id: Option<String>,
+    reply_to: Option<String>,
     state: State<'_, LanState>,
-) -> Result<bool, String> {
-    state
+) -> Result<SendOutcome, String> {
+    let status = state
         .service
-        .send_text(&peer_id, peer_ip.as_deref(), &text)
-        .await
+        .send_text(
+            &peer_id,
+            peer_ip.as_deref(),
+            &text,
+            unit_meta(message_id, reply_to),
+        )
+        .await?;
+    Ok(SendOutcome { status })
 }
 
 #[tauri::command]
@@ -66,12 +90,41 @@ pub async fn lan_send_files(
     peer_id: String,
     paths: Vec<String>,
     peer_ip: Option<String>,
+    message_id: Option<String>,
+    reply_to: Option<String>,
     state: State<'_, LanState>,
-) -> Result<bool, String> {
-    state
+) -> Result<SendOutcome, String> {
+    let status = state
         .service
-        .send_files(&peer_id, peer_ip.as_deref(), &paths)
-        .await
+        .send_files(
+            &peer_id,
+            peer_ip.as_deref(),
+            &paths,
+            unit_meta(message_id, reply_to),
+        )
+        .await?;
+    Ok(SendOutcome { status })
+}
+
+#[tauri::command]
+pub async fn lan_send_chat_event(
+    peer_id: String,
+    event: ChatEvent,
+    peer_ip: Option<String>,
+    state: State<'_, LanState>,
+) -> Result<SendOutcome, String> {
+    let status = state
+        .service
+        .send_chat_event(&peer_id, peer_ip.as_deref(), event)
+        .await?;
+    Ok(SendOutcome { status })
+}
+
+/// Cancel an in-flight `lan_send_text`/`lan_send_files` started with this id.
+/// The cancelled send rejects with `"cancelled"`.
+#[tauri::command]
+pub fn lan_cancel_transfer(message_id: String, state: State<'_, LanState>) -> bool {
+    state.service.cancel_transfer(&message_id)
 }
 
 #[tauri::command]

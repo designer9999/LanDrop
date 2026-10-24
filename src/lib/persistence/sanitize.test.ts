@@ -111,6 +111,49 @@ describe("sanitizeMessage", () => {
   });
 });
 
+describe("sanitizeMessage (LanDrop 2 fields)", () => {
+  const base = { id: "m1", peerId: "p", direction: "sent", text: "hi", timestamp: "t" };
+
+  it("keeps reply, edit, reaction and retry metadata", () => {
+    expect(
+      sanitizeMessage({
+        ...base,
+        status: "delivered",
+        replyTo: "m0",
+        editedAt: "t2",
+        reactions: { mine: "👍", theirs: 5 },
+        sendPaths: ["/a", 3, ""],
+      }),
+    ).toEqual({
+      ...base,
+      status: "delivered",
+      replyTo: "m0",
+      editedAt: "t2",
+      reactions: { mine: "👍" },
+      sendPaths: ["/a"],
+    });
+  });
+
+  it("turns in-flight states into a retryable failure after a restart", () => {
+    expect(sanitizeMessage({ ...base, status: "sending" })).toMatchObject({
+      status: "failed",
+      error: "Interrupted when LanDrop closed",
+    });
+    expect(sanitizeMessage({ ...base, status: "bogus" })?.status).toBeUndefined();
+  });
+
+  it("strips all content from tombstones", () => {
+    expect(
+      sanitizeMessage({
+        ...base,
+        deleted: true,
+        attachments: [{ name: "a", path: "/a", type: "file" }],
+        reactions: { mine: "👍" },
+      }),
+    ).toEqual({ ...base, text: "", deleted: true });
+  });
+});
+
 describe("sanitizeMessages", () => {
   it("filters invalid entries and returns an array for non-arrays", () => {
     expect(sanitizeMessages([{ peerId: "p1", direction: "sent" }, {}, null])).toHaveLength(1);

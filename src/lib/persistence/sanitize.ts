@@ -5,7 +5,12 @@
  */
 import { fileNameFromPath } from "$lib/utils/file-utils";
 import { PEER_COLORS } from "$lib/state/model";
-import type { DiscoveredDevice, MessageAttachment, MessageEntry } from "$lib/state/model";
+import type {
+  DiscoveredDevice,
+  MessageAttachment,
+  MessageEntry,
+  MessageStatus,
+} from "$lib/state/model";
 
 const MAX_FOLDER_CHILDREN_IN_HISTORY = 100;
 
@@ -123,8 +128,62 @@ export function sanitizeMessage(raw: unknown): MessageEntry | null {
     timestamp,
   };
   if (raw.starred === true) message.starred = true;
+  if (raw.deleted === true) {
+    // Tombstones keep no content, whatever an older or edited snapshot says.
+    message.deleted = true;
+    message.text = "";
+    return message;
+  }
   if (attachments) message.attachments = attachments;
+
+  const status = sanitizeStatus(raw.status);
+  if (status) message.status = status;
+  const error = stringValue(raw.error);
+  if (error && status === "failed") message.error = error.slice(0, 300);
+  if (status === "failed" && raw.status !== "failed") {
+    message.error = "Interrupted when LanDrop closed";
+  }
+
+  const replyTo = stringValue(raw.replyTo);
+  if (replyTo) message.replyTo = replyTo;
+  const editedAt = stringValue(raw.editedAt);
+  if (editedAt) message.editedAt = editedAt;
+
+  if (isRecord(raw.reactions)) {
+    const mine = stringValue(raw.reactions.mine).slice(0, 16);
+    const theirs = stringValue(raw.reactions.theirs).slice(0, 16);
+    if (mine || theirs) {
+      message.reactions = {};
+      if (mine) message.reactions.mine = mine;
+      if (theirs) message.reactions.theirs = theirs;
+    }
+  }
+
+  if (Array.isArray(raw.sendPaths)) {
+    const sendPaths = raw.sendPaths.filter(
+      (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    if (sendPaths.length > 0) message.sendPaths = sendPaths.slice(0, 1000);
+  }
   return message;
+}
+
+/**
+ * In-flight states cannot survive a restart: a send or receive that was still
+ * running when the app closed is shown as failed so it can be retried.
+ */
+function sanitizeStatus(raw: unknown): MessageStatus | undefined {
+  switch (raw) {
+    case "sent":
+    case "delivered":
+    case "failed":
+      return raw;
+    case "sending":
+    case "receiving":
+      return "failed";
+    default:
+      return undefined;
+  }
 }
 
 export function sanitizeMessages(raw: unknown): MessageEntry[] {
@@ -187,4 +246,13 @@ export function devicesForPersistence(devices: DiscoveredDevice[]): DiscoveredDe
     // and hydrated from get_receive_folder_settings at startup.
     outFolder: undefined,
   }));
+}
+
+export function sanitizeLastRead(raw: unknown): Record<string, string> {
+  if (!isRecord(raw)) return {};
+  const result: Record<string, string> = {};
+  for (const [peerId, at] of Object.entries(raw)) {
+    if (peerId && typeof at === "string" && at) result[peerId] = at;
+  }
+  return result;
 }

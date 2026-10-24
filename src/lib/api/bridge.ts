@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -64,7 +64,19 @@ export interface DiscoveredPeer {
   network?: "lan" | "tailscale";
   lan_ip?: string | null;
   tailscale_ip?: string | null;
+  /** Protocol capabilities ("ack", "chat2"); empty for LanDrop 1.8 peers. */
+  caps?: string[];
 }
+
+/** delivered: the peer confirmed it; sent: written, but the peer cannot confirm (1.8 peers). */
+export interface SendOutcome {
+  status: "delivered" | "sent" | "unsupported";
+}
+
+export type ChatEventPayload =
+  | { kind: "edit"; id: string; text: string }
+  | { kind: "delete"; id: string }
+  | { kind: "react"; id: string; emoji: string | null };
 
 export interface TailscaleStatus {
   state: "available" | "unavailable" | "stopped";
@@ -91,16 +103,32 @@ export async function refreshLanDiscovery(): Promise<void> {
   return invoke("refresh_lan_discovery");
 }
 
-export async function lanSendText(peerId: string, text: string, peerIp?: string): Promise<boolean> {
-  return invoke<boolean>("lan_send_text", { peerId, text, peerIp });
+export interface SendOptions {
+  peerIp?: string;
+  messageId?: string;
+  replyTo?: string;
+}
+
+export async function lanSendText(
+  peerId: string,
+  text: string,
+  options: SendOptions = {},
+): Promise<SendOutcome> {
+  return invoke<SendOutcome>("lan_send_text", {
+    peerId,
+    text,
+    peerIp: options.peerIp,
+    messageId: options.messageId,
+    replyTo: options.replyTo,
+  });
 }
 
 export async function lanSendFiles(
   peerId: string,
   paths: string[],
-  peerIp?: string,
+  options: SendOptions = {},
   onPrepared?: (files: PreparedSendPath[]) => void,
-): Promise<boolean> {
+): Promise<SendOutcome> {
   // On Android, resolve content:// URIs to real files before sending
   const mobile = isMobile();
   const prepared = mobile
@@ -109,15 +137,30 @@ export async function lanSendFiles(
   onPrepared?.(prepared);
 
   try {
-    return await invoke<boolean>("lan_send_files", {
+    return await invoke<SendOutcome>("lan_send_files", {
       peerId,
       paths: prepared.map((file) => file.sendPath),
-      peerIp,
+      peerIp: options.peerIp,
+      messageId: options.messageId,
+      replyTo: options.replyTo,
     });
   } finally {
     // Always remove temporary Android send copies, including after failed sends.
     if (mobile) await invoke("cleanup_send_cache").catch(() => {});
   }
+}
+
+export async function lanSendChatEvent(
+  peerId: string,
+  event: ChatEventPayload,
+  peerIp?: string,
+): Promise<SendOutcome> {
+  return invoke<SendOutcome>("lan_send_chat_event", { peerId, event, peerIp });
+}
+
+/** Cancel an in-flight file send; the pending lanSendFiles call rejects with "cancelled". */
+export async function lanCancelTransfer(messageId: string): Promise<boolean> {
+  return invoke<boolean>("lan_cancel_transfer", { messageId });
 }
 
 export async function setDefaultOutFolder(folder: string): Promise<void> {
@@ -168,6 +211,11 @@ export async function openFile(path: string): Promise<void> {
 
 export async function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
+}
+
+/** Open an http(s) link from a chat message in the default browser. */
+export async function openChatLink(url: string): Promise<void> {
+  return invoke("open_chat_link", { url });
 }
 
 export async function downloadFile(path: string): Promise<string> {
@@ -233,18 +281,73 @@ export function isMobile(): boolean {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
-export async function getThumbnail(path: string): Promise<string | null> {
-  if (isMobile()) {
-    return mobileImageSrc(path);
+// ── Media (asset protocol) ──
+// Filesystem media is served straight from disk by the asset protocol once
+// Rust has added that exact file to the scope; video gets HTTP range requests
+// instead of being copied whole into a Blob. Android content:// URIs, which
+// the asset protocol cannot read, keep the byte-copy path below.
+
+const allowedMedia = new Map<string, Promise<boolean>>();
+let pendingAllow: { paths: string[]; resolve: (allowed: Set<string>) => void } | null = null;
+
+/** Batch scope requests made in the same tick into one IPC call. */
+function requestMediaScope(path: string): Promise<boolean> {
+  const cached = allowedMedia.get(path);
+  if (cached) return cached;
+  if (!pendingAllow) {
+    let resolve!: (allowed: Set<string>) => void;
+    const batch = new Promise<Set<string>>((r) => (resolve = r));
+    pendingAllow = { paths: [], resolve };
+    const current = pendingAllow;
+    queueMicrotask(() => {
+      pendingAllow = null;
+      invoke<string[]>("allow_media_paths", { paths: current.paths })
+        .then((allowed) => current.resolve(new Set(allowed)))
+        .catch(() => current.resolve(new Set()));
+    });
+    batchPromise = batch;
   }
-  return invoke<string | null>("get_thumbnail", { path, maxPx: 120 });
+  pendingAllow.paths.push(path);
+  const result = batchPromise!.then((allowed) => allowed.has(path));
+  allowedMedia.set(path, result);
+  result.then((ok) => {
+    if (!ok) allowedMedia.delete(path);
+  });
+  return result;
+}
+let batchPromise: Promise<Set<string>> | null = null;
+
+/** Full-resolution URL for an image or video on disk (null if not displayable). */
+export async function getMediaUrl(path: string): Promise<string | null> {
+  if (!path) return null;
+  if (path.startsWith("content://")) return mobileImageSrc(path);
+  return (await requestMediaScope(path)) ? convertFileSrc(path) : null;
 }
 
-export async function getFullImage(path: string, maxPx: number = 800): Promise<string | null> {
-  if (isMobile()) {
-    return mobileImageSrc(path);
+const thumbnailUrls = new Map<string, Promise<string | null>>();
+
+/** Small cached JPEG for lists and bubbles; generated once by Rust, reused after. */
+export function getThumbnail(path: string, maxPx = 320): Promise<string | null> {
+  if (path.startsWith("content://")) return mobileImageSrc(path);
+  const key = `${maxPx}|${path}`;
+  const cached = thumbnailUrls.get(key);
+  if (cached) return cached;
+  const load = invoke<string | null>("get_thumbnail", { path, maxPx })
+    .then((thumbPath) => (thumbPath ? convertFileSrc(thumbPath) : null))
+    .catch(() => null);
+  thumbnailUrls.set(key, load);
+  load.then((url) => {
+    if (!url) thumbnailUrls.delete(key);
+  });
+  return load;
+}
+
+/** Forget cached thumbnail URLs for a path (after the file was deleted or replaced). */
+export function forgetMedia(path: string) {
+  allowedMedia.delete(path);
+  for (const key of thumbnailUrls.keys()) {
+    if (key.endsWith(`|${path}`)) thumbnailUrls.delete(key);
   }
-  return invoke<string | null>("get_thumbnail", { path, maxPx });
 }
 
 /** Byte-budgeted, refcounted store of video blob URLs (each is the whole file). */
@@ -264,10 +367,13 @@ function toBlobPart(data: Uint8Array): ArrayBuffer {
 }
 
 /**
- * Get a playable video source URL. Every resolved URL holds one cache
- * reference — pass it back to revokeBlobUrl() when the consumer unmounts.
+ * Get a playable video source URL. Filesystem videos stream through the asset
+ * protocol; only Android content:// URIs are copied into a refcounted Blob —
+ * pass every returned URL back to revokeBlobUrl() when the consumer unmounts.
  */
 export async function getVideoSrc(path: string): Promise<string | null> {
+  if (!path.startsWith("content://")) return getMediaUrl(path);
+
   const cached = videoCache.acquire(path);
   if (cached) return cached;
 
@@ -307,8 +413,8 @@ async function readFileBytes(path: string): Promise<Uint8Array> {
       /* fall through to the Rust command */
     }
   }
-  const data = await invoke<number[] | Uint8Array>("read_file_bytes", { path });
-  return data instanceof Uint8Array ? data : new Uint8Array(data);
+  const data = await invoke<ArrayBuffer | number[]>("read_file_bytes", { path });
+  return data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
 }
 
 async function mobileImageSrc(path: string): Promise<string | null> {
@@ -364,8 +470,20 @@ export async function copyToClipboard(text: string): Promise<void> {
   await writeText(text);
 }
 
-export async function saveClipboardImage(base64Data: string, mime: string): Promise<string> {
-  return invoke<string>("save_clipboard_image", { base64Data, mime });
+/** Save pasted image/video bytes to a private cache file and return its path. */
+export async function saveClipboardImage(data: Blob | Uint8Array, mime: string): Promise<string> {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(await data.arrayBuffer());
+  return invoke<string>("save_clipboard_image", bytes, { headers: { "x-mime": mime } });
+}
+
+/** Put an image file on the system clipboard as a bitmap. */
+export async function copyImageToClipboard(path: string): Promise<void> {
+  const { writeImage } = await import("@tauri-apps/plugin-clipboard-manager");
+  const url = await getMediaUrl(path);
+  if (!url) throw new Error("Image is not available");
+  const response = await fetch(url);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  await writeImage(bytes);
 }
 
 export async function getClipboardFiles(): Promise<string[]> {
@@ -411,26 +529,52 @@ export async function onLanPeerLost(cb: (peerId: string) => void): Promise<Unlis
   return listen<{ id: string }>("lan_peer_lost", (e) => cb(e.payload.id));
 }
 
+export interface TextReceivedEvent {
+  peer_id: string;
+  text: string;
+  id?: string | null;
+  reply_to?: string | null;
+  sent_at?: number | null;
+}
+
 export async function onLanTextReceived(
-  cb: (peerId: string, text: string) => void,
+  cb: (event: TextReceivedEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<{ peer_id: string; text: string }>("lan_text_received", (e) =>
-    cb(e.payload.peer_id, e.payload.text),
-  );
+  return listen<TextReceivedEvent>("lan_text_received", (e) => cb(e.payload));
+}
+
+export interface FilesReceivedEvent {
+  peer_id: string;
+  files: string[];
+  file_details: Array<{ name: string; path: string; size: number }>;
+  id?: string | null;
+  reply_to?: string | null;
+  /** True when the batch failed after these files were already saved. */
+  partial?: boolean;
+  expected_files?: number;
 }
 
 export async function onLanFilesReceived(
-  cb: (
-    peerId: string,
-    files: string[],
-    details: Array<{ name: string; path: string; size: number }>,
-  ) => void,
+  cb: (event: FilesReceivedEvent) => void,
 ): Promise<UnlistenFn> {
+  return listen<FilesReceivedEvent>("lan_files_received", (e) => cb(e.payload));
+}
+
+export type ChatEventReceived = ChatEventPayload & { peer_id: string };
+
+export async function onLanChatEvent(cb: (event: ChatEventReceived) => void): Promise<UnlistenFn> {
   return listen<{
     peer_id: string;
-    files: string[];
-    file_details: Array<{ name: string; path: string; size: number }>;
-  }>("lan_files_received", (e) => cb(e.payload.peer_id, e.payload.files, e.payload.file_details));
+    kind: ChatEventPayload["kind"];
+    id: string;
+    text?: string | null;
+    emoji?: string | null;
+  }>("lan_chat_event", (e) => {
+    const { peer_id, kind, id } = e.payload;
+    if (kind === "edit") cb({ peer_id, kind, id, text: e.payload.text ?? "" });
+    else if (kind === "delete") cb({ peer_id, kind, id });
+    else if (kind === "react") cb({ peer_id, kind, id, emoji: e.payload.emoji ?? null });
+  });
 }
 
 export interface TransferProgress {
@@ -443,6 +587,9 @@ export interface TransferProgress {
   received_bytes?: number;
   received_files?: number;
   current_file?: string;
+  /** Message this transfer belongs to (LanDrop 2 peers and all local sends). */
+  message_id?: string | null;
+  peer_id?: string | null;
 }
 
 export async function onTransferProgress(
@@ -513,10 +660,11 @@ async function prepareSendPaths(paths: string[]): Promise<PreparedSendPath[]> {
         }
         // Read file data via FS plugin (handles content:// on Android)
         const data = await readFile(p);
-        const bytes = Array.from(data);
         // Save one copy for transfer and one durable copy for chat history.
-        const realPath = await invoke<string>("save_temp_for_send", { name, data: bytes });
-        const historyPath = await invoke<string>("save_history_file", { name, data: bytes });
+        // Raw request bodies: no JSON number arrays for large media.
+        const headers = { "x-file-name": encodeURIComponent(name) };
+        const realPath = await invoke<string>("save_temp_for_send", data, { headers });
+        const historyPath = await invoke<string>("save_history_file", data, { headers });
         resolved.push({ originalPath: p, sendPath: realPath, historyPath });
       } catch (e) {
         console.error("Failed to resolve content URI:", p, e);

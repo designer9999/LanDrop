@@ -1,38 +1,102 @@
 //! Clipboard access: pasted images and copied file lists.
 
-use base64::Engine;
+use tauri::ipc::{InvokeBody, Request};
 
-#[tauri::command]
-pub async fn save_clipboard_image(base64_data: String, mime: String) -> Result<String, String> {
-    let ext = match mime.as_str() {
-        "image/png" => "png",
+/// Largest raw body accepted by the byte-upload commands.
+const MAX_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
+
+/// Bytes of a raw-body command. Desktop delivers `InvokeBody::Raw`; Android's
+/// IPC has no raw bodies, so the same JS call arrives as a JSON number array.
+pub(crate) fn request_bytes(request: &Request<'_>) -> Result<Vec<u8>, String> {
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        InvokeBody::Json(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|byte| u8::try_from(byte).ok())
+                    .ok_or_else(|| "Request body is not a byte array".to_string())
+            })
+            .collect::<Result<Vec<u8>, String>>()?,
+        InvokeBody::Json(_) => return Err("Expected a raw byte request body".into()),
+    };
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err("Request body is too large".into());
+    }
+    Ok(bytes)
+}
+
+/// A request header as text (`None` when absent or not visible ASCII).
+pub(crate) fn request_header(request: &Request<'_>, name: &str) -> Option<String> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+fn clipboard_image_extension(mime: &str) -> &'static str {
+    match mime.trim().to_ascii_lowercase().as_str() {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/bmp" => "bmp",
         _ => "png",
-    };
+    }
+}
 
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&base64_data)
-        .map_err(|e| format!("Failed to decode base64: {}", e))?;
-
-    let temp_dir = std::env::temp_dir().join("landrop_paste");
-    tokio::fs::create_dir_all(&temp_dir)
+/// Write pasted image bytes to a new, unpredictably named file in the app's
+/// own cache directory (never shared /tmp, never a timestamp-only name).
+async fn write_pasted_image(
+    cache_dir: &std::path::Path,
+    bytes: &[u8],
+    mime: &str,
+) -> Result<std::path::PathBuf, String> {
+    let directory = cache_dir.join("paste");
+    tokio::fs::create_dir_all(&directory)
         .await
         .map_err(|e| e.to_string())?;
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let filename = format!("paste_{}.{}", ts, ext);
-    let file_path = temp_dir.join(&filename);
-    tokio::fs::write(&file_path, &bytes)
+    let path = directory.join(format!(
+        "paste_{}.{}",
+        uuid::Uuid::new_v4().simple(),
+        clipboard_image_extension(mime)
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
         .await
         .map_err(|e| e.to_string())?;
+    let written = async {
+        use tokio::io::AsyncWriteExt;
+        file.write_all(bytes).await?;
+        file.flush().await
+    }
+    .await;
+    if let Err(error) = written {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error.to_string());
+    }
+    Ok(path)
+}
 
-    Ok(file_path.to_string_lossy().to_string())
+/// Raw request body = image bytes; header `x-mime` = image MIME type.
+#[tauri::command]
+pub async fn save_clipboard_image(
+    request: Request<'_>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    use tauri::Manager;
+    let bytes = request_bytes(&request)?;
+    if bytes.is_empty() {
+        return Err("Pasted image is empty".into());
+    }
+    let mime = request_header(&request, "x-mime").unwrap_or_default();
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let path = write_pasted_image(&cache_dir, &bytes, &mime).await?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -170,4 +234,27 @@ pub(crate) fn macos_clipboard_files() -> Vec<String> {
                 .unwrap_or_else(|_| s.to_string())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn pasted_images_get_unique_unpredictable_names_in_the_cache() {
+        let cache = std::env::temp_dir().join(format!("landrop-paste-{}", uuid::Uuid::new_v4()));
+        let first = super::write_pasted_image(&cache, b"one", "image/jpeg")
+            .await
+            .unwrap();
+        let second = super::write_pasted_image(&cache, b"two", "image/jpeg")
+            .await
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(first.starts_with(cache.join("paste")));
+        assert_eq!(first.extension().and_then(|e| e.to_str()), Some("jpg"));
+        let stem = first.file_stem().and_then(|s| s.to_str()).unwrap();
+        assert_eq!(stem.len(), "paste_".len() + 32, "{stem}");
+        assert_eq!(tokio::fs::read(&first).await.unwrap(), b"one");
+        assert_eq!(tokio::fs::read(&second).await.unwrap(), b"two");
+        assert_eq!(super::clipboard_image_extension("text/html"), "png");
+        tokio::fs::remove_dir_all(cache).await.unwrap();
+    }
 }

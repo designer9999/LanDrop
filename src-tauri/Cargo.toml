@@ -16,7 +16,7 @@ default = ["desktop"]
 desktop = ["tauri/tray-icon"]
 
 [dependencies]
-tauri = { version = "2.12", features = ["image-png"] }
+tauri = { version = "2.12", features = ["image-png", "protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-fs = "2"
@@ -24,7 +24,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros", "fs", "process"] }
 tokio-util = { version = "0.7", default-features = false }
-base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
 walkdir = "2"
 local-ip-address = "0.6"

@@ -1,5 +1,19 @@
 import type { DiscoveredPeer, FileInfo, TailscaleStatus } from "$lib/api/bridge";
-import { SvelteDate } from "svelte/reactivity";
+import { SvelteDate, SvelteMap } from "svelte/reactivity";
+import {
+  applyChatEvent,
+  applyIncomingFiles,
+  applyIncomingText,
+  beginIncomingTransfer,
+  deleteOwnMessageForEveryone,
+  editOwnMessage,
+  failIncomingTransfer,
+  removeMessage,
+  setMessageStatus,
+  setMyReaction,
+  unreadCount,
+} from "$lib/chat/message-reducers";
+import type { ChatEvent, IncomingFiles, IncomingText } from "$lib/chat/message-reducers";
 import {
   devicesForPersistence,
   loadArray,
@@ -7,22 +21,30 @@ import {
   loadString,
   normalizeHydratedDevices,
   sanitizeAttachments,
+  sanitizeLastRead,
   sanitizeMessages,
 } from "$lib/persistence/sanitize";
-import { DEFAULT_HOTKEYS, PEER_COLORS } from "./model";
+import { DEFAULT_HOTKEYS, PEER_COLORS, PERSISTED_STATE_VERSION } from "./model";
 import type {
   DiscoveredDevice,
+  Draft,
   HotkeySettings,
   LogEntry,
   MessageEntry,
+  MessageProgress,
+  MessageStatus,
   PersistedAppState,
   ReceiveOptions,
   SelectedFile,
 } from "./model";
 
+/** History cap; starred messages are always kept. */
+const MAX_MESSAGES = 2000;
+
 export { PEER_COLORS } from "./model";
 export type {
   DiscoveredDevice,
+  Draft,
   HotkeySettings,
   LogEntry,
   MessageAttachment,
@@ -40,6 +62,23 @@ const SETTINGS_KEY = "landrop-settings";
 const RECEIVE_KEY = "landrop-receive-options";
 const HOTKEYS_KEY = "landrop-hotkeys";
 
+/** Draft key for attachments queued before any conversation is open (quick-send hotkey). */
+const UNASSIGNED = "";
+
+function emptyDraft(): Draft {
+  return { text: "", files: [] };
+}
+
+function draftIsEmpty(draft: Draft | undefined): boolean {
+  return !draft || (!draft.text.trim() && draft.files.length === 0 && !draft.replyTo);
+}
+
+export interface Conversation {
+  device: DiscoveredDevice;
+  last?: MessageEntry;
+  unread: number;
+}
+
 export class AppState {
   activeView = $state<"transfer" | "settings">("transfer");
 
@@ -47,13 +86,15 @@ export class AppState {
   devices = $state<DiscoveredDevice[]>([]);
   activeDeviceId = $state<string | null>(null);
 
-  // Files
-  files = $state<SelectedFile[]>([]);
-  sendTextContent = $state("");
+  // Composer drafts, one per conversation
+  drafts = $state<Record<string, Draft>>({});
 
   // Transfer state
-  transferActive = $state(false);
+  /** Sends currently in flight (text and files run concurrently). */
+  activeSends = $state(0);
   receivingTransferActive = $state(false);
+  /** Live per-message attachment progress, keyed by message ID. */
+  progress = new SvelteMap<string, MessageProgress>();
 
   // Network
   localIp = $state<string>("...");
@@ -63,10 +104,13 @@ export class AppState {
   // Logs and messages
   logs = $state<LogEntry[]>([]);
   messages = $state<MessageEntry[]>([]);
+  lastReadAt = $state<Record<string, string>>({});
+  /** Last-read time captured when the open conversation was entered (unread divider). */
+  unreadAfter = $state<string | undefined>(undefined);
 
   // Message search & filter
   messageSearch = $state("");
-  messageViewAll = $state(false);
+  starredOnly = $state(false);
 
   // Settings
   notificationsEnabled = $state<boolean>(true);
@@ -83,9 +127,76 @@ export class AppState {
     return this.activeDevice?.online ?? false;
   }
 
+  get transferActive(): boolean {
+    return this.activeSends > 0;
+  }
+
   get effectiveOutFolder(): string {
     const device = this.activeDevice;
     return device?.outFolder ?? this.receiveOptions.outFolder ?? "";
+  }
+
+  get onlineDevices(): DiscoveredDevice[] {
+    return this.devices.filter((d) => d.online);
+  }
+
+  /** Every device that is online or has history, most recent activity first. */
+  get conversations(): Conversation[] {
+    // Local lookup table built per read, never stored or rendered.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
+    const lastByPeer = new Map<string, MessageEntry>();
+    for (const message of this.messages) lastByPeer.set(message.peerId, message);
+    return this.devices
+      .filter((device) => device.online || lastByPeer.has(device.id))
+      .map((device) => ({
+        device,
+        last: lastByPeer.get(device.id),
+        unread:
+          device.id === this.activeDeviceId && this.activeView === "transfer"
+            ? 0
+            : unreadCount(this.messages, device.id, this.lastReadAt[device.id]),
+      }))
+      .sort((a, b) => {
+        const at = a.last?.timestamp ?? "";
+        const bt = b.last?.timestamp ?? "";
+        if (at !== bt) return bt.localeCompare(at);
+        return Number(b.device.online) - Number(a.device.online);
+      });
+  }
+
+  get totalUnread(): number {
+    return this.conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
+  }
+
+  // ── Drafts (the composer always edits the open conversation's draft) ──
+
+  private get draftKey(): string {
+    return this.activeDeviceId ?? UNASSIGNED;
+  }
+
+  get draft(): Draft {
+    return this.drafts[this.draftKey] ?? emptyDraft();
+  }
+
+  private updateDraft(update: (draft: Draft) => Draft) {
+    const key = this.draftKey;
+    this.drafts = { ...this.drafts, [key]: update(this.drafts[key] ?? emptyDraft()) };
+  }
+
+  get sendTextContent(): string {
+    return this.draft.text;
+  }
+
+  set sendTextContent(text: string) {
+    this.updateDraft((draft) => ({ ...draft, text }));
+  }
+
+  get files(): SelectedFile[] {
+    return this.draft.files;
+  }
+
+  set files(files: SelectedFile[]) {
+    this.updateDraft((draft) => ({ ...draft, files }));
   }
 
   get hasFiles(): boolean {
@@ -96,8 +207,57 @@ export class AppState {
     return this.files.map((f) => f.path);
   }
 
-  get onlineDevices(): DiscoveredDevice[] {
-    return this.devices.filter((d) => d.online);
+  get replyingTo(): MessageEntry | null {
+    const id = this.draft.replyTo;
+    return id ? (this.messages.find((m) => m.id === id) ?? null) : null;
+  }
+
+  get editingMessage(): MessageEntry | null {
+    const id = this.draft.editingId;
+    return id ? (this.messages.find((m) => m.id === id) ?? null) : null;
+  }
+
+  setReplyTo(messageId: string | null) {
+    this.updateDraft((draft) => ({
+      ...draft,
+      replyTo: messageId ?? undefined,
+      editingId: undefined,
+    }));
+  }
+
+  /** Enter edit mode: the composer temporarily holds the message's text. */
+  startEditing(messageId: string) {
+    const message = this.messages.find(
+      (m) => m.id === messageId && m.direction === "sent" && !m.deleted,
+    );
+    if (!message) return;
+    this.updateDraft((draft) => ({
+      ...draft,
+      editingId: messageId,
+      replyTo: undefined,
+      // Remember the unsent draft so cancelling an edit restores it.
+      stash: draft.editingId ? draft.stash : draft.text,
+      text: message.text,
+    }));
+  }
+
+  stopEditing() {
+    this.updateDraft((draft) => {
+      if (!draft.editingId) return draft;
+      const { editingId: _editingId, stash, ...rest } = draft;
+      return { ...rest, text: stash ?? "" };
+    });
+  }
+
+  /** Last own message that can still be edited (for the ↑ shortcut). */
+  lastEditableMessage(peerId: string): MessageEntry | null {
+    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+      const message = this.messages[index];
+      if (message.peerId !== peerId || message.direction !== "sent") continue;
+      if (message.deleted || !message.text) return null;
+      return message;
+    }
+    return null;
   }
 
   // ── Device management (auto-discovered) ──
@@ -108,6 +268,7 @@ export class AppState {
       network: peer.network,
       lanIp: peer.lan_ip ?? undefined,
       tailscaleIp: peer.tailscale_ip ?? undefined,
+      caps: Array.isArray(peer.caps) ? peer.caps : undefined,
     };
     const existing = this.devices.find((d) => d.id === peer.id);
     if (existing) {
@@ -140,33 +301,48 @@ export class AppState {
         },
       ];
     }
-    // Auto-select if no active device
-    if (
-      !this.activeDeviceId &&
-      !this.sendTextContent &&
-      !this.hasFiles &&
-      !this.transferActive &&
-      !this.messageViewAll
-    ) {
+    // Open the first device that appears when nothing else is open.
+    if (!this.activeDeviceId) {
       this.setActiveDevice(peer.id);
     }
   }
 
-  /** Called when mDNS reports a device left */
+  /** Called when mDNS reports a device left. Its conversation stays open, read-only. */
   markDeviceOffline(id: string) {
     this.devices = this.devices.map((d) => (d.id === id ? { ...d, online: false } : d));
-    if (this.activeDeviceId === id) this.activeDeviceId = null;
   }
 
   markAllDevicesOffline() {
     this.devices = this.devices.map((device) => ({ ...device, online: false }));
-    this.activeDeviceId = null;
   }
 
+  /** Open a conversation. Offline devices open read-only so their history is reachable. */
   setActiveDevice(id: string | null) {
-    this.activeDeviceId = this.onlineDevices.some((device) => device.id === id) ? id : null;
-    this.messageViewAll = false;
+    const target = id ? this.devices.find((device) => device.id === id) : null;
+    const nextId = target?.id ?? null;
+    if (nextId !== this.activeDeviceId && this.activeDeviceId) this.markRead(this.activeDeviceId);
+    // Attachments queued before any conversation was open follow the first one opened.
+    if (nextId && !draftIsEmpty(this.drafts[UNASSIGNED]) && draftIsEmpty(this.drafts[nextId])) {
+      const { [UNASSIGNED]: pending, ...rest } = this.drafts;
+      this.drafts = { ...rest, [nextId]: pending };
+    }
+    this.activeDeviceId = nextId;
     this.messageSearch = "";
+    this.starredOnly = false;
+    if (nextId) {
+      this.unreadAfter = this.lastReadAt[nextId];
+      this.markRead(nextId);
+    } else {
+      this.unreadAfter = undefined;
+    }
+  }
+
+  markRead(peerId: string) {
+    const latest = this.messages.findLast((m) => m.peerId === peerId)?.timestamp;
+    const now = new SvelteDate().toISOString();
+    const at = latest && latest > now ? latest : now;
+    if (this.lastReadAt[peerId] === at) return;
+    this.lastReadAt = { ...this.lastReadAt, [peerId]: at };
   }
 
   updateDeviceSettings(
@@ -178,9 +354,20 @@ export class AppState {
 
   removeDevice(id: string) {
     this.devices = this.devices.filter((d) => d.id !== id);
+    const { [id]: _removed, ...drafts } = this.drafts;
+    this.drafts = drafts;
     if (this.activeDeviceId === id) {
       this.activeDeviceId = null;
     }
+  }
+
+  /** Forget a conversation: its messages, draft and read marker (device stays if online). */
+  forgetConversation(id: string) {
+    this.messages = this.messages.filter((m) => m.peerId !== id);
+    const { [id]: _read, ...lastReadAt } = this.lastReadAt;
+    this.lastReadAt = lastReadAt;
+    const device = this.devices.find((d) => d.id === id);
+    if (device && !device.online) this.removeDevice(id);
   }
 
   // ── Files ──
@@ -194,12 +381,17 @@ export class AppState {
     this.files = this.files.filter((f) => f.path !== path);
   }
 
-  removeSentFiles(files: readonly SelectedFile[]) {
-    // Match queue entries so removing and re-adding the same path creates a new draft item.
+  /** Remove exactly the queue entries that were sent; anything added meanwhile stays. */
+  removeSentFiles(files: readonly SelectedFile[], peerId = this.draftKey) {
     // This local membership set is discarded after filtering, never rendered.
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const sentFiles = new Set(files);
-    this.files = this.files.filter((file) => !sentFiles.has(file));
+    const draft = this.drafts[peerId];
+    if (!draft) return;
+    this.drafts = {
+      ...this.drafts,
+      [peerId]: { ...draft, files: draft.files.filter((file) => !sentFiles.has(file)) },
+    };
   }
 
   clearFiles() {
@@ -220,13 +412,83 @@ export class AppState {
 
   // ── Messages ──
 
-  addMessage(entry: Omit<MessageEntry, "id" | "timestamp">) {
+  private now(): string {
+    return new SvelteDate().toISOString();
+  }
+
+  addMessage(entry: Omit<MessageEntry, "id" | "timestamp"> & { id?: string }): MessageEntry {
     const attachments = sanitizeAttachments(entry.attachments);
-    this.messages = [
-      ...this.messages,
-      { ...entry, attachments, id: crypto.randomUUID(), timestamp: new SvelteDate().toISOString() },
-    ];
+    const message: MessageEntry = {
+      ...entry,
+      attachments,
+      id: entry.id ?? crypto.randomUUID(),
+      timestamp: this.now(),
+    };
+    if (!attachments) delete message.attachments;
+    this.messages = [...this.messages, message];
     this._pruneMessages();
+    return message;
+  }
+
+  getMessage(id: string): MessageEntry | undefined {
+    return this.messages.find((m) => m.id === id);
+  }
+
+  /** Replace one message in place (no-op if it no longer exists). */
+  patchMessage(id: string, patch: Partial<MessageEntry>) {
+    const index = this.messages.findIndex((m) => m.id === id);
+    if (index < 0) return;
+    const next = this.messages.slice();
+    next[index] = { ...next[index], ...patch };
+    this.messages = next;
+  }
+
+  private apply(next: MessageEntry[]) {
+    if (next === this.messages) return;
+    this.messages = next;
+    this._pruneMessages();
+  }
+
+  receiveText(incoming: IncomingText) {
+    this.apply(applyIncomingText(this.messages, incoming, this.now()));
+  }
+
+  receiveFiles(incoming: IncomingFiles) {
+    this.apply(applyIncomingFiles(this.messages, incoming, this.now()));
+  }
+
+  beginReceiving(peerId: string, id: string) {
+    this.apply(beginIncomingTransfer(this.messages, peerId, id, this.now()));
+  }
+
+  failReceiving(peerId: string, id: string) {
+    this.apply(failIncomingTransfer(this.messages, peerId, id));
+    this.progress.delete(id);
+  }
+
+  receiveChatEvent(peerId: string, event: ChatEvent) {
+    this.apply(applyChatEvent(this.messages, peerId, event, this.now()));
+  }
+
+  setStatus(id: string, status: MessageStatus | null, error?: string) {
+    this.apply(setMessageStatus(this.messages, id, status, error));
+  }
+
+  editOwn(id: string, text: string) {
+    this.apply(editOwnMessage(this.messages, id, text, this.now()));
+  }
+
+  deleteOwnForEveryone(id: string) {
+    this.apply(deleteOwnMessageForEveryone(this.messages, id));
+  }
+
+  deleteForMe(id: string) {
+    this.apply(removeMessage(this.messages, id));
+    this.progress.delete(id);
+  }
+
+  react(id: string, emoji: string | null) {
+    this.apply(setMyReaction(this.messages, id, emoji));
   }
 
   getPeerMessages(peerId: string): MessageEntry[] {
@@ -237,7 +499,8 @@ export class AppState {
     const q = query.toLowerCase();
     return this.messages.filter((m) => {
       if (peerId && m.peerId !== peerId) return false;
-      return m.text.toLowerCase().includes(q);
+      if (m.text.toLowerCase().includes(q)) return true;
+      return (m.attachments ?? []).some((a) => a.name.toLowerCase().includes(q));
     });
   }
 
@@ -303,10 +566,10 @@ export class AppState {
   }
 
   private _pruneMessages() {
-    if (this.messages.length <= 500) return;
+    if (this.messages.length <= MAX_MESSAGES) return;
     const starred = this.messages.filter((m) => m.starred);
     const unstarred = this.messages.filter((m) => !m.starred);
-    const keep = Math.max(0, 500 - starred.length);
+    const keep = Math.max(0, MAX_MESSAGES - starred.length);
     const recentUnstarred = keep > 0 ? unstarred.slice(-keep) : [];
     this.messages = [...recentUnstarred, ...starred].sort((a, b) =>
       a.timestamp.localeCompare(b.timestamp),
@@ -337,9 +600,9 @@ export class AppState {
     this.devices = devices;
     // A saved conversation does not establish current availability.
     this.activeDeviceId = null;
-    this.messageViewAll = false;
     this.messageSearch = "";
     this.messages = messages;
+    this.lastReadAt = sanitizeLastRead(snapshot.lastReadAt);
     this.notificationsEnabled = snapshot.notificationsEnabled ?? true;
     this.popOnReceive = snapshot.popOnReceive ?? false;
     // outFolder/sortByDate are owned by the Rust backend; drop any stale
@@ -355,10 +618,11 @@ export class AppState {
 
   exportPersistedState(): PersistedAppState {
     return {
-      version: 1,
+      version: PERSISTED_STATE_VERSION,
       devices: devicesForPersistence(this.devices),
       activeDeviceId: null,
       messages: sanitizeMessages(this.messages),
+      lastReadAt: this.lastReadAt,
       notificationsEnabled: this.notificationsEnabled,
       popOnReceive: this.popOnReceive,
       // Receive routing (outFolder/sortByDate) lives in Rust's

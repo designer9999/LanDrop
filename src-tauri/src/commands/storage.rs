@@ -1,7 +1,9 @@
 //! App-owned storage: Android send cache and durable media history copies.
 
+use super::clipboard::{request_bytes, request_header};
 use crate::path_utils::sanitize_file_name;
 use std::path::PathBuf;
+use tauri::ipc::Request;
 
 fn history_directory(data_dir: PathBuf) -> PathBuf {
     #[cfg(target_os = "android")]
@@ -33,15 +35,25 @@ async fn stage_send_file(
     Ok(path)
 }
 
+/// File name from the URL-encoded `x-file-name` header of a raw-body command.
+fn request_file_name(request: &Request<'_>) -> String {
+    request_header(request, "x-file-name")
+        .and_then(|raw| urlencoding::decode(&raw).ok().map(|name| name.into_owned()))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "file".to_string())
+}
+
 /// Save raw bytes (from frontend file read) to a temp file for sending.
 /// Used on Android where content:// URIs can't be read directly by Rust.
+/// Raw request body = file bytes; header `x-file-name` = URL-encoded name.
 #[tauri::command]
 pub async fn save_temp_for_send(
-    name: String,
-    data: Vec<u8>,
+    request: Request<'_>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     use tauri::Manager;
+    let name = request_file_name(&request);
+    let data = request_bytes(&request)?;
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
     let out_path = stage_send_file(&cache_dir, &name, &data).await?;
     Ok(out_path.to_string_lossy().to_string())
@@ -49,13 +61,15 @@ pub async fn save_temp_for_send(
 
 /// Save a durable local copy for message history previews.
 /// Android picker URIs and cache files cannot be trusted after process restart.
+/// Raw request body = file bytes; header `x-file-name` = URL-encoded name.
 #[tauri::command]
 pub async fn save_history_file(
-    name: String,
-    data: Vec<u8>,
+    request: Request<'_>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     use tauri::Manager;
+    let name = request_file_name(&request);
+    let data = request_bytes(&request)?;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let history_dir = history_directory(data_dir);
     tokio::fs::create_dir_all(&history_dir)
