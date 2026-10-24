@@ -143,10 +143,14 @@ export class ChatController {
         }
       }
       const delivered = outcomes.length > 0 && outcomes.every((o) => o.status === "delivered");
-      app.setStatus(message.id, delivered ? "delivered" : "sent");
+      if (!app.getMessage(message.id)?.deleted) {
+        app.setStatus(message.id, delivered ? "delivered" : "sent");
+      }
     } catch (error) {
       const detail = errorText(error);
       const cancelled = detail === "cancelled";
+      // Deleted for everyone while sending: the tombstone needs no retry state.
+      if (app.getMessage(message.id)?.deleted) return;
       app.setStatus(message.id, "failed", cancelled ? "Cancelled" : detail);
       if (!cancelled) {
         this.deps.notify(`Not delivered to ${device.alias}: ${detail}`);
@@ -173,7 +177,10 @@ export class ChatController {
       this.deps.notify(`${device.alias} is offline`);
       return;
     }
-    const paths = (source.attachments ?? []).map((attachment) => attachment.path).filter(Boolean);
+    // Sent messages keep every original path; history attachments are capped at 100.
+    const paths = source.sendPaths?.length
+      ? source.sendPaths
+      : (source.attachments ?? []).map((attachment) => attachment.path).filter(Boolean);
     const message = this.app.addMessage({
       peerId: device.id,
       direction: "sent",
@@ -266,7 +273,9 @@ export class ChatController {
   private revealIncomingPeer(peerId: string) {
     this.ensurePeerVisible(peerId);
     const { app } = this;
-    if (!app.activeDeviceId && app.activeView === "transfer") app.setActiveDevice(peerId);
+    if (!app.activeDeviceId && app.activeView === "transfer" && app.unassignedFileCount === 0) {
+      app.setActiveDevice(peerId, { adoptUnassigned: false });
+    }
   }
 
   private afterIncoming(peerId: string, body: string) {

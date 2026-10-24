@@ -382,9 +382,9 @@
       await windowShow();
       return;
     }
+    const target = app.activeDeviceId;
     for (const path of paths) {
-      const info = await getFileInfo(path);
-      app.addFile(path, info);
+      app.addFileTo(target, path, await getFileInfo(path));
     }
     await windowShow();
   }
@@ -498,7 +498,9 @@
   <main class="content-area">
     {#if app.activeView === "settings"}
       <div class="settings-scroll">
-        <SettingsPage {appVersion} onsnackbar={showSnackbar} />
+        <div class="settings-column">
+          <SettingsPage {appVersion} onsnackbar={showSnackbar} />
+        </div>
       </div>
     {:else}
       {#if expanded}
@@ -519,8 +521,12 @@
           {/key}
         {:else if app.conversations.length > 0}
           <div class="pick">
-            <Icon name="forum" size={36} />
-            <p>Choose a device to start chatting.</p>
+            <Icon name={app.unassignedFileCount ? "outbox" : "forum"} size={36} />
+            <p>
+              {app.unassignedFileCount
+                ? `${app.unassignedFileCount} file${app.unassignedFileCount === 1 ? " is" : "s are"} ready — choose who to send ${app.unassignedFileCount === 1 ? "it" : "them"} to.`
+                : "Choose a device to start chatting."}
+            </p>
             {#if !expanded}
               <button class="pick-button" onclick={() => (drawerOpen = true)}>Show devices</button>
             {/if}
@@ -726,6 +732,11 @@
     padding: 16px;
     /* Hint compositor for smoother scrolling on WebKitGTK (Linux) */
     contain: layout paint;
+  }
+
+  .settings-column {
+    max-width: 760px;
+    margin: 0 auto;
   }
 
   /* ── Progress Bar ── */

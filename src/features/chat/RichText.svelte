@@ -18,11 +18,14 @@
   let copiedBlock = $state<number | null>(null);
 
   /** Highlight lazily: highlight.js loads only when a message contains a code block. */
-  function highlight(lang: string) {
+  /** Highlight `code` into the node. Re-runs with the new text when a message is edited. */
+  function highlight(lang: string, code: string) {
     return (node: HTMLElement) => {
       let cancelled = false;
+      node.textContent = code;
       void import("highlight.js/lib/common").then(({ default: hljs }) => {
         if (cancelled) return;
+        node.textContent = code;
         node.removeAttribute("data-highlighted");
         if (lang && hljs.getLanguage(lang)) node.classList.add(`language-${lang}`);
         hljs.highlightElement(node);
@@ -74,7 +77,7 @@
             {copiedBlock === index ? "Copied" : "Copy"}
           </button>
         </div>
-        <pre><code {@attach highlight(token.lang)}>{token.value}</code></pre>
+        <pre><code {@attach highlight(token.lang, token.value)}></code></pre>
       </div>
     {/if}
   {/each}

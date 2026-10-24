@@ -96,9 +96,14 @@
         </span>
       </button>
     {:else}
-      <span class="status status-inline" class:status-online={device.online}>
-        <span class="dot"></span>{peerRouteDescription(device)}
-      </span>
+      <button class="identity identity-compact" onclick={onsettings} title="Device settings">
+        <span class="identity-text">
+          <span class="name">{device.alias}</span>
+          <span class="status status-inline" class:status-online={device.online}>
+            <span class="dot"></span>{peerRouteDescription(device)}
+          </span>
+        </span>
+      </button>
     {/if}
     <span class="spacer"></span>
     <button class="icon" onclick={openSearch} aria-label="Search" title="Search (Ctrl+F)"
@@ -174,12 +179,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .identity-compact {
+    padding: 4px 12px;
+    border-radius: 20px;
+  }
   .status-inline {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding-left: 8px;
-    font-size: 13px;
   }
   .dot {
     width: 8px;

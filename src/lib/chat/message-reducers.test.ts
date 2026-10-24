@@ -85,6 +85,41 @@ describe("incoming messages", () => {
     expect(done[0].status).toBeUndefined();
   });
 
+  it("replaces, rather than duplicates, files resent by a retry", () => {
+    const first = applyIncomingFiles(
+      [],
+      {
+        peerId: "alice",
+        id: "m1",
+        partial: true,
+        attachments: [
+          { name: "a.jpg", path: "/r/a.jpg", type: "image" },
+          { name: "b.jpg", path: "/r/b.jpg", type: "image" },
+        ],
+      },
+      T0,
+    );
+    const retried = applyIncomingFiles(
+      first,
+      {
+        peerId: "alice",
+        id: "m1",
+        attachments: [
+          { name: "a.jpg", path: "/r/a (1).jpg", type: "image" },
+          { name: "b.jpg", path: "/r/b (1).jpg", type: "image" },
+          { name: "c.jpg", path: "/r/c.jpg", type: "image" },
+        ],
+      },
+      T1,
+    );
+    expect(retried[0].attachments?.map((a) => a.path)).toEqual([
+      "/r/a (1).jpg",
+      "/r/b (1).jpg",
+      "/r/c.jpg",
+    ]);
+    expect(retried[0].status).toBeUndefined();
+  });
+
   it("marks partial batches and drops empty placeholders on failure", () => {
     const partial = applyIncomingFiles(
       [],

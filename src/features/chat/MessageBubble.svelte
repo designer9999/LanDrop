@@ -270,7 +270,7 @@
       </div>
     {/if}
 
-    {#if mine && message.status === "failed"}
+    {#if mine && message.status === "failed" && !message.deleted}
       <div class="failed-line">
         <Icon name="error" size={14} />
         <span>{message.error === "Cancelled" ? "Cancelled" : "Not delivered"}</span>

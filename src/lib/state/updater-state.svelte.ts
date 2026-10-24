@@ -26,8 +26,7 @@ function defaultBlockedReason(): string {
   const app = getAppState();
   if (app.transferActive || app.receivingTransferActive)
     return "Wait for file and message transfers to finish before updating.";
-  if (app.hasFiles || app.sendTextContent.trim())
-    return "Send or clear your draft and attached files before updating.";
+  if (app.hasAnyDraft) return "Send or clear your drafts and attached files before updating.";
   return "";
 }
 

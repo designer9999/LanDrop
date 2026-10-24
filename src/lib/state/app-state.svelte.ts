@@ -1,4 +1,5 @@
 import type { DiscoveredPeer, FileInfo, TailscaleStatus } from "$lib/api/bridge";
+import { untrack } from "svelte";
 import { SvelteDate, SvelteMap } from "svelte/reactivity";
 import {
   applyChatEvent,
@@ -199,6 +200,11 @@ export class AppState {
     this.updateDraft((draft) => ({ ...draft, files }));
   }
 
+  /** Unsent text or attachments in any conversation (blocks app updates). */
+  get hasAnyDraft(): boolean {
+    return Object.values(this.drafts).some((draft) => !draftIsEmpty(draft));
+  }
+
   get hasFiles(): boolean {
     return this.files.length > 0;
   }
@@ -218,11 +224,12 @@ export class AppState {
   }
 
   setReplyTo(messageId: string | null) {
-    this.updateDraft((draft) => ({
-      ...draft,
-      replyTo: messageId ?? undefined,
-      editingId: undefined,
-    }));
+    this.updateDraft((draft) => {
+      // Leaving edit mode for a reply restores the text typed before editing.
+      const { editingId, stash, ...rest } = draft;
+      const text = editingId ? (stash ?? "") : draft.text;
+      return { ...rest, text, replyTo: messageId ?? undefined };
+    });
   }
 
   /** Enter edit mode: the composer temporarily holds the message's text. */
@@ -301,9 +308,10 @@ export class AppState {
         },
       ];
     }
-    // Open the first device that appears when nothing else is open.
-    if (!this.activeDeviceId) {
-      this.setActiveDevice(peer.id);
+    // Open the first device that appears when nothing else is open — unless
+    // files are waiting for the user to choose a recipient.
+    if (!this.activeDeviceId && draftIsEmpty(this.drafts[UNASSIGNED])) {
+      this.setActiveDevice(peer.id, { adoptUnassigned: false });
     }
   }
 
@@ -317,12 +325,17 @@ export class AppState {
   }
 
   /** Open a conversation. Offline devices open read-only so their history is reachable. */
-  setActiveDevice(id: string | null) {
+  setActiveDevice(id: string | null, { adoptUnassigned = true } = {}) {
     const target = id ? this.devices.find((device) => device.id === id) : null;
     const nextId = target?.id ?? null;
     if (nextId !== this.activeDeviceId && this.activeDeviceId) this.markRead(this.activeDeviceId);
     // Attachments queued before any conversation was open follow the first one opened.
-    if (nextId && !draftIsEmpty(this.drafts[UNASSIGNED]) && draftIsEmpty(this.drafts[nextId])) {
+    if (
+      adoptUnassigned &&
+      nextId &&
+      !draftIsEmpty(this.drafts[UNASSIGNED]) &&
+      draftIsEmpty(this.drafts[nextId])
+    ) {
       const { [UNASSIGNED]: pending, ...rest } = this.drafts;
       this.drafts = { ...rest, [nextId]: pending };
     }
@@ -337,12 +350,13 @@ export class AppState {
     }
   }
 
+  /** Advance the read marker to the newest message (idempotent, so effects settle). */
   markRead(peerId: string) {
     const latest = this.messages.findLast((m) => m.peerId === peerId)?.timestamp;
-    const now = new SvelteDate().toISOString();
-    const at = latest && latest > now ? latest : now;
-    if (this.lastReadAt[peerId] === at) return;
-    this.lastReadAt = { ...this.lastReadAt, [peerId]: at };
+    if (!latest) return;
+    const current = untrack(() => this.lastReadAt[peerId]);
+    if (current && current >= latest) return;
+    this.lastReadAt = { ...untrack(() => this.lastReadAt), [peerId]: latest };
   }
 
   updateDeviceSettings(
@@ -373,8 +387,24 @@ export class AppState {
   // ── Files ──
 
   addFile(path: string, info: FileInfo | null) {
-    if (this.files.some((f) => f.path === path)) return;
-    this.files = [...this.files, { path, info }];
+    this.addFileTo(this.draftKey, path, info);
+  }
+
+  /**
+   * Queue a file in one conversation's draft. Async producers (paste, pickers,
+   * drops) capture the target first so switching conversations mid-save can't
+   * redirect the file to someone else.
+   */
+  addFileTo(peerId: string | null, path: string, info: FileInfo | null) {
+    const key = peerId ?? UNASSIGNED;
+    const draft = this.drafts[key] ?? emptyDraft();
+    if (draft.files.some((f) => f.path === path)) return;
+    this.drafts = { ...this.drafts, [key]: { ...draft, files: [...draft.files, { path, info }] } };
+  }
+
+  /** Attachments queued before any conversation was opened (quick-send hotkey). */
+  get unassignedFileCount(): number {
+    return this.drafts[UNASSIGNED]?.files.length ?? 0;
   }
 
   removeFile(path: string) {

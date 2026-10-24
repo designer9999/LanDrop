@@ -481,9 +481,13 @@ export async function copyImageToClipboard(path: string): Promise<void> {
   const { writeImage } = await import("@tauri-apps/plugin-clipboard-manager");
   const url = await getMediaUrl(path);
   if (!url) throw new Error("Image is not available");
-  const response = await fetch(url);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  await writeImage(bytes);
+  // The clipboard plugin decodes PNG only; let the webview decode JPEG/WebP/GIF.
+  const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const png = await canvas.convertToBlob({ type: "image/png" });
+  await writeImage(new Uint8Array(await png.arrayBuffer()));
 }
 
 export async function getClipboardFiles(): Promise<string[]> {

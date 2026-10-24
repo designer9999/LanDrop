@@ -81,15 +81,16 @@
     }
   });
 
-  // Keep pinned to the bottom while images finish loading.
+  // Stay pinned to the bottom while images load or the composer grows
+  // (reply/edit banners, attachment tray, multi-line text).
   $effect(() => {
     if (!scroller) return;
     const content = scroller.firstElementChild;
-    if (!content) return;
     const observer = new ResizeObserver(() => {
       if (atBottom && !filtered) scrollToBottom();
     });
-    observer.observe(content);
+    observer.observe(scroller);
+    if (content) observer.observe(content);
     return () => observer.disconnect();
   });
 

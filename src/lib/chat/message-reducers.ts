@@ -74,6 +74,18 @@ export function applyIncomingText(
   return [...messages, entry];
 }
 
+/**
+ * A retried batch reuses its message ID and resends every file; an attachment
+ * with the same name replaces the earlier copy instead of appearing twice.
+ */
+function mergeAttachments(
+  existing: readonly MessageAttachment[],
+  incoming: readonly MessageAttachment[],
+): MessageAttachment[] {
+  const names = new Set(incoming.map((attachment) => attachment.name));
+  return [...existing.filter((attachment) => !names.has(attachment.name)), ...incoming];
+}
+
 /** Add or merge incoming attachments (caption text may already be present). */
 export function applyIncomingFiles(
   messages: readonly MessageEntry[],
@@ -89,7 +101,7 @@ export function applyIncomingFiles(
       const existing = messages[index];
       const next: MessageEntry = {
         ...existing,
-        attachments: [...(existing.attachments ?? []), ...incoming.attachments],
+        attachments: mergeAttachments(existing.attachments ?? [], incoming.attachments),
         status,
         error,
       };

@@ -12,11 +12,15 @@ storage. Tailscale may relay its encrypted connections when a direct path is una
 ## Features
 
 - Direct file, folder, and text transfer over TCP
+- Messenger-style conversations: replies, edits, delete for everyone, reactions,
+  delivery receipts, retry, and per-conversation drafts (LanDrop 2.0 on both sides)
+- Paste screenshots, images, videos, or copied files; captions travel with them
+- Full-resolution media viewer with zoom and gallery navigation; streamed video
+- Per-message transfer progress with cancel
 - Automatic peer discovery with mDNS
 - Desktop Tailscale discovery, with LAN preferred when both routes are available
-- A live device list; saved conversations remain available through **View all history**
+- A live device list beside your conversations; offline history stays readable
 - Windows, macOS, Linux, and Android builds
-- Transfer history, image previews, and desktop video previews
 - Per-peer receive folders
 - Desktop system tray, global shortcut, and signed Tauri updater artifacts
 - No LanDrop telemetry, account, cloud storage, or application relay
@@ -88,11 +92,16 @@ still uses the plaintext LanDrop protocol described below.
 See the [desktop Tailscale guide](documentation/tailscale.md) for troubleshooting,
 limits, and a two-device acceptance check.
 
-The current wire protocol is intentionally simple, but it has no pairing, encryption,
-receiver approval, integrity digest, resume, or final acknowledgement. Those are
-prioritized in the [technical audit](documentation/technical-audit-2026-07.md).
+The wire protocol is intentionally simple. Version 2 adds shared message IDs,
+receiver acknowledgements, and capability-gated edit/delete/react events while
+staying compatible with 1.8.x devices. It still has no pairing, encryption,
+receiver approval, integrity digest, or resume; those are prioritized in the
+[technical audit](documentation/technical-audit-2026-07.md).
 
-The [September audit](documentation/technical-audit-2026-09.md) covers current
+The [October audit](documentation/technical-audit-2026-10.md) records the 2.0
+modernization, its verification and what remains open; the
+[2.0 design](documentation/design/2026-10-24-chat-redesign.md) documents the protocol
+and interface. The [September audit](documentation/technical-audit-2026-09.md) covers
 architecture, dependencies, UX, Tailscale, and remaining work. UI changes follow
 the supplied [Material 3 component conventions](documentation/material-3-components.md).
 
@@ -107,7 +116,7 @@ are in [assets/branding](assets/branding/README.md).
 ## Tech stack
 
 - Svelte 5, TypeScript 6, Vite 8, and Tailwind CSS 4
-- Rust and Tauri 2
+- Rust 1.99 and Tauri 2.12 (asset protocol for media)
 - `mdns-sd` discovery and a custom framed TCP transfer protocol
 - Tauri Android with small Kotlin integrations
 
@@ -166,8 +175,8 @@ Add release notes at `documentation/releases/vMAJOR.MINOR.PATCH.md`, then create
 and push an annotated version tag after the source commit has passed CI on `main`:
 
 ```bash
-git tag -a v1.7.1 -m "LanDrop v1.7.1"
-git push origin v1.7.1
+git tag -a v2.0.0 -m "LanDrop v2.0.0"
+git push origin v2.0.0
 ```
 
 The release workflow accepts stable `vMAJOR.MINOR.PATCH` tags, verifies the versions

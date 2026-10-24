@@ -51,11 +51,15 @@
     field?.focus();
   }
 
+  // Primitive deriveds: the effect below must not re-run on every keystroke.
+  const replyId = $derived(app.draft.replyTo);
+  const editId = $derived(app.draft.editingId);
+
   $effect(() => {
     // Focus the field when a reply or edit starts, or the conversation changes.
     void app.activeDeviceId;
-    void app.draft.replyTo;
-    void app.draft.editingId;
+    void replyId;
+    void editId;
     if (!mobile) queueMicrotask(() => field?.focus());
   });
 
@@ -103,11 +107,12 @@
 
     if (blobs.length > 0) {
       event.preventDefault();
+      const target = app.activeDeviceId;
       pasting += blobs.length;
       for (const blob of blobs) {
         try {
           const path = await saveClipboardImage(blob, blob.type);
-          app.addFile(path, await getFileInfo(path));
+          app.addFileTo(target, path, await getFileInfo(path));
         } catch (error) {
           chat.notify(`Couldn't paste: ${error instanceof Error ? error.message : error}`);
         } finally {

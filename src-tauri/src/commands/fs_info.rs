@@ -1,5 +1,6 @@
 //! File metadata, previews, raw reads, and thumbnails.
 
+use image::ImageEncoder;
 use serde::Serialize;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, Read, Write};
@@ -128,7 +129,9 @@ pub async fn allow_media_paths(paths: Vec<String>, app: AppHandle) -> Result<Vec
         .collect())
 }
 
-/// Path of a cached JPEG thumbnail for `source`, generating it on a miss.
+/// Path of a cached thumbnail for `source`, generating it on a miss: JPEG for
+/// opaque images, PNG when transparency must survive (icons, stickers, UI
+/// screenshots with alpha) so they don't gain a white box in dark themes.
 /// The cache key covers canonical path, size, modification time and `max_px`,
 /// so an edited or replaced file gets a fresh thumbnail. Animated images use
 /// their first frame. `None` for non-images and undecodable files.
@@ -151,9 +154,12 @@ fn cached_thumbnail(cache_dir: &Path, source: &Path, max_px: u32) -> Option<Path
     metadata.len().hash(&mut hasher);
     modified.hash(&mut hasher);
     max_px.hash(&mut hasher);
-    let output = cache_dir.join(format!("{:016x}-{max_px}.jpg", hasher.finish()));
-    if output.is_file() {
-        return Some(output);
+    let stem = format!("{:016x}-{max_px}", hasher.finish());
+    for cached in [format!("{stem}.jpg"), format!("{stem}.png")] {
+        let path = cache_dir.join(cached);
+        if path.is_file() {
+            return Some(path);
+        }
     }
 
     // Bound decoding of untrusted received images before `thumbnail()`.
@@ -168,13 +174,11 @@ fn cached_thumbnail(cache_dir: &Path, source: &Path, max_px: u32) -> Option<Path
     reader.limits(limits);
     let thumb = reader.decode().ok()?.thumbnail(max_px, max_px).to_rgba8();
 
-    // JPEG has no alpha: composite transparent pixels onto white.
-    let rgb = image::RgbImage::from_fn(thumb.width(), thumb.height(), |x, y| {
-        let [r, g, b, a] = thumb.get_pixel(x, y).0;
-        let blend =
-            |c: u8| ((u16::from(c) * u16::from(a) + 255 * (255 - u16::from(a))) / 255) as u8;
-        image::Rgb([blend(r), blend(g), blend(b)])
-    });
+    let transparent = thumb.pixels().any(|pixel| pixel.0[3] < 255);
+    let output = cache_dir.join(format!(
+        "{stem}.{}",
+        if transparent { "png" } else { "jpg" }
+    ));
 
     std::fs::create_dir_all(cache_dir).ok()?;
     // Write under a unique name, then rename, so a concurrent request never
@@ -184,9 +188,24 @@ fn cached_thumbnail(cache_dir: &Path, source: &Path, max_px: u32) -> Option<Path
         .map_err(|e| e.to_string())
         .and_then(|file| {
             let mut writer = std::io::BufWriter::new(file);
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, THUMBNAIL_JPEG_QUALITY)
+            if transparent {
+                image::codecs::png::PngEncoder::new(&mut writer)
+                    .write_image(
+                        thumb.as_raw(),
+                        thumb.width(),
+                        thumb.height(),
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let rgb = image::DynamicImage::ImageRgba8(thumb).to_rgb8();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(
+                    &mut writer,
+                    THUMBNAIL_JPEG_QUALITY,
+                )
                 .encode_image(&rgb)
                 .map_err(|e| e.to_string())?;
+            }
             writer.flush().map_err(|e| e.to_string())
         })
         .and_then(|()| std::fs::rename(&staging, &output).map_err(|e| e.to_string()));
@@ -198,7 +217,7 @@ fn cached_thumbnail(cache_dir: &Path, source: &Path, max_px: u32) -> Option<Path
     Some(output)
 }
 
-/// Return the filesystem path of a cached JPEG thumbnail (allowed in the asset
+/// Return the filesystem path of a cached JPEG/PNG thumbnail (allowed in the asset
 /// protocol scope), or `None` for non-images and decode failures.
 #[tauri::command]
 pub async fn get_thumbnail(
@@ -416,7 +435,7 @@ mod tests {
         let directory = test_directory("thumb");
         let cache = directory.join("cache");
         let source = directory.join("photo.png");
-        image::RgbaImage::from_pixel(400, 300, image::Rgba([10, 120, 200, 128]))
+        image::RgbaImage::from_pixel(400, 300, image::Rgba([10, 120, 200, 255]))
             .save(&source)
             .unwrap();
 
@@ -452,6 +471,24 @@ mod tests {
         std::fs::write(&fake, b"not a png").unwrap();
         assert!(cached_thumbnail(&cache, &fake, 128).is_none());
         assert!(cached_thumbnail(&cache, &directory.join("missing.png"), 128).is_none());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn transparent_images_keep_their_alpha_as_png_thumbnails() {
+        let directory = test_directory("thumb-alpha");
+        let cache = directory.join("cache");
+        let source = directory.join("icon.png");
+        image::RgbaImage::from_pixel(300, 300, image::Rgba([240, 80, 20, 0]))
+            .save(&source)
+            .unwrap();
+
+        let thumb = cached_thumbnail(&cache, &source, 128).expect("thumbnail");
+        assert_eq!(thumb.extension().and_then(|e| e.to_str()), Some("png"));
+        let decoded = image::open(&thumb).unwrap().to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0[3], 0, "transparency survives");
+        assert_eq!(cached_thumbnail(&cache, &source, 128), Some(thumb));
 
         std::fs::remove_dir_all(directory).unwrap();
     }

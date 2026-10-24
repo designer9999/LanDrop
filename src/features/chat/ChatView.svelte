@@ -14,7 +14,7 @@
   import FilePreviewDialog from "../transfer/FilePreviewDialog.svelte";
   import { setChatContext } from "./chat-context";
   import { getAppState } from "$lib/state/app-state.svelte";
-  import type { DiscoveredDevice, MessageAttachment } from "$lib/state/model";
+  import type { DiscoveredDevice, MessageAttachment, MessageEntry } from "$lib/state/model";
   import type { ChatController } from "$lib/chat/chat-controller.svelte";
   import {
     deleteHistoryFiles,
@@ -133,6 +133,8 @@
   }
 
   async function addPaths(paths: string[]) {
+    // This view belongs to one device; queue there even if the user switches away.
+    const target = device.id;
     for (const path of paths) {
       if (mobile && path.startsWith("content://")) {
         // Android: Rust can't read content:// URIs — resolve the name via Kotlin.
@@ -154,9 +156,9 @@
                 : `file_${Date.now()}`;
         }
         const ext = name.includes(".") ? "." + name.split(".").pop()!.toLowerCase() : "";
-        app.addFile(path, { name, size_bytes: 0, type: ext, count: undefined });
+        app.addFileTo(target, path, { name, size_bytes: 0, type: ext, count: undefined });
       } else {
-        app.addFile(path, await getFileInfo(path));
+        app.addFileTo(target, path, await getFileInfo(path));
       }
     }
     composer?.focus();
@@ -181,15 +183,23 @@
     await openFile(folder).catch(() => onsnackbar("Couldn't open the receive folder"));
   }
 
+  /** Remove app-owned copies only when no remaining message still shows them. */
+  function deleteUnreferencedFiles(removed: MessageEntry[]) {
+    // Local membership sets, discarded after filtering — never rendered.
+    const removedIds = new Set(removed.map((m) => m.id));
+    const kept = new Set(collectAttachmentPaths(app.messages.filter((m) => !removedIds.has(m.id))));
+    void deleteHistoryFiles(collectAttachmentPaths(removed).filter((path) => !kept.has(path)));
+  }
+
   function clearChat() {
     const removed = app.getPeerMessages(device.id).filter((m) => !m.starred);
-    void deleteHistoryFiles(collectAttachmentPaths(removed));
+    deleteUnreferencedFiles(removed);
     app.clearMessages(device.id);
     onsnackbar(`Cleared chat with ${device.alias}`);
   }
 
   function deleteConversation() {
-    void deleteHistoryFiles(collectAttachmentPaths(app.getPeerMessages(device.id)));
+    deleteUnreferencedFiles(app.getPeerMessages(device.id));
     const alias = device.alias;
     app.forgetConversation(device.id);
     confirmDelete = false;

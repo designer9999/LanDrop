@@ -10,6 +10,7 @@
     "clipboard-manager:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-image",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",

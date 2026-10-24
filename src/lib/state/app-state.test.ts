@@ -96,12 +96,40 @@ describe("session device discovery", () => {
     expect(app.messageSearch).toBe("");
   });
 
-  it("moves attachments queued before any conversation into the first one opened", () => {
+  it("waits for an explicit choice before attaching hotkey files to a conversation", () => {
     const app = new AppState();
     app.addFile("/hotkey/pick.png", null);
     app.upsertDevice(laptop);
-    expect(app.activeDeviceId).toBe(laptop.id);
+    // Discovery alone neither opens a conversation nor retargets queued files.
+    expect(app.activeDeviceId).toBeNull();
+    expect(app.unassignedFileCount).toBe(1);
+    app.setActiveDevice(laptop.id);
     expect(app.filePaths).toEqual(["/hotkey/pick.png"]);
+    expect(app.unassignedFileCount).toBe(0);
+  });
+
+  it("queues async attachments in the conversation they were started in", () => {
+    const app = new AppState();
+    app.upsertDevice(laptop);
+    app.upsertDevice({ ...laptop, id: "other" });
+    app.setActiveDevice(laptop.id);
+    app.setActiveDevice("other");
+    app.addFileTo(laptop.id, "/pasted.png", null);
+    expect(app.filePaths).toEqual([]);
+    app.setActiveDevice(laptop.id);
+    expect(app.filePaths).toEqual(["/pasted.png"]);
+  });
+
+  it("keeps the unsent draft when switching from editing to replying", () => {
+    const app = new AppState();
+    app.upsertDevice(laptop);
+    const old = app.addMessage({ peerId: laptop.id, direction: "sent", text: "old text" });
+    app.sendTextContent = "hello";
+    app.startEditing(old.id);
+    app.setReplyTo(old.id);
+    expect(app.sendTextContent).toBe("hello");
+    expect(app.editingMessage).toBeNull();
+    expect(app.replyingTo?.id).toBe(old.id);
   });
 
   it("counts unread messages until the conversation is opened", () => {
