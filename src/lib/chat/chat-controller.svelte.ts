@@ -91,6 +91,7 @@ export class ChatController {
     app.removeSentFiles(files, device.id);
     app.setReplyTo(null);
 
+    const quoted = draft.replyTo ? app.getMessage(draft.replyTo) : undefined;
     const message = app.addMessage({
       peerId: device.id,
       direction: "sent",
@@ -98,6 +99,7 @@ export class ChatController {
       attachments: attachmentsFromSelection(files),
       status: "sending",
       replyTo: draft.replyTo,
+      replyPreview: quoted ? messagePreview(quoted).slice(0, 200) || undefined : undefined,
       sendPaths: files.length > 0 ? files.map((file) => file.path) : undefined,
     });
     await this.deliver(message, device);
@@ -122,6 +124,7 @@ export class ChatController {
       peerIp: device.ip,
       messageId: message.id,
       replyTo: message.replyTo,
+      replyPreview: message.replyPreview,
     };
     app.activeSends += 1;
     const outcomes: SendOutcome[] = [];
@@ -300,6 +303,7 @@ export class ChatController {
       text: event.text,
       id: event.id,
       replyTo: event.reply_to,
+      replyPreview: event.reply_preview,
     });
     this.app.addLog(
       "info",
@@ -316,6 +320,7 @@ export class ChatController {
         peerId: event.peer_id,
         id: event.id,
         replyTo: event.reply_to,
+        replyPreview: event.reply_preview,
         attachments,
         partial: event.partial,
       });

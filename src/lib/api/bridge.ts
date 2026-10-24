@@ -107,6 +107,7 @@ export interface SendOptions {
   peerIp?: string;
   messageId?: string;
   replyTo?: string;
+  replyPreview?: string;
 }
 
 export async function lanSendText(
@@ -120,6 +121,7 @@ export async function lanSendText(
     peerIp: options.peerIp,
     messageId: options.messageId,
     replyTo: options.replyTo,
+    replyPreview: options.replyPreview,
   });
 }
 
@@ -143,6 +145,7 @@ export async function lanSendFiles(
       peerIp: options.peerIp,
       messageId: options.messageId,
       replyTo: options.replyTo,
+      replyPreview: options.replyPreview,
     });
   } finally {
     // Always remove temporary Android send copies, including after failed sends.
@@ -538,6 +541,7 @@ export interface TextReceivedEvent {
   text: string;
   id?: string | null;
   reply_to?: string | null;
+  reply_preview?: string | null;
   sent_at?: number | null;
 }
 
@@ -553,6 +557,7 @@ export interface FilesReceivedEvent {
   file_details: Array<{ name: string; path: string; size: number }>;
   id?: string | null;
   reply_to?: string | null;
+  reply_preview?: string | null;
   /** True when the batch failed after these files were already saved. */
   partial?: boolean;
   expected_files?: number;

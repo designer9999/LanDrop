@@ -33,6 +33,15 @@ describe("incoming messages", () => {
     ]);
   });
 
+  it("keeps a reply's quoted preview for originals this device doesn't have", () => {
+    const next = applyIncomingText(
+      [],
+      { peerId: "alice", text: "yes", id: "m2", replyTo: "unknown", replyPreview: "  the plan  " },
+      T0,
+    );
+    expect(next[0]).toMatchObject({ replyTo: "unknown", replyPreview: "the plan" });
+  });
+
   it("assigns a local ID to messages from older peers", () => {
     const next = applyIncomingText([], { peerId: "alice", text: "legacy" }, T0);
     expect(next[0].id).toMatch(/[0-9a-f-]{36}/);

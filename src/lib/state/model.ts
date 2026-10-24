@@ -60,6 +60,8 @@ export interface MessageEntry {
   status?: MessageStatus;
   error?: string;
   replyTo?: string;
+  /** Short text of the quoted message, shown when the original isn't available. */
+  replyPreview?: string;
   editedAt?: string;
   /** Tombstone: the sender deleted this message for everyone. */
   deleted?: boolean;

@@ -56,11 +56,24 @@ pub struct SendOutcome {
     pub status: SendStatus,
 }
 
-fn unit_meta(message_id: Option<String>, reply_to: Option<String>) -> UnitMeta {
+/// Longest quoted-message preview carried with a reply, in characters.
+const MAX_REPLY_PREVIEW_CHARS: usize = 200;
+
+fn unit_meta(
+    message_id: Option<String>,
+    reply_to: Option<String>,
+    reply_preview: Option<String>,
+) -> UnitMeta {
     let non_empty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+    let reply_to = non_empty(reply_to);
     UnitMeta {
         id: non_empty(message_id),
-        reply_to: non_empty(reply_to),
+        // A preview without the message it quotes means nothing.
+        reply_preview: reply_to
+            .as_ref()
+            .and(non_empty(reply_preview))
+            .map(|text| text.chars().take(MAX_REPLY_PREVIEW_CHARS).collect()),
+        reply_to,
     }
 }
 
@@ -71,6 +84,7 @@ pub async fn lan_send_text(
     peer_ip: Option<String>,
     message_id: Option<String>,
     reply_to: Option<String>,
+    reply_preview: Option<String>,
     state: State<'_, LanState>,
 ) -> Result<SendOutcome, String> {
     let status = state
@@ -79,7 +93,7 @@ pub async fn lan_send_text(
             &peer_id,
             peer_ip.as_deref(),
             &text,
-            unit_meta(message_id, reply_to),
+            unit_meta(message_id, reply_to, reply_preview),
         )
         .await?;
     Ok(SendOutcome { status })
@@ -92,6 +106,7 @@ pub async fn lan_send_files(
     peer_ip: Option<String>,
     message_id: Option<String>,
     reply_to: Option<String>,
+    reply_preview: Option<String>,
     state: State<'_, LanState>,
 ) -> Result<SendOutcome, String> {
     let status = state
@@ -100,7 +115,7 @@ pub async fn lan_send_files(
             &peer_id,
             peer_ip.as_deref(),
             &paths,
-            unit_meta(message_id, reply_to),
+            unit_meta(message_id, reply_to, reply_preview),
         )
         .await?;
     Ok(SendOutcome { status })

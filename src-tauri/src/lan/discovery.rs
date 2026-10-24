@@ -937,15 +937,37 @@ pub async fn run_discovery(
                     )
                 });
                 peer.observe_route(&ip);
-                let peer = peer.clone();
+                let mut peer = peer.clone();
                 drop(peers);
 
-                if changed {
-                    emit_log(
-                        &handle_scan,
-                        "info",
-                        &format!("LAN scan found {} at {}", &peer_id[..8], ip),
-                    );
+                // A UUID handshake carries no name. When mDNS hasn't named this
+                // peer (multicast blocked, multi-homed hosts) or it was first
+                // seen as an incoming connection, ask it once for its identity
+                // so the user sees its real name and chat capabilities are known.
+                let mut learned = false;
+                if peer.known_caps().is_none() {
+                    if let Ok(info) = super::transfer::probe_peer_info(&ip, &my_uuid_scan).await {
+                        if info.id == peer_id {
+                            let mut peers = peers_scan.lock().await;
+                            if let Some(entry) = peers.get_mut(&peer_id) {
+                                entry.alias = info.alias;
+                                entry.device_type = info.device_type;
+                                entry.set_caps(info.caps);
+                                peer = entry.clone();
+                                learned = true;
+                            }
+                        }
+                    }
+                }
+
+                if changed || learned {
+                    if changed {
+                        emit_log(
+                            &handle_scan,
+                            "info",
+                            &format!("LAN scan found {} at {}", &peer_id[..8], ip),
+                        );
+                    }
                     let _ = handle_scan.emit("lan_peer_discovered", &peer);
                 }
             }
@@ -1441,6 +1463,7 @@ async fn handle_incoming_session(
                 text,
                 id,
                 reply_to,
+                reply_preview,
                 sent_at,
             } => {
                 allow_legacy_text_eof = true;
@@ -1455,6 +1478,9 @@ async fn handle_incoming_session(
                 }
                 if let Some(reply_to) = reply_to {
                     payload["reply_to"] = reply_to.into();
+                }
+                if let Some(preview) = reply_preview {
+                    payload["reply_preview"] = preview.into();
                 }
                 if let Some(sent_at) = sent_at {
                     payload["sent_at"] = sent_at.into();
@@ -1552,6 +1578,7 @@ async fn handle_incoming_session(
                 count,
                 id,
                 reply_to,
+                reply_preview,
             } => {
                 let mut files = Vec::new();
                 let mut progress = ReceiveProgress::new(
@@ -1598,6 +1625,9 @@ async fn handle_incoming_session(
                     });
                     if let Some(id) = &id {
                         payload["id"] = id.as_str().into();
+                    }
+                    if let Some(preview) = &reply_preview {
+                        payload["reply_preview"] = preview.as_str().into();
                     }
                     if let Some(reply_to) = &reply_to {
                         payload["reply_to"] = reply_to.as_str().into();

@@ -11,6 +11,20 @@ export interface IncomingText {
   text: string;
   id?: string | null;
   replyTo?: string | null;
+  replyPreview?: string | null;
+}
+
+const MAX_REPLY_PREVIEW = 200;
+
+function withReply(
+  entry: MessageEntry,
+  replyTo: string | null | undefined,
+  replyPreview: string | null | undefined,
+) {
+  if (!replyTo) return;
+  entry.replyTo = replyTo;
+  const preview = replyPreview?.trim();
+  if (preview) entry.replyPreview = preview.slice(0, MAX_REPLY_PREVIEW);
 }
 
 export interface IncomingFiles {
@@ -18,6 +32,7 @@ export interface IncomingFiles {
   attachments: MessageAttachment[];
   id?: string | null;
   replyTo?: string | null;
+  replyPreview?: string | null;
   partial?: boolean;
 }
 
@@ -70,7 +85,7 @@ export function applyIncomingText(
     text: incoming.text,
     timestamp: now,
   };
-  if (incoming.replyTo) entry.replyTo = incoming.replyTo;
+  withReply(entry, incoming.replyTo, incoming.replyPreview);
   return [...messages, entry];
 }
 
@@ -120,7 +135,7 @@ export function applyIncomingFiles(
     timestamp: now,
     attachments: incoming.attachments,
   };
-  if (incoming.replyTo) entry.replyTo = incoming.replyTo;
+  withReply(entry, incoming.replyTo, incoming.replyPreview);
   if (status) {
     entry.status = status;
     entry.error = error;

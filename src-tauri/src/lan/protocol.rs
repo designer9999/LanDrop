@@ -57,6 +57,10 @@ pub enum Message {
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
+        /// Short text of the quoted message, so the quote still renders when
+        /// the receiver lacks the original (pre-2.0 history, deleted locally).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_preview: Option<String>,
         /// Sender clock, unix milliseconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sent_at: Option<u64>,
@@ -72,6 +76,8 @@ pub enum Message {
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_preview: Option<String>,
     },
     #[serde(rename = "done")]
     Done,
@@ -189,11 +195,12 @@ mod tests {
             count,
             id,
             reply_to,
+            reply_preview,
         } = serde_json::from_str(frames[5]).unwrap()
         else {
             panic!("expected batch");
         };
-        assert_eq!((count, id, reply_to), (2, None, None));
+        assert_eq!((count, id, reply_to, reply_preview), (2, None, None, None));
     }
 
     #[test]
@@ -202,6 +209,7 @@ mod tests {
             text: "hi".into(),
             id: None,
             reply_to: None,
+            reply_preview: None,
             sent_at: None,
         };
         assert_eq!(
@@ -212,6 +220,7 @@ mod tests {
             count: 2,
             id: None,
             reply_to: None,
+            reply_preview: None,
         };
         assert_eq!(
             serde_json::to_string(&batch).unwrap(),
@@ -225,12 +234,13 @@ mod tests {
             text: "hi".into(),
             id: Some("m1".into()),
             reply_to: Some("m0".into()),
+            reply_preview: Some("earlier text".into()),
             sent_at: Some(1_700_000_000_000),
         };
         let json = serde_json::to_string(&text).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"text","text":"hi","id":"m1","reply_to":"m0","sent_at":1700000000000}"#
+            r#"{"type":"text","text":"hi","id":"m1","reply_to":"m0","reply_preview":"earlier text","sent_at":1700000000000}"#
         );
         // A future peer may add more fields; they must not break parsing.
         let future = r#"{"type":"ack","id":"m1","ok":false,"error":"disk full","extra":1}"#;

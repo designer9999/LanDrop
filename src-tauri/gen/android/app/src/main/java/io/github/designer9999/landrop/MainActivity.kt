@@ -26,7 +26,10 @@ class MainActivity : TauriActivity() {
       val bars = insets.getInsets(
         WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
       )
-      view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+      // Edge-to-edge apps must make room for the on-screen keyboard themselves;
+      // otherwise it covers the composer and the newest messages.
+      val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
+      view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, keyboard.bottom))
       insets
     }
     ViewCompat.requestApplyInsets(content)

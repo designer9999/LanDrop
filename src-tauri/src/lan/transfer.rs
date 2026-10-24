@@ -91,11 +91,15 @@ pub enum SendStatus {
     Unsupported,
 }
 
+/// Upper bound for a quoted-message preview on the wire (200 chars of UTF-8).
+const MAX_REPLY_PREVIEW_BYTES: usize = 800;
+
 /// Optional v2 identifiers carried by a text or batch unit.
 #[derive(Debug, Clone, Default)]
 pub struct UnitMeta {
     pub id: Option<String>,
     pub reply_to: Option<String>,
+    pub reply_preview: Option<String>,
 }
 
 /// Where `lan_transfer_progress` events go, tagged with the message and peer
@@ -470,6 +474,13 @@ fn validate_message(msg: &Message) -> Result<(), String> {
         {
             Err("Message identifier is empty or too long".into())
         }
+        Message::Text { reply_preview, .. } | Message::Batch { reply_preview, .. }
+            if reply_preview
+                .as_ref()
+                .is_some_and(|preview| preview.len() > MAX_REPLY_PREVIEW_BYTES) =>
+        {
+            Err("Reply preview is too long".into())
+        }
         Message::File { name, .. } | Message::Dir { name }
             if name.len() > MAX_TRANSFER_PATH_BYTES =>
         {
@@ -604,6 +615,7 @@ pub async fn send_text_on_connection(
         text: text.to_string(),
         id: meta.id.clone(),
         reply_to: meta.reply_to.clone(),
+        reply_preview: meta.reply_preview.clone(),
         // Only v2 sends (with an id) carry a timestamp, so id-less sends keep
         // the exact 1.8.x frame.
         sent_at: meta.id.as_ref().map(|_| now_unix_ms()),
@@ -860,6 +872,7 @@ where
             count: batch_count,
             id: meta.id.clone(),
             reply_to: meta.reply_to.clone(),
+            reply_preview: meta.reply_preview.clone(),
         },
     )
     .await?;
@@ -1636,6 +1649,7 @@ mod tests {
         super::UnitMeta {
             id: Some(id.into()),
             reply_to: Some("earlier".into()),
+            reply_preview: Some("the earlier message".into()),
         }
     }
 
@@ -1650,6 +1664,7 @@ mod tests {
                 text,
                 id: Some(id),
                 reply_to,
+                reply_preview,
                 sent_at,
             }) = connection.recv_message().await.unwrap()
             else {
@@ -1657,6 +1672,7 @@ mod tests {
             };
             assert_eq!(text, "hello");
             assert_eq!(reply_to.as_deref(), Some("earlier"));
+            assert_eq!(reply_preview.as_deref(), Some("the earlier message"));
             assert!(sent_at.is_some_and(|ms| ms > 1_600_000_000_000));
             super::send_ack(&connection, &id, Ok(())).await.unwrap();
             assert!(matches!(
@@ -1748,11 +1764,13 @@ mod tests {
                 count,
                 id: Some(id),
                 reply_to,
+                reply_preview,
             }) = connection.recv_message().await.unwrap()
             else {
                 panic!("expected v2 batch");
             };
             assert_eq!(reply_to.as_deref(), Some("earlier"));
+            assert_eq!(reply_preview.as_deref(), Some("the earlier message"));
             let files = receive_batch(&connection, count, destination.to_str().unwrap(), false)
                 .await
                 .unwrap();
@@ -2313,6 +2331,7 @@ mod tests {
                     text: "not a file".into(),
                     id: None,
                     reply_to: None,
+                    reply_preview: None,
                     sent_at: None,
                 },
             )
@@ -2356,6 +2375,7 @@ mod tests {
                     text: "bye".into(),
                     id: None,
                     reply_to: None,
+                    reply_preview: None,
                     sent_at: None,
                 },
             )
@@ -2431,12 +2451,14 @@ mod tests {
             count: MAX_BATCH_FILES + 1,
             id: None,
             reply_to: None,
+            reply_preview: None,
         })
         .is_err());
         assert!(validate_message(&Message::Text {
             text: "x".repeat(MAX_TEXT_BYTES + 1),
             id: None,
             reply_to: None,
+            reply_preview: None,
             sent_at: None,
         })
         .is_err());
@@ -2444,6 +2466,7 @@ mod tests {
             text: "ok".into(),
             id: Some("x".repeat(129)),
             reply_to: None,
+            reply_preview: None,
             sent_at: None,
         })
         .is_err());

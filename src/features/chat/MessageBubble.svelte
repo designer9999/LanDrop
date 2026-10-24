@@ -160,7 +160,7 @@
             <span class="quote-text"
               >{replyTarget
                 ? messagePreview(replyTarget)
-                : "Original message isn't available"}</span
+                : message.replyPreview || "Original message isn't available"}</span
             >
           </button>
         {/if}
@@ -743,6 +743,13 @@
   @media (hover: none) {
     .hover-actions {
       display: none;
+    }
+    /* Touch: long-press opens the message menu (with Copy text) instead of
+       starting a native selection under it. */
+    .bubble {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
   }
 </style>

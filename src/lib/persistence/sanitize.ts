@@ -145,7 +145,11 @@ export function sanitizeMessage(raw: unknown): MessageEntry | null {
   }
 
   const replyTo = stringValue(raw.replyTo);
-  if (replyTo) message.replyTo = replyTo;
+  if (replyTo) {
+    message.replyTo = replyTo;
+    const replyPreview = stringValue(raw.replyPreview).slice(0, 200);
+    if (replyPreview) message.replyPreview = replyPreview;
+  }
   const editedAt = stringValue(raw.editedAt);
   if (editedAt) message.editedAt = editedAt;
 
