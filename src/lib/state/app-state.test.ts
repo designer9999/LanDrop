@@ -132,6 +132,19 @@ describe("session device discovery", () => {
     expect(app.replyingTo?.id).toBe(old.id);
   });
 
+  it("treats history from LanDrop 1.8 as already read", () => {
+    const previous = new AppState();
+    previous.upsertDevice(laptop);
+    previous.receiveText({ peerId: laptop.id, text: "old news", id: "m1" });
+    const { lastReadAt: _ignored, ...v1Snapshot } = previous.exportPersistedState();
+    const restored = new AppState();
+    restored.hydratePersistedState({ ...v1Snapshot, version: 1 });
+    restored.upsertDevice({ ...laptop, id: "other" });
+    expect(restored.totalUnread).toBe(0);
+    restored.receiveText({ peerId: laptop.id, text: "new", id: "m2" });
+    expect(restored.conversations.find((c) => c.device.id === laptop.id)?.unread).toBe(1);
+  });
+
   it("counts unread messages until the conversation is opened", () => {
     const app = new AppState();
     app.upsertDevice(laptop);

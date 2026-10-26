@@ -158,6 +158,8 @@ impl LanService {
     pub fn new(handle: AppHandle, identity: DeviceIdentity, data_dir: PathBuf) -> Self {
         let alias = identity.alias.clone();
         let folder_settings = load_folder_settings(&data_dir);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        tailscale::mobile::init(&data_dir);
         Self {
             handle,
             run: Mutex::new(None),

@@ -4,12 +4,14 @@
 //! shell integration, storage, and platform helpers live in their own files.
 
 pub(crate) mod clipboard;
+pub(crate) mod firewall;
 pub(crate) mod fs_info;
 pub(crate) mod platform;
 pub(crate) mod shell;
 pub(crate) mod storage;
 
 pub use clipboard::*;
+pub use firewall::*;
 pub use fs_info::*;
 pub use platform::*;
 pub use shell::*;

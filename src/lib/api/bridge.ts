@@ -216,6 +216,21 @@ export async function openUrl(url: string): Promise<void> {
   return invoke("open_url", { url });
 }
 
+export interface FirewallStatus {
+  supported: boolean;
+  configured: boolean;
+}
+
+/** Whether LanDrop's LAN + Tailscale inbound firewall rule exists (Windows). */
+export async function firewallStatus(): Promise<FirewallStatus> {
+  return invoke<FirewallStatus>("firewall_status");
+}
+
+/** Ask Windows (UAC prompt) to allow LanDrop on LAN and Tailscale. Rejects with "cancelled". */
+export async function allowThroughFirewall(): Promise<void> {
+  return invoke("allow_through_firewall");
+}
+
 /** Open an http(s) link from a chat message in the default browser. */
 export async function openChatLink(url: string): Promise<void> {
   return invoke("open_chat_link", { url });

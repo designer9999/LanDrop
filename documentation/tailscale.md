@@ -15,6 +15,21 @@ does not establish the complete cause of the prior internet outage.
 macOS and Linux retain discovery using the standard installed client. Desktop
 discovery currently uses IPv4, not IPv6-only endpoints.
 
+## Phones and the firewall (2.0.1)
+
+Android has no Tailscale peer list for other apps. LanDrop on a phone accepts
+connections that arrive on its own Tailscale tunnel address (`tun*` interface,
+100.64.0.0/10 source), checks back to the sender, and remembers up to 32 such
+devices for 90 days so they reconnect after restarts. Carrier-grade NAT addresses
+on the cellular interface are not trusted. The first contact comes from a desktop,
+which finds the phone through its Tailscale route.
+
+On Windows, **Settings → Tailscale → Allow** asks for administrator permission once
+and adds inbound rules for LanDrop only: TCP 29171 from the local subnet and
+100.64.0.0/10, and mDNS on the local subnet, on every network profile. Windows often
+classifies the Tailscale adapter as a public network, where the default first-run
+firewall prompt does not allow LanDrop.
+
 ## Requirements
 
 Both devices need the updated LanDrop running, a connected Tailscale client, and
@@ -67,7 +82,7 @@ delivery; this is not an offline messaging service.
 | Aggregated routes or IPv6-only discovery unavailable | This route shape does not expose IPv4 peer candidates. LanDrop does not expand aggregate ranges or fall back to control-API polling. |
 | Tailscale CLI unavailable | Confirm the desktop client is installed and its CLI can be found. On macOS, check the app bundle or Homebrew installation. |
 | Tailscale disconnected | Connect the existing Tailscale client, then rescan. |
-| Tailscale available but colleague absent | Confirm the colleague runs the updated LanDrop, not just Tailscale; check TCP 29171 policy/firewall access. |
+| Tailscale available but colleague absent | Confirm the colleague runs the updated LanDrop, not just Tailscale. On each Windows PC use **Settings → Tailscale → Allow**; check that the tailnet policy allows TCP 29171. |
 | Two computers on LAN are not discovered | Check multicast filtering, Wi-Fi client isolation, the host firewall, and whether both addresses lie in the currently supported local subnet. |
 | Remote file transfer is slow | Check the machines’ uplink speeds and `tailscale status` / `tailscale ping`; a relayed tunnel can be slower. |
 | File transfer fails after starting | Check disk space and connectivity. Retry deliberately; automatic mid-stream replay/resume is not implemented. |

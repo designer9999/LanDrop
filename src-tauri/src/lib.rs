@@ -221,6 +221,8 @@ pub fn run() {
             commands::open_file,
             commands::open_url,
             commands::open_chat_link,
+            commands::firewall_status,
+            commands::allow_through_firewall,
             commands::save_temp_for_send,
             commands::save_history_file,
             commands::delete_history_files,

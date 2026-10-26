@@ -55,9 +55,11 @@
     !insertmacro LandropSetToastActivator "$SMPROGRAMS\${PRODUCTNAME}.lnk"
   !endif
   ; Add inbound TCP rule for LanDrop
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="LanDrop TCP" dir=in action=allow program="$INSTDIR\landrop.exe" protocol=TCP localport=29171 profile=private enable=yes'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop (LAN and Tailscale)"'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="LanDrop (LAN and Tailscale)" dir=in action=allow program="$INSTDIR\landrop.exe" protocol=TCP localport=29171 remoteip=LocalSubnet,100.64.0.0/10 profile=any enable=yes'
   ; Add inbound UDP rule for mDNS discovery
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="LanDrop mDNS" dir=in action=allow program="$INSTDIR\landrop.exe" protocol=UDP localport=5353 profile=private enable=yes'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop discovery (LAN)"'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="LanDrop discovery (LAN)" dir=in action=allow program="$INSTDIR\landrop.exe" protocol=UDP localport=5353 remoteip=LocalSubnet profile=any enable=yes'
 !macroend
 
 ; Remove firewall rules on uninstall
@@ -68,6 +70,8 @@
     DeleteRegKey SHCTX "Software\Classes\landrop-notification"
   ${EndIf}
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop TCP" program="$INSTDIR\landrop.exe"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop (LAN and Tailscale)" program="$INSTDIR\landrop.exe"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop discovery (LAN)" program="$INSTDIR\landrop.exe"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop mDNS" program="$INSTDIR\landrop.exe"'
   ; Clean up the broad legacy rule used by releases before the rules were scoped.
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LanDrop" program="$INSTDIR\landrop.exe"'

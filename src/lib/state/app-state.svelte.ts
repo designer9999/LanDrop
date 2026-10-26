@@ -74,6 +74,20 @@ function draftIsEmpty(draft: Draft | undefined): boolean {
   return !draft || (!draft.text.trim() && draft.files.length === 0 && !draft.replyTo);
 }
 
+/**
+ * History saved by LanDrop 1.8 has no read markers; treat everything already
+ * stored as read instead of flooding the badge with old messages.
+ */
+function readUpToLatest(messages: MessageEntry[]): Record<string, string> {
+  const latest: Record<string, string> = {};
+  for (const message of messages) {
+    if (!latest[message.peerId] || message.timestamp > latest[message.peerId]) {
+      latest[message.peerId] = message.timestamp;
+    }
+  }
+  return latest;
+}
+
 export interface Conversation {
   device: DiscoveredDevice;
   last?: MessageEntry;
@@ -632,7 +646,10 @@ export class AppState {
     this.activeDeviceId = null;
     this.messageSearch = "";
     this.messages = messages;
-    this.lastReadAt = sanitizeLastRead(snapshot.lastReadAt);
+    this.lastReadAt =
+      snapshot.lastReadAt === undefined
+        ? readUpToLatest(messages)
+        : sanitizeLastRead(snapshot.lastReadAt);
     this.notificationsEnabled = snapshot.notificationsEnabled ?? true;
     this.popOnReceive = snapshot.popOnReceive ?? false;
     // outFolder/sortByDate are owned by the Rust backend; drop any stale

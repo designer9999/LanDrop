@@ -21,6 +21,10 @@
     openUrl,
     setDefaultOutFolder,
     setReceiveSortByDate,
+    firewallStatus,
+    allowThroughFirewall,
+    refreshLanDiscovery,
+    type FirewallStatus,
     type PlatformInfo,
   } from "$lib/api/bridge";
   import { playReceiveSound } from "$lib/utils/notification-sound";
@@ -63,6 +67,8 @@
   let deviceId = $state("");
   let aliasEditing = $state(false);
   let platform = $state<PlatformInfo | null>(null);
+  let firewall = $state<FirewallStatus | null>(null);
+  let firewallBusy = $state(false);
 
   import { onMount, tick } from "svelte";
   onMount(async () => {
@@ -74,7 +80,29 @@
     try {
       platform = await getPlatformInfo();
     } catch {}
+    try {
+      firewall = await firewallStatus();
+    } catch {}
   });
+
+  async function fixFirewall() {
+    firewallBusy = true;
+    try {
+      await allowThroughFirewall();
+      firewall = await firewallStatus();
+      onsnackbar?.("LanDrop is allowed on your network and Tailscale");
+      await refreshLanDiscovery().catch(() => {});
+    } catch (error) {
+      const message = String(error);
+      onsnackbar?.(
+        message === "cancelled"
+          ? "Windows permission was declined; nothing changed"
+          : `Couldn't update the firewall: ${message}`,
+      );
+    } finally {
+      firewallBusy = false;
+    }
+  }
 
   async function saveAlias() {
     const trimmed = deviceAlias.trim();
@@ -454,6 +482,54 @@
     <div class="text-xs text-on-surface-variant mt-2 opacity-60">
       Closing the window minimizes to system tray. Right-click the tray icon for options.
     </div>
+  </Card>
+
+  <!-- Tailscale -->
+  <Card variant="elevated">
+    <div class="flex items-center gap-2 text-on-surface text-sm font-medium">
+      <span class="text-primary"><Icon name="vpn_lock" size={20} /></span>
+      Tailscale
+    </div>
+    <div class="flex items-center gap-2 mt-3 text-sm">
+      <span
+        class="ts-dot"
+        class:ts-dot-on={app.tailscaleStatus?.state === "available"}
+        aria-hidden="true"
+      ></span>
+      <span class="text-on-surface">
+        {app.tailscaleStatus?.state === "available"
+          ? "Connected — colleagues on your tailnet appear automatically"
+          : (app.tailscaleStatus?.message ?? "Checking Tailscale…")}
+      </span>
+    </div>
+    <p class="text-xs text-on-surface-variant mt-2">
+      To chat from different internet connections, both computers need Tailscale connected to the
+      same tailnet and LanDrop open. A colleague who comes online appears within about two minutes —
+      or press Rescan.
+    </p>
+    {#if firewall?.supported}
+      <div class="flex items-center justify-between gap-3 mt-3 p-3 rounded-xl bg-surface-container">
+        <div class="min-w-0">
+          <div class="text-sm text-on-surface">
+            {firewall.configured
+              ? "Firewall allows LanDrop"
+              : "Allow LanDrop through Windows Firewall"}
+          </div>
+          <div class="text-xs text-on-surface-variant">
+            {firewall.configured
+              ? "Incoming messages from your LAN and Tailscale are allowed."
+              : "Windows often treats Tailscale as a public network and blocks incoming messages. Do this once on each PC."}
+          </div>
+        </div>
+        {#if !firewall.configured}
+          <Button onclick={fixFirewall} disabled={firewallBusy}>
+            {firewallBusy ? "Waiting…" : "Allow"}
+          </Button>
+        {:else}
+          <span class="text-primary"><Icon name="check_circle" size={22} /></span>
+        {/if}
+      </div>
+    {/if}
   </Card>
 
   <!-- Hotkeys -->
@@ -1032,5 +1108,15 @@
   }
   .debug-error .debug-text {
     color: var(--md-sys-color-error);
+  }
+  .ts-dot {
+    width: 10px;
+    height: 10px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--md-sys-color-outline);
+  }
+  .ts-dot-on {
+    background: #2e9e5b;
   }
 </style>

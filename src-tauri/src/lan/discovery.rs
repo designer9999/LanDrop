@@ -1183,6 +1183,11 @@ async fn run_tailnet_discovery(
             peer.observe_route(&ip);
             let peer = peer.clone();
             drop(peers);
+            // Keep confirmed tailnet devices for the next launch on phones.
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if let Ok(ip) = ip.parse() {
+                tailscale::mobile::remember(ip);
+            }
             let _ = handle.emit("lan_peer_discovered", peer);
         }
         if inventory_pending {
@@ -1321,8 +1326,20 @@ async fn handle_incoming_session(
         _ => false,
     };
     #[cfg(not(target_os = "windows"))]
-    let allowed_tailnet = match sender_addr.ip() {
-        IpAddr::V4(ip) => context.tailnet_ips.lock().await.contains(&ip),
+    let allowed_tailnet = match (stream.local_addr().map(|addr| addr.ip()), sender_addr.ip()) {
+        (Ok(IpAddr::V4(local)), IpAddr::V4(ip)) => {
+            let known = context.tailnet_ips.lock().await.contains(&ip);
+            // Phones (and desktops without the Tailscale CLI) have no peer list;
+            // a connection to our own tunnel address came through Tailscale.
+            let tunnel =
+                !known && tailscale::arrived_over_tunnel(local, ip, tailscale::local_tunnel_ipv4());
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if tunnel {
+                tailscale::mobile::remember(ip);
+            }
+            known || tunnel
+        }
+        (_, IpAddr::V4(ip)) => context.tailnet_ips.lock().await.contains(&ip),
         _ => false,
     };
     #[cfg(target_os = "windows")]
